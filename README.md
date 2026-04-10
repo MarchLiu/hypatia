@@ -188,6 +188,8 @@ Hypatia achieves **higher recall than vector-based retrieval** with **10-100x lo
 
 Full report: [docs/benchmark-report.md](docs/benchmark-report.md)
 
+**Honest assessment**: These results are on synthetic data with known-answer queries — not academic benchmarks. See [docs/benchmark-honest-assessment.md](docs/benchmark-honest-assessment.md) for a frank analysis of coverage gaps, overfitting risks, and comparison with MemPalace's methodology.
+
 ## Cross-Compilation
 
 ```bash
