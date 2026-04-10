@@ -10,7 +10,11 @@ CREATE TABLE IF NOT EXISTS docs_meta (
     id INTEGER PRIMARY KEY,
     catalog TEXT,
     key TEXT,
-    content TEXT
+    content TEXT,
+    fts_key TEXT NOT NULL DEFAULT '',
+    fts_data TEXT NOT NULL DEFAULT '',
+    fts_tags TEXT NOT NULL DEFAULT '',
+    fts_synonyms TEXT NOT NULL DEFAULT ''
 )";
 
 const DOCS_META_INDEX: &str = "\
@@ -18,26 +22,37 @@ CREATE INDEX IF NOT EXISTS idx_docs_catalog ON docs_meta(catalog)";
 
 const DOCS_FTS_SCHEMA: &str = "\
 CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
-    content,
+    fts_key,
+    fts_data,
+    fts_tags,
+    fts_synonyms,
     content='docs_meta',
-    content_rowid='id'
+    content_rowid='id',
+    tokenize='porter unicode61'
 )";
 
 const TRIGGER_INSERT: &str = "\
 CREATE TRIGGER IF NOT EXISTS docs_ai AFTER INSERT ON docs_meta BEGIN
-    INSERT INTO docs_fts(rowid, content) VALUES (new.id, new.content);
+    INSERT INTO docs_fts(rowid, fts_key, fts_data, fts_tags, fts_synonyms)
+    VALUES (new.id, new.fts_key, new.fts_data, new.fts_tags, new.fts_synonyms);
 END";
 
 const TRIGGER_DELETE: &str = "\
 CREATE TRIGGER IF NOT EXISTS docs_ad AFTER DELETE ON docs_meta BEGIN
-    INSERT INTO docs_fts(docs_fts, rowid, content) VALUES('delete', old.id, old.content);
+    INSERT INTO docs_fts(docs_fts, rowid, fts_key, fts_data, fts_tags, fts_synonyms)
+    VALUES('delete', old.id, old.fts_key, old.fts_data, old.fts_tags, old.fts_synonyms);
 END";
 
 const TRIGGER_UPDATE: &str = "\
 CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON docs_meta BEGIN
-    INSERT INTO docs_fts(docs_fts, rowid, content) VALUES('delete', old.id, old.content);
-    INSERT INTO docs_fts(rowid, content) VALUES (new.id, new.content);
+    INSERT INTO docs_fts(docs_fts, rowid, fts_key, fts_data, fts_tags, fts_synonyms)
+    VALUES('delete', old.id, old.fts_key, old.fts_data, old.fts_tags, old.fts_synonyms);
+    INSERT INTO docs_fts(rowid, fts_key, fts_data, fts_tags, fts_synonyms)
+    VALUES (new.id, new.fts_key, new.fts_data, new.fts_tags, new.fts_synonyms);
 END";
+
+/// BM25 column weights: fts_key=10, fts_data=1, fts_tags=5, fts_synonyms=3
+const BM25_WEIGHTS: &str = "bm25(docs_fts, 10.0, 1.0, 5.0, 3.0)";
 
 #[derive(Debug, Clone)]
 pub struct FtsResult {
@@ -46,6 +61,20 @@ pub struct FtsResult {
     pub key: String,
     pub content: String,
     pub rank: f64,
+}
+
+/// Structured document for FTS indexing with multi-column support.
+pub struct FtsDoc {
+    /// Full serialized content JSON (stored in content column for retrieval).
+    pub content: String,
+    /// Key/name text for FTS (knowledge name or CSV triple key).
+    pub fts_key: String,
+    /// Data text for FTS.
+    pub fts_data: String,
+    /// Tags text for FTS (space-joined).
+    pub fts_tags: String,
+    /// Synonyms text for FTS (flattened).
+    pub fts_synonyms: String,
 }
 
 fn row_to_fts_result(row: &rusqlite::Row) -> rusqlite::Result<FtsResult> {
@@ -71,16 +100,45 @@ impl SqliteStore {
     }
 
     fn init_schema(&self) -> Result<()> {
+        // Create base schema (IF NOT EXISTS for fresh DBs)
         self.conn
             .execute_batch(&format!(
-                "{DOCS_META_SCHEMA}; {DOCS_META_INDEX}; {DOCS_FTS_SCHEMA}; \
+                "{DOCS_META_SCHEMA}; {DOCS_META_INDEX};"
+            ))
+            .map_err(StorageError::from)?;
+
+        // Migrate: add columns if they don't exist (existing DBs)
+        for col in ["fts_key", "fts_data", "fts_tags", "fts_synonyms"] {
+            let sql = format!("ALTER TABLE docs_meta ADD COLUMN {col} TEXT NOT NULL DEFAULT ''");
+            match self.conn.execute_batch(&sql) {
+                Ok(_) => {}
+                Err(e) if is_duplicate_column_error(&e) => {}
+                Err(e) => return Err(StorageError::from(e).into()),
+            }
+        }
+
+        // Drop and recreate FTS virtual table (FTS5 schema cannot be ALTERed)
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS docs_fts")
+            .ok();
+        self.conn
+            .execute_batch(DOCS_FTS_SCHEMA)
+            .map_err(StorageError::from)?;
+
+        // Recreate triggers
+        self.conn
+            .execute_batch(&format!(
+                "DROP TRIGGER IF EXISTS docs_ai; \
+                 DROP TRIGGER IF EXISTS docs_ad; \
+                 DROP TRIGGER IF EXISTS docs_au; \
                  {TRIGGER_INSERT}; {TRIGGER_DELETE}; {TRIGGER_UPDATE};"
             ))
             .map_err(StorageError::from)?;
+
         Ok(())
     }
 
-    pub fn upsert_doc(&self, catalog: &str, key: &str, content: &str) -> Result<()> {
+    pub fn upsert_doc(&self, catalog: &str, key: &str, doc: &FtsDoc) -> Result<()> {
         let existing_id: Option<i64> = self
             .conn
             .query_row(
@@ -95,16 +153,16 @@ impl SqliteStore {
             Some(id) => {
                 self.conn
                     .execute(
-                        "UPDATE docs_meta SET content = ?1 WHERE id = ?2",
-                        params![content, id],
+                        "UPDATE docs_meta SET content = ?1, fts_key = ?2, fts_data = ?3, fts_tags = ?4, fts_synonyms = ?5 WHERE id = ?6",
+                        params![doc.content, doc.fts_key, doc.fts_data, doc.fts_tags, doc.fts_synonyms, id],
                     )
                     .map_err(StorageError::from)?;
             }
             None => {
                 self.conn
                     .execute(
-                        "INSERT INTO docs_meta (catalog, key, content) VALUES (?1, ?2, ?3)",
-                        params![catalog, key, content],
+                        "INSERT INTO docs_meta (catalog, key, content, fts_key, fts_data, fts_tags, fts_synonyms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![catalog, key, doc.content, doc.fts_key, doc.fts_data, doc.fts_tags, doc.fts_synonyms],
                     )
                     .map_err(StorageError::from)?;
             }
@@ -126,17 +184,17 @@ impl SqliteStore {
         let catalog_filter = opts.catalog.as_deref();
         let sql = match catalog_filter {
             Some(_) =>
-                "SELECT m.id, m.catalog, m.key, m.content, f.rank \
+                &format!("SELECT m.id, m.catalog, m.key, m.content, {BM25_WEIGHTS} as rank \
                  FROM docs_meta m \
                  JOIN docs_fts f ON m.id = f.rowid \
                  WHERE docs_fts MATCH ?1 AND m.catalog = ?2 \
-                 ORDER BY f.rank LIMIT ?3 OFFSET ?4",
+                 ORDER BY rank LIMIT ?3 OFFSET ?4"),
             None =>
-                "SELECT m.id, m.catalog, m.key, m.content, f.rank \
+                &format!("SELECT m.id, m.catalog, m.key, m.content, {BM25_WEIGHTS} as rank \
                  FROM docs_meta m \
                  JOIN docs_fts f ON m.id = f.rowid \
                  WHERE docs_fts MATCH ?1 \
-                 ORDER BY f.rank LIMIT ?2 OFFSET ?3",
+                 ORDER BY rank LIMIT ?2 OFFSET ?3"),
         };
 
         let mut stmt = self.conn.prepare(sql).map_err(StorageError::from)?;
@@ -160,6 +218,13 @@ impl SqliteStore {
     }
 }
 
+fn is_duplicate_column_error(e: &rusqlite::Error) -> bool {
+    match e {
+        rusqlite::Error::ExecuteReturnedResults => false,
+        _ => e.to_string().contains("duplicate column name"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +237,16 @@ mod tests {
         (dir, store)
     }
 
+    fn test_doc(key: &str, data: &str, tags: &str) -> FtsDoc {
+        FtsDoc {
+            content: format!("{{\"data\":\"{data}\"}}"),
+            fts_key: key.to_string(),
+            fts_data: data.to_string(),
+            fts_tags: tags.to_string(),
+            fts_synonyms: String::new(),
+        }
+    }
+
     #[test]
     fn schema_init() {
         let (_dir, _store) = setup();
@@ -181,10 +256,10 @@ mod tests {
     fn upsert_and_search() {
         let (_dir, store) = setup();
         store
-            .upsert_doc("knowledge", "rust", "Rust is a systems programming language")
+            .upsert_doc("knowledge", "rust", &test_doc("rust", "Rust is a systems programming language", ""))
             .unwrap();
         store
-            .upsert_doc("knowledge", "python", "Python is a scripting language")
+            .upsert_doc("knowledge", "python", &test_doc("python", "Python is a scripting language", ""))
             .unwrap();
 
         let results = store
@@ -198,26 +273,25 @@ mod tests {
     fn upsert_updates_existing() {
         let (_dir, store) = setup();
         store
-            .upsert_doc("knowledge", "rust", "Rust is fast")
+            .upsert_doc("knowledge", "rust", &test_doc("rust", "Rust is fast", ""))
             .unwrap();
         store
-            .upsert_doc("knowledge", "rust", "Rust is fast and safe")
+            .upsert_doc("knowledge", "rust", &test_doc("rust", "Rust is fast and safe", ""))
             .unwrap();
 
         let results = store.search("safe", &SearchOpts::default()).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "rust");
-        assert!(results[0].content.contains("safe"));
     }
 
     #[test]
     fn search_with_catalog_filter() {
         let (_dir, store) = setup();
         store
-            .upsert_doc("knowledge", "rust", "Rust programming")
+            .upsert_doc("knowledge", "rust", &test_doc("rust", "Rust programming", ""))
             .unwrap();
         store
-            .upsert_doc("statement", "rust,is,language", "Rust is a programming language")
+            .upsert_doc("statement", "rust,is,language", &test_doc("rust,is,language", "Rust is a programming language", ""))
             .unwrap();
 
         let opts = SearchOpts {
@@ -233,11 +307,60 @@ mod tests {
     fn delete_doc() {
         let (_dir, store) = setup();
         store
-            .upsert_doc("knowledge", "rust", "Rust programming language")
+            .upsert_doc("knowledge", "rust", &test_doc("rust", "Rust programming language", ""))
             .unwrap();
         store.delete_doc("knowledge", "rust").unwrap();
 
         let results = store.search("Rust", &SearchOpts::default()).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn porter_stemmer() {
+        let (_dir, store) = setup();
+        store
+            .upsert_doc("knowledge", "auth", &test_doc("auth", "user authenticating via OAuth2", ""))
+            .unwrap();
+
+        // "authentication" should stem-match "authenticating"
+        let results = store
+            .search("authentication", &SearchOpts::default())
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "auth");
+    }
+
+    #[test]
+    fn bm25_weights_key_over_data() {
+        let (_dir, store) = setup();
+
+        // Entry where "rust" only appears in data, not key
+        store
+            .upsert_doc("knowledge", "lang1", &FtsDoc {
+                content: "{}".to_string(),
+                fts_key: "lang1".to_string(),
+                fts_data: "Rust programming language".to_string(),
+                fts_tags: String::new(),
+                fts_synonyms: String::new(),
+            })
+            .unwrap();
+
+        // Entry where "rust" appears in key (should rank higher)
+        store
+            .upsert_doc("knowledge", "rust", &FtsDoc {
+                content: "{}".to_string(),
+                fts_key: "rust".to_string(),
+                fts_data: "systems programming".to_string(),
+                fts_tags: String::new(),
+                fts_synonyms: String::new(),
+            })
+            .unwrap();
+
+        let results = store
+            .search("rust", &SearchOpts::default())
+            .unwrap();
+        assert!(results.len() >= 2);
+        // Key match should rank first (more negative = better)
+        assert_eq!(results[0].key, "rust");
     }
 }

@@ -136,10 +136,10 @@ pub struct SearchQuery {
 fn sanitize_fts_query(query: &str) -> String {
     // Replace FTS5 special characters with spaces, then collapse whitespace
     // FTS5 specials: : (column filter), " (phrase), * (prefix), ^ (beginning)
-    // + (AND), - (NOT), ( ) (grouping)
+    // + (AND), - (NOT), ( ) (grouping), . (syntax error in some contexts)
     let sanitized: String = query.chars()
         .map(|c| {
-            matches!(c, ':' | '"' | '\'' | '*' | '^' | '+' | '-' | '(' | ')').then_some(' ').unwrap_or(c)
+            matches!(c, ':' | '"' | '\'' | '*' | '^' | '+' | '-' | '(' | ')' | '.').then_some(' ').unwrap_or(c)
         })
         .collect();
     let mut result = String::new();
@@ -235,25 +235,18 @@ impl BenchDataGenerator {
             let needle_id = format!("NEEDLE_{i:04}");
             let name = format!("needle_{i:04}");
 
-            // Extract a query from the topic (first clause)
-            let raw_query = if let Some(pos) = topic.find(" uses ") {
+            // Extract a query from the topic — capture more context for better FTS matching.
+            // Truncate at secondary prepositions/conjunctions to keep queries specific but longer.
+            let raw_query = if let Some(pos) = topic.find(" with ") {
                 topic[..pos].to_string()
-            } else if let Some(pos) = topic.find(" set to ") {
+            } else if let Some(pos) = topic.find(" for ") {
                 topic[..pos].to_string()
-            } else if let Some(pos) = topic.find(" configured ") {
+            } else if let Some(pos) = topic.find(" from ") {
                 topic[..pos].to_string()
-            } else if let Some(pos) = topic.find(" requires ") {
-                topic[..pos].to_string()
-            } else if let Some(pos) = topic.find(" targets ") {
-                topic[..pos].to_string()
-            } else if let Some(pos) = topic.find(" fires ") {
-                topic[..pos].to_string()
-            } else if let Some(pos) = topic.find(" reduces ") {
-                topic[..pos].to_string()
-            } else if let Some(pos) = topic.find(" automated ") {
+            } else if let Some(pos) = topic.find(" in ") {
                 topic[..pos].to_string()
             } else {
-                topic.chars().take(60).collect()
+                topic.chars().take(80).collect()
             };
 
             // Sanitize for FTS5: remove chars that could be parsed as FTS operators

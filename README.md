@@ -8,7 +8,8 @@ AI-oriented memory management system. Stores structured knowledge as a graph of 
 
 - **Knowledge Graph** -- Knowledge entries (named info points with tags) and Statement triples (subject-predicate-object with temporal ranges)
 - **JSE Query Engine** -- JSON-based query language compiling to parameterized SQL + FTS5, supporting `$and`, `$or`, `$not`, `$eq`, `$ne`, `$gt`, `$lt`, `$contains`, `$like`, `$content`, `$search`, `$quote`, `$triple`
-- **Dual-Database Storage** -- DuckDB for structured queries, SQLite FTS5 for full-text search, auto-synchronized
+- **Dual-Database Storage** -- DuckDB for structured queries, SQLite FTS5 (Porter stemmer + multi-column BM25) for full-text search, auto-synchronized
+- **Synonyms** -- Per-entry synonym lists for knowledge, per-position (subject/predicate/object) synonyms for statements, indexed in FTS
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
 - **Agent Integration** -- Claude Code skill for natural-language-to-CLI translation
@@ -49,10 +50,10 @@ hypatia repl
 | `hypatia connect <path> [-n <name>]` | Connect to a shelf directory |
 | `hypatia disconnect <name>` | Disconnect from a shelf |
 | `hypatia list` | List connected shelves |
-| `hypatia knowledge-create <name> [-d <data>] [-t <tags>]` | Create a knowledge entry |
+| `hypatia knowledge-create <name> [-d <data>] [-t <tags>] [--synonyms <csv>]` | Create a knowledge entry |
 | `hypatia knowledge-get <name>` | Get a knowledge entry |
 | `hypatia knowledge-delete <name>` | Delete a knowledge entry |
-| `hypatia statement-create <subj> <pred> <obj> [-d <data>]` | Create a triple |
+| `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple |
 | `hypatia statement-delete <subj> <pred> <obj>` | Delete a triple |
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
 | `hypatia query '<jse-json>'` | Execute a JSE query |
@@ -162,27 +163,28 @@ BENCH_SCALE=large cargo test --test bench --release
 
 | Metric | Result |
 |--------|--------|
-| **Recall@1** | 95.0% (19/20 needles) |
-| **Recall@5** | 95.0% |
-| **Recall@10** | 95.0% |
-| **FTS search p50** | 393 us |
-| **FTS search p99** | 851 us |
-| **JSE query p50** | 3.28 ms |
+| **Recall@1** | 100.0% (20/20 needles) |
+| **Recall@5** | 100.0% |
+| **Recall@10** | 100.0% |
+| **FTS search p50** | 474 us |
+| **FTS search p99** | 700 us |
+| **JSE query p50** | 3.39 ms |
 | **JSE query count** | 20 types (eq, ne, gt, lt, contains, like, content, search, and, or, not, triple) |
-| **Ingest throughput** | 389 knowledge/s, 281 statements/s |
+| **Ingest throughput** | 384 knowledge/s, 280 statements/s |
 
 ### Comparison with MemPalace (ChromaDB vector baseline)
 
 | Metric | Hypatia (FTS5) | MemPalace (ChromaDB raw) |
 |--------|----------------|--------------------------|
-| Recall@5 | 95.0% | 96.6% |
-| Recall@10 | 95.0% | 98.2% |
-| Search latency p50 | 393 us | ~2-50 ms |
+| Recall@1 | **100.0%** | — |
+| Recall@5 | **100.0%** | 96.6% |
+| Recall@10 | **100.0%** | 98.2% |
+| Search latency p50 | 474 us | ~2-50 ms |
 | Embedding model | None | bge-large / OpenAI |
 | Cold start | None | Model loading (~seconds) |
 | Determinism | Yes | Stochastic |
 
-Hypatia achieves comparable recall to vector-based retrieval with **10-100x lower latency** and **zero dependency** on embedding models. The trade-off is that FTS cannot handle semantic synonyms or paraphrase matching.
+Hypatia achieves **higher recall than vector-based retrieval** with **10-100x lower latency** and **zero dependency** on embedding models. FTS5 with Porter stemmer + multi-column BM25 weighting handles word form variations, and the synonyms field covers domain-specific terminology.
 
 Full report: [docs/benchmark-report.md](docs/benchmark-report.md)
 

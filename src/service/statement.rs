@@ -2,7 +2,7 @@ use chrono::NaiveDateTime;
 
 use crate::error::Result;
 use crate::model::{Content, Statement, StatementKey};
-use crate::storage::OpenShelf;
+use crate::storage::{FtsDoc, OpenShelf};
 
 pub struct StatementService<'a> {
     shelf: &'a mut OpenShelf,
@@ -11,6 +11,17 @@ pub struct StatementService<'a> {
 impl<'a> StatementService<'a> {
     pub fn new(shelf: &'a mut OpenShelf) -> Self {
         Self { shelf }
+    }
+
+    fn build_fts_doc(content: &Content, csv_key: &str) -> FtsDoc {
+        let fields = content.fts_fields(csv_key);
+        FtsDoc {
+            content: content.to_json_string(),
+            fts_key: fields.key,
+            fts_data: fields.data,
+            fts_tags: fields.tags,
+            fts_synonyms: fields.synonyms,
+        }
     }
 
     pub fn create(
@@ -24,8 +35,8 @@ impl<'a> StatementService<'a> {
 
         // Insert into FTS with CSV-formatted key
         let csv_key = key.to_csv_key();
-        let fts_content = content.fts_content(&key.to_csv_key());
-        self.shelf.sqlite.upsert_doc("statement", &csv_key, &fts_content)?;
+        let doc = Self::build_fts_doc(&content, &csv_key);
+        self.shelf.sqlite.upsert_doc("statement", &csv_key, &doc)?;
 
         let statement = self.shelf.duckdb.get_statement(key)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
@@ -51,8 +62,8 @@ impl<'a> StatementService<'a> {
 
         // Update FTS
         let csv_key = key.to_csv_key();
-        let fts_content = content.fts_content(&key.to_csv_key());
-        self.shelf.sqlite.upsert_doc("statement", &csv_key, &fts_content)?;
+        let doc = Self::build_fts_doc(&content, &csv_key);
+        self.shelf.sqlite.upsert_doc("statement", &csv_key, &doc)?;
 
         let statement = self.shelf.duckdb.get_statement(key)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::lab::Lab;
-use crate::model::{Content, QueryResult, SearchOpts, StatementKey};
+use crate::model::{Content, QueryResult, SearchOpts, StatementKey, Synonyms};
 
 #[derive(Parser)]
 #[command(name = "hypatia", about = "AI-oriented memory management", version)]
@@ -45,6 +45,9 @@ enum Commands {
         /// Tags (comma-separated)
         #[arg(short, long, default_value = "")]
         tags: String,
+        /// Synonyms (comma-separated)
+        #[arg(short, long, default_value = "")]
+        synonyms: String,
         /// Shelf name
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -77,6 +80,9 @@ enum Commands {
         /// Content data
         #[arg(short, long, default_value = "")]
         data: String,
+        /// Synonyms as JSON: {"subject":["Bob"],"predicate":["leads"],"object":["DB"]}
+        #[arg(short, long)]
+        synonyms: Option<String>,
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
@@ -140,13 +146,22 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let result = lab.query(&shelf, &json)?;
             print_result(&result);
         }
-        Commands::KnowledgeCreate { name, data, tags, shelf } => {
+        Commands::KnowledgeCreate { name, data, tags, synonyms, shelf } => {
             let tags_vec: Vec<String> = if tags.is_empty() {
                 Vec::new()
             } else {
                 tags.split(',').map(|s| s.trim().to_string()).collect()
             };
-            let content = Content::new(&data).with_tags(tags_vec);
+            let syn = if synonyms.is_empty() {
+                None
+            } else {
+                let list: Vec<String> = synonyms.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if list.is_empty() { None } else { Some(Synonyms::Flat(list)) }
+            };
+            let content = Content::new(&data).with_tags(tags_vec).with_synonyms(syn);
             let k = lab.create_knowledge(&shelf, &name, content)?;
             println!("Created knowledge: {}", k.name);
         }
@@ -172,9 +187,20 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             lab.delete_statement(&shelf, &key)?;
             println!("Deleted statement: ({}, {}, {})", subject, predicate, object);
         }
-        Commands::StatementCreate { subject, predicate, object, data, shelf } => {
+        Commands::StatementCreate { subject, predicate, object, data, synonyms, shelf } => {
             let key = StatementKey::new(&subject, &predicate, &object);
-            let content = Content::new(&data);
+            let syn = match synonyms {
+                Some(ref json_str) => {
+                    let map: std::collections::HashMap<String, Vec<String>> =
+                        serde_json::from_str(json_str)
+                        .map_err(|e| crate::error::HypatiaError::Parse(
+                            format!("invalid synonyms JSON: {e}")
+                        ))?;
+                    Some(Synonyms::Positional(map))
+                }
+                None => None,
+            };
+            let content = Content::new(&data).with_synonyms(syn);
             let s = lab.create_statement(&shelf, &key, content, None, None)?;
             println!("Created statement: ({}, {}, {})", s.key.subject, s.key.predicate, s.key.object);
         }

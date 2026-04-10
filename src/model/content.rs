@@ -1,10 +1,34 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+/// Synonyms for FTS indexing.
+///
+/// - Knowledge entries use `Flat(Vec<String>)`: a simple list of synonym strings.
+/// - Statement entries use `Positional(HashMap)`: keys are "subject", "predicate", "object",
+///   values are synonym lists for each triple position.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum Synonyms {
+    Flat(Vec<String>),
+    Positional(HashMap<String, Vec<String>>),
+}
+
+/// Decomposed fields for multi-column FTS indexing.
+pub struct FtsFields {
+    pub key: String,
+    pub data: String,
+    pub tags: String,
+    pub synonyms: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Content {
     pub format: Format,
     pub data: String,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub synonyms: Option<Synonyms>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -21,6 +45,7 @@ impl Default for Content {
             format: Format::Markdown,
             data: String::new(),
             tags: Vec::new(),
+            synonyms: None,
         }
     }
 }
@@ -43,6 +68,11 @@ impl Content {
         self
     }
 
+    pub fn with_synonyms(mut self, synonyms: Option<Synonyms>) -> Self {
+        self.synonyms = synonyms;
+        self
+    }
+
     pub fn to_json_string(&self) -> String {
         serde_json::to_string(self).expect("Content serialization should not fail")
     }
@@ -51,13 +81,24 @@ impl Content {
         serde_json::from_str(s)
     }
 
-    /// Build the text content for FTS indexing: name + serialized content.
-    pub fn fts_content(&self, name: &str) -> String {
-        let mut parts = vec![name.to_string(), self.data.clone()];
-        for tag in &self.tags {
-            parts.push(tag.clone());
+    /// Build decomposed fields for multi-column FTS indexing.
+    pub fn fts_fields(&self, name: &str) -> FtsFields {
+        let synonyms_text = match &self.synonyms {
+            Some(Synonyms::Flat(list)) => list.join(" "),
+            Some(Synonyms::Positional(map)) => map
+                .values()
+                .flat_map(|v| v.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" "),
+            None => String::new(),
+        };
+        FtsFields {
+            key: name.to_string(),
+            data: self.data.clone(),
+            tags: self.tags.join(" "),
+            synonyms: synonyms_text,
         }
-        parts.join(" ")
     }
 }
 
@@ -71,6 +112,7 @@ mod tests {
         assert_eq!(c.format, Format::Markdown);
         assert!(c.data.is_empty());
         assert!(c.tags.is_empty());
+        assert!(c.synonyms.is_none());
     }
 
     #[test]
@@ -84,12 +126,56 @@ mod tests {
     }
 
     #[test]
-    fn fts_content_includes_name_data_tags() {
-        let c = Content::new("some data").with_tags(vec!["tag1".to_string(), "tag2".to_string()]);
-        let fts = c.fts_content("my-knowledge");
-        assert!(fts.contains("my-knowledge"));
-        assert!(fts.contains("some data"));
-        assert!(fts.contains("tag1"));
-        assert!(fts.contains("tag2"));
+    fn backward_compat_no_synonyms() {
+        let json = r#"{"format":"markdown","data":"hello","tags":[]}"#;
+        let c = Content::from_json_str(json).unwrap();
+        assert_eq!(c.data, "hello");
+        assert!(c.synonyms.is_none());
+    }
+
+    #[test]
+    fn synonyms_flat_roundtrip() {
+        let c = Content::new("data").with_synonyms(Some(Synonyms::Flat(vec![
+            "DB".to_string(),
+            "database".to_string(),
+        ])));
+        let json = c.to_json_string();
+        let c2 = Content::from_json_str(&json).unwrap();
+        assert_eq!(c, c2);
+    }
+
+    #[test]
+    fn synonyms_positional_roundtrip() {
+        let mut map = HashMap::new();
+        map.insert("subject".to_string(), vec!["Alice A.".to_string()]);
+        map.insert("predicate".to_string(), vec!["leads".to_string(), "manages".to_string()]);
+        let c = Content::new("data").with_synonyms(Some(Synonyms::Positional(map)));
+        let json = c.to_json_string();
+        let c2 = Content::from_json_str(&json).unwrap();
+        assert_eq!(c, c2);
+    }
+
+    #[test]
+    fn fts_fields_includes_all() {
+        let c = Content::new("some data")
+            .with_tags(vec!["tag1".to_string(), "tag2".to_string()])
+            .with_synonyms(Some(Synonyms::Flat(vec!["syn1".to_string()])));
+        let f = c.fts_fields("my-knowledge");
+        assert_eq!(f.key, "my-knowledge");
+        assert_eq!(f.data, "some data");
+        assert_eq!(f.tags, "tag1 tag2");
+        assert_eq!(f.synonyms, "syn1");
+    }
+
+    #[test]
+    fn fts_fields_positional_synonyms() {
+        let mut map = HashMap::new();
+        map.insert("subject".to_string(), vec!["Bob".to_string(), "Robert".to_string()]);
+        map.insert("object".to_string(), vec!["DB".to_string()]);
+        let c = Content::new("data").with_synonyms(Some(Synonyms::Positional(map)));
+        let f = c.fts_fields("triple_key");
+        assert!(f.synonyms.contains("Bob"));
+        assert!(f.synonyms.contains("Robert"));
+        assert!(f.synonyms.contains("DB"));
     }
 }
