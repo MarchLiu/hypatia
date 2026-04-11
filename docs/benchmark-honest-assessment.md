@@ -27,6 +27,26 @@
 
 Hypatia 只覆盖了 MemPalace 内部基准（`PalaceDataGenerator` 合成测试）的对应物，完全没有触及任何学术基准。
 
+## 2.1 LoCoMo 学术基准结果 (2026-04-11)
+
+首次在真实学术基准 LoCoMo 上评测。
+
+| 配置 | 数据规模 | 查询数 |
+|------|---------|--------|
+| 10 个多会话对话 | ~6,672 knowledge entries | 1,540 (排除 adversarial) |
+
+| Category | N | R@1 | R@5 | R@10 | F1 |
+|----------|---|-----|-----|------|-----|
+| Single-hop (Cat 4) | 841 | 0.1% | 0.1% | 0.1% | 0.001 |
+| Multi-hop (Cat 1) | 282 | 0.4% | 0.4% | 0.4% | 0.001 |
+| Temporal (Cat 2) | 321 | 0.0% | 0.0% | 0.0% | 0.000 |
+| Open-domain (Cat 3) | 96 | 1.0% | 1.0% | 1.0% | 0.000 |
+| **OVERALL** | **1,540** | **0.2%** | **0.2%** | **0.2%** | **0.001** |
+
+对比 MemPalace：Raw ChromaDB R@10 = 60.3%，Hybrid v5 R@10 = 88.9%。
+
+**结论**：Hypatia 的 FTS 在自然语言问答场景下几乎完全失效。核心原因是 FTS 无法桥接词汇鸿沟（lexical gap）——问题 "When did Caroline go to the LGBTQ support group?" 与原文 "I went to a LGBTQ support group yesterday" 之间没有精确/词干匹配。
+
 ## 3. 过拟合分析
 
 ### 3.1 查询提取对测试数据的直接拟合

@@ -190,6 +190,17 @@ Full report: [docs/benchmark-report.md](docs/benchmark-report.md)
 
 **Honest assessment**: These results are on synthetic data with known-answer queries — not academic benchmarks. See [docs/benchmark-honest-assessment.md](docs/benchmark-honest-assessment.md) for a frank analysis of coverage gaps, overfitting risks, and comparison with MemPalace's methodology.
 
+### LoCoMo Academic Benchmark
+
+Hypatia's FTS operator was tested on the LoCoMo long-term conversational memory benchmark (ACL 2024). FTS recall is near zero on natural language QA — this is expected, as Hypatia's core is graph-based structured querying, not semantic search. FTS is one operator in the JSE engine, not the system's primary retrieval mechanism.
+
+| Strategy | R@10 | Reference (MemPalace) |
+|----------|------|-----------------------|
+| Turn-level FTS | 0.2% | Raw ChromaDB: 60.3% |
+| Session-level FTS | 16.5% | Hybrid v5: 88.9% |
+
+Full report: [docs/locomo-coverage.md](docs/locomo-coverage.md)
+
 ## Cross-Compilation
 
 ```bash
@@ -215,4 +226,4 @@ Supported targets: x86_64/aarch64/armv7 Linux (glibc + musl), riscv64, s390x, po
 
 ## License
 
-Private project. All rights reserved.
+MIT
