@@ -30,4 +30,14 @@ pub trait Storage {
         opts: &SearchOpts,
         target: QueryTarget,
     ) -> Result<QueryResult>;
+
+    /// Execute a k-hop forward graph traversal starting from `subject`,
+    /// following edges with the given predicate (or any predicate if None),
+    /// up to `depth` hops. Returns matching statement triples.
+    fn execute_khop(
+        &self,
+        subject: &str,
+        predicate: Option<&str>,
+        depth: i64,
+    ) -> Result<QueryResult>;
 }

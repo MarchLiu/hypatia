@@ -17,6 +17,12 @@ pub enum OperatorResult {
     VectorQuery {
         query_text: String,
     },
+    /// A k-hop forward graph traversal query on the statement graph.
+    KHop {
+        subject: String,
+        predicate: Option<String>,
+        depth: i64,
+    },
     /// A literal value (from $quote or non-operator expressions).
     Value(serde_json::Value),
 }
@@ -223,6 +229,60 @@ pub fn evaluate_operator(
             Ok(OperatorResult::VectorQuery {
                 query_text: query_str,
             })
+        }
+        "$k-hop" => {
+            if operands.len() != 3 {
+                return Err(HypatiaError::Eval(
+                    "$k-hop expects exactly 3 arguments (subject, predicate, depth)".to_string(),
+                ));
+            }
+            // Arg 1: subject (required string)
+            let subject_val = expect_literal(&operands[0])?;
+            let subject = match &subject_val {
+                serde_json::Value::String(s) => s.clone(),
+                _ => {
+                    return Err(HypatiaError::Eval(
+                        "$k-hop subject must be a string".to_string(),
+                    ));
+                }
+            };
+            // Arg 2: predicate (string or "$*" for any)
+            let predicate = match &operands[1] {
+                AstNode::Symbol(s) if s == "$*" => None,
+                AstNode::Literal(serde_json::Value::String(s)) if s == "$*" => None,
+                other => {
+                    let val = expect_literal(other)?;
+                    match val {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => {
+                            return Err(HypatiaError::Eval(
+                                "$k-hop predicate must be a string or $*".to_string(),
+                            ));
+                        }
+                    }
+                }
+            };
+            // Arg 3: depth (positive integer)
+            let depth_val = expect_literal(&operands[2])?;
+            let depth = match &depth_val {
+                serde_json::Value::Number(n) => {
+                    let d = n.as_i64().ok_or_else(|| HypatiaError::Eval(
+                        "$k-hop depth must be an integer".to_string(),
+                    ))?;
+                    if d <= 0 {
+                        return Err(HypatiaError::Eval(
+                            "$k-hop depth must be a positive integer".to_string(),
+                        ));
+                    }
+                    d
+                }
+                _ => {
+                    return Err(HypatiaError::Eval(
+                        "$k-hop depth must be a positive integer".to_string(),
+                    ));
+                }
+            };
+            Ok(OperatorResult::KHop { subject, predicate, depth })
         }
         "$quote" => {
             if operands.len() != 1 {

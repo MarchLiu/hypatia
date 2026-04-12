@@ -7,7 +7,7 @@ use super::ast::AstNode;
 const OPERATORS: &[&str] = &[
     "$knowledge", "$statement",
     "$and", "$or", "$not",
-    "$search", "$similar",
+    "$search", "$similar", "$k-hop",
     "$gte", "$lte", "$gt", "$lt",
     "$eq", "$ne",
     "$like", "$contains", "$content",

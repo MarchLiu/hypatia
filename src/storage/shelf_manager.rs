@@ -101,6 +101,17 @@ impl Storage for OpenShelf {
         };
         Ok(QueryResult::new(rows))
     }
+
+    fn execute_khop(
+        &self,
+        subject: &str,
+        predicate: Option<&str>,
+        depth: i64,
+    ) -> Result<QueryResult> {
+        let statements = self.duckdb.query_khop(subject, predicate, depth)?;
+        let rows = statements.into_iter().map(|s| statement_to_row(&s)).collect();
+        Ok(QueryResult::new(rows))
+    }
 }
 
 fn knowledge_to_row(k: &crate::model::Knowledge) -> serde_json::Map<String, serde_json::Value> {

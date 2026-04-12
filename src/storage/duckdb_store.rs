@@ -502,9 +502,91 @@ impl DuckDbStore {
         }
         Ok(result)
     }
+
+    // --- K-hop graph traversal ---
+
+    /// Execute a k-hop forward graph traversal using a recursive CTE.
+    /// Starting from `subject`, follows `subject → object` edges up to `depth` hops.
+    /// If `predicate` is Some, only edges matching that predicate are followed.
+    /// Returns matching statements ordered by hop distance.
+    pub fn query_khop(
+        &self,
+        subject: &str,
+        predicate: Option<&str>,
+        depth: i64,
+    ) -> Result<Vec<Statement>> {
+        let (anchor_pred, recursive_pred, mut sql_params) = match predicate {
+            Some(p) => (
+                "AND predicate = ?".to_string(),
+                "AND s.predicate = ?".to_string(),
+                {
+                    let mut v = Vec::new();
+                    v.push(subject.to_string());
+                    v.push(p.to_string());
+                    v
+                },
+            ),
+            None => (String::new(), String::new(), vec![subject.to_string()]),
+        };
+        sql_params.push(depth.to_string());
+        if let Some(p) = predicate {
+            sql_params.push(p.to_string());
+        }
+
+        let sql = format!(
+            "WITH RECURSIVE hop AS (\
+               SELECT triple, subject, predicate, object, content, \
+                      CAST(created_at AS VARCHAR) AS created_at, \
+                      CAST(tr_start AS VARCHAR) AS tr_start, \
+                      CAST(tr_end AS VARCHAR) AS tr_end, \
+                      1 AS depth \
+               FROM statement WHERE subject = ? {anchor_pred} \
+               UNION ALL \
+               SELECT s.triple, s.subject, s.predicate, s.object, s.content, \
+                      CAST(s.created_at AS VARCHAR), CAST(s.tr_start AS VARCHAR), CAST(s.tr_end AS VARCHAR), \
+                      h.depth + 1 \
+               FROM hop h JOIN statement s ON h.object = s.subject \
+               WHERE h.depth < ? {recursive_pred}\
+             ) \
+             SELECT DISTINCT ON (triple) \
+               triple, subject, predicate, object, content, created_at, tr_start, tr_end \
+             FROM hop ORDER BY depth, created_at DESC"
+        );
+
+        let param_refs: Vec<&dyn duckdb::ToSql> =
+            sql_params.iter().map(|s| s as &dyn duckdb::ToSql).collect();
+
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row: &duckdb::Row| {
+                let triple: String = row.get(0)?;
+                let subject: String = row.get(1)?;
+                let predicate: String = row.get(2)?;
+                let object: String = row.get(3)?;
+                let json: String = row.get(4)?;
+                let created_at_str: String = row.get(5)?;
+                let tr_start_str: Option<String> = row.get(6)?;
+                let tr_end_str: Option<String> = row.get(7)?;
+                Ok((triple, subject, predicate, object, json, created_at_str, tr_start_str, tr_end_str))
+            })
+            .map_err(StorageError::from)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let (triple, subject, predicate, object, json, created_at_str, tr_start_str, tr_end_str) =
+                row.map_err(StorageError::from)?;
+            let content = Content::from_json_str(&json)?;
+            let created_at = parse_timestamp(&created_at_str)?;
+            let tr_start = tr_start_str.as_deref().map(parse_timestamp).transpose()?;
+            let tr_end = tr_end_str.as_deref().map(parse_timestamp).transpose()?;
+            let key = StatementKey { subject, predicate, object };
+            let _ = triple;
+            result.push(Statement { key, content, created_at, tr_start, tr_end });
+        }
+        Ok(result)
+    }
 }
 
-/// Format a vector as a DuckDB SQL array literal: `[0.1, 0.2, ...]`
 fn vector_to_sql_literal(v: &[f32]) -> String {
     let parts: Vec<String> = v.iter().map(|f| {
         if f.is_nan() || f.is_infinite() {
@@ -694,5 +776,101 @@ mod tests {
 
         store.clear_knowledge_embedding("k1").unwrap();
         assert_eq!(store.knowledge_with_embeddings().unwrap().len(), 0);
+    }
+
+    // --- K-hop graph traversal tests ---
+
+    #[test]
+    fn khop_1hop_specific_predicate() {
+        let (_dir, store) = setup();
+        // Alice --knows--> Bob --knows--> Carol
+        store.insert_statement(
+            &StatementKey::new("Alice", "knows", "Bob"),
+            &Content::new("a->b"), None, None,
+        ).unwrap();
+        store.insert_statement(
+            &StatementKey::new("Bob", "knows", "Carol"),
+            &Content::new("b->c"), None, None,
+        ).unwrap();
+
+        let results = store.query_khop("Alice", Some("knows"), 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key.object, "Bob");
+    }
+
+    #[test]
+    fn khop_2hop_specific_predicate() {
+        let (_dir, store) = setup();
+        // Alice --knows--> Bob --knows--> Carol
+        //               Bob --works_with--> Dave (different predicate)
+        store.insert_statement(
+            &StatementKey::new("Alice", "knows", "Bob"),
+            &Content::new("a->b"), None, None,
+        ).unwrap();
+        store.insert_statement(
+            &StatementKey::new("Bob", "knows", "Carol"),
+            &Content::new("b->c"), None, None,
+        ).unwrap();
+        store.insert_statement(
+            &StatementKey::new("Bob", "works_with", "Dave"),
+            &Content::new("b->d"), None, None,
+        ).unwrap();
+
+        // 2-hop with "knows" only follows the knows chain
+        let results = store.query_khop("Alice", Some("knows"), 2).unwrap();
+        assert_eq!(results.len(), 2);
+        let objects: Vec<&str> = results.iter().map(|s| s.key.object.as_str()).collect();
+        assert!(objects.contains(&"Bob"));
+        assert!(objects.contains(&"Carol"));
+    }
+
+    #[test]
+    fn khop_wildcard_predicate() {
+        let (_dir, store) = setup();
+        store.insert_statement(
+            &StatementKey::new("Alice", "knows", "Bob"),
+            &Content::new("a->b"), None, None,
+        ).unwrap();
+        store.insert_statement(
+            &StatementKey::new("Bob", "knows", "Carol"),
+            &Content::new("b->c"), None, None,
+        ).unwrap();
+        store.insert_statement(
+            &StatementKey::new("Bob", "works_with", "Dave"),
+            &Content::new("b->d"), None, None,
+        ).unwrap();
+
+        // Wildcard follows all predicates
+        let results = store.query_khop("Alice", None, 2).unwrap();
+        assert_eq!(results.len(), 3);
+        let objects: Vec<&str> = results.iter().map(|s| s.key.object.as_str()).collect();
+        assert!(objects.contains(&"Bob"));
+        assert!(objects.contains(&"Carol"));
+        assert!(objects.contains(&"Dave"));
+    }
+
+    #[test]
+    fn khop_cycle() {
+        let (_dir, store) = setup();
+        // A --knows--> B --knows--> A (cycle)
+        store.insert_statement(
+            &StatementKey::new("A", "knows", "B"),
+            &Content::new("a->b"), None, None,
+        ).unwrap();
+        store.insert_statement(
+            &StatementKey::new("B", "knows", "A"),
+            &Content::new("b->a"), None, None,
+        ).unwrap();
+
+        let results = store.query_khop("A", Some("knows"), 5).unwrap();
+        // DISTINCT ON (triple) ensures exactly 2 unique triples
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn khop_no_results() {
+        let (_dir, store) = setup();
+        let results = store.query_khop("NonExistent", Some("knows"), 3).unwrap();
+        assert!(results.is_empty());
     }
 }

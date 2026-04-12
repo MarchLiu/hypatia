@@ -85,6 +85,24 @@ impl Evaluator {
                         builder.add_condition(fragment, params);
                     }
                 }
+                OperatorResult::KHop { subject, predicate, depth } => {
+                    // $k-hop: only valid inside $statement
+                    if target != QueryTarget::Statement {
+                        return Err(HypatiaError::Eval(
+                            "$k-hop is only valid inside $statement".to_string(),
+                        ));
+                    }
+                    let khop_result = store.execute_khop(&subject, predicate.as_deref(), depth)?;
+                    let keys: Vec<String> = khop_result.rows.iter()
+                        .filter_map(|row| row.get("triple").and_then(|v| v.as_str()).map(String::from))
+                        .collect();
+                    if keys.is_empty() {
+                        builder.add_condition("1=0".to_string(), Vec::new());
+                    } else {
+                        let (fragment, params) = build_key_match_condition(target, &keys);
+                        builder.add_condition(fragment, params);
+                    }
+                }
                 OperatorResult::Value(_) => {
                     // Ignore literal values in condition context
                 }
@@ -222,6 +240,15 @@ mod tests {
             _query_text: &str,
             _opts: &SearchOpts,
             _target: QueryTarget,
+        ) -> Result<QueryResult> {
+            Ok(QueryResult::new(self.search_results.clone()))
+        }
+
+        fn execute_khop(
+            &self,
+            _subject: &str,
+            _predicate: Option<&str>,
+            _depth: i64,
         ) -> Result<QueryResult> {
             Ok(QueryResult::new(self.search_results.clone()))
         }
