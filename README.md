@@ -2,13 +2,14 @@
 
 “We can wander through the stacks of the Library of Alexandria, imagining the scrolls and the knowledge they contain. Its destruction is a warning: all we have is transient.”——Alberto Manguel
 
-AI-oriented memory management system. Stores structured knowledge as a graph of **Knowledge** entries (nodes) and **Statement** triples (edges), queried via a custom JSON Search Expression (JSE) language. Built on SQLite FTS5 + DuckDB, with zero external model dependencies.
+AI-oriented memory management system. Stores structured knowledge as a graph of **Knowledge** entries (nodes) and **Statement** triples (edges), queried via a custom JSON Search Expression (JSE) language. Built on SQLite FTS5 + DuckDB, with optional local embedding model (EmbeddingGemma-300M ONNX) for semantic vector search.
 
 ## Features
 
 - **Knowledge Graph** -- Knowledge entries (named info points with tags) and Statement triples (subject-predicate-object with temporal ranges)
 - **JSE Query Engine** -- JSON-based query language compiling to parameterized SQL + FTS5, supporting `$and`, `$or`, `$not`, `$eq`, `$ne`, `$gt`, `$lt`, `$contains`, `$like`, `$content`, `$search`, `$quote`, `$triple`
-- **Dual-Database Storage** -- DuckDB for structured queries, SQLite FTS5 (Porter stemmer + multi-column BM25) for full-text search, auto-synchronized
+- **Dual-Database Storage** -- DuckDB for structured queries + vector search, SQLite FTS5 (Porter stemmer + multi-column BM25) for full-text search, auto-synchronized
+- **Vector Search** -- Local EmbeddingGemma-300M (ONNX, int8) for semantic similarity search via DuckDB cosine distance — zero external API dependency
 - **Synonyms** -- Per-entry synonym lists for knowledge, per-position (subject/predicate/object) synonyms for statements, indexed in FTS
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
@@ -192,12 +193,18 @@ Full report: [docs/benchmark-report.md](docs/benchmark-report.md)
 
 ### LoCoMo Academic Benchmark
 
-Hypatia's FTS operator was tested on the LoCoMo long-term conversational memory benchmark (ACL 2024). FTS recall is near zero on natural language QA — this is expected, as Hypatia's core is graph-based structured querying, not semantic search. FTS is one operator in the JSE engine, not the system's primary retrieval mechanism.
+Tested on the LoCoMo long-term conversational memory benchmark (ACL 2024, 10 conversations, 1,540 non-adversarial QA pairs, 6,426 entries). Hypatia now supports both FTS and vector search (EmbeddingGemma-300M ONNX):
 
-| Strategy | R@10 | Reference (MemPalace) |
-|----------|------|-----------------------|
-| Turn-level FTS | 0.2% | Raw ChromaDB: 60.3% |
-| Session-level FTS | 16.5% | Hybrid v5: 88.9% |
+| Strategy | R@1 | R@10 | Latency p50 |
+|----------|-----|------|-------------|
+| FTS (BM25) | 0.2% | 0.2% | 814 ms |
+| **Vector (cosine)** | **41.6%** | **80.3%** | **48 ms** |
+
+Vector search closes the lexical gap that FTS cannot bridge, achieving 80.3% R@10 — surpassing MemPalace's raw ChromaDB baseline (60.3%) and approaching their hybrid mode (88.9%).
+
+| Metric | Hypatia Vector | MemPalace ChromaDB | MemPalace Hybrid v5 |
+|--------|----------------|--------------------|---------------------|
+| R@10 | 80.3% | 60.3% | 88.9% |
 
 Full report: [docs/locomo-coverage.md](docs/locomo-coverage.md)
 

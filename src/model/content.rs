@@ -100,6 +100,18 @@ impl Content {
             synonyms: synonyms_text,
         }
     }
+
+    /// Build the text used for embedding vector generation.
+    /// Combines tags, name, and data into a single string for semantic search.
+    pub fn embedding_text(&self, name: &str) -> String {
+        let mut parts = Vec::new();
+        if !self.tags.is_empty() {
+            parts.push(self.tags.join(", "));
+        }
+        parts.push(name.to_string());
+        parts.push(self.data.clone());
+        parts.join("\n")
+    }
 }
 
 #[cfg(test)]

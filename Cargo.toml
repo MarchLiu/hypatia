@@ -13,6 +13,9 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 rustyline = "18"
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+tokenizers = "0.21"
+ndarray = "0.17"
 
 [dev-dependencies]
 tempfile = "3"

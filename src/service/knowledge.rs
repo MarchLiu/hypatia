@@ -30,6 +30,11 @@ impl<'a> KnowledgeService<'a> {
         let doc = Self::build_fts_doc(&content, name);
         self.shelf.sqlite.upsert_doc("knowledge", name, &doc)?;
 
+        // Generate embedding and store vector in DuckDB (best-effort: skip if model unavailable)
+        if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
+            self.shelf.duckdb.upsert_knowledge_embedding(name, &vector)?;
+        }
+
         // Read back to get the generated timestamp
         let knowledge = self.shelf.duckdb.get_knowledge(name)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
@@ -47,9 +52,13 @@ impl<'a> KnowledgeService<'a> {
     pub fn update(&mut self, name: &str, content: Content) -> Result<Knowledge> {
         self.shelf.duckdb.update_knowledge(name, &content)?;
 
-        // Update FTS
+        // Update FTS and vector
         let doc = Self::build_fts_doc(&content, name);
         self.shelf.sqlite.upsert_doc("knowledge", name, &doc)?;
+
+        if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
+            self.shelf.duckdb.upsert_knowledge_embedding(name, &vector)?;
+        }
 
         let knowledge = self.shelf.duckdb.get_knowledge(name)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {

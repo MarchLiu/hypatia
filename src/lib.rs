@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod embedding;
 pub mod engine;
 pub mod error;
 pub mod lab;

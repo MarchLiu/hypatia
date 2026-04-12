@@ -103,6 +103,12 @@ enum Commands {
         name: String,
         dest: PathBuf,
     },
+    /// Generate embeddings for existing entries that don't have vectors yet
+    Backfill {
+        /// Shelf to backfill
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
     /// Enter interactive REPL mode
     Repl,
 }
@@ -216,6 +222,11 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         Commands::Export { name, dest } => {
             lab.export_shelf(&name, &dest)?;
             println!("Exported shelf '{name}' to {}", dest.display());
+        }
+        Commands::Backfill { shelf } => {
+            let stats = lab.backfill_vectors(&shelf)?;
+            println!("Backfill complete: {} vectors created, {} skipped, {} errors",
+                stats.created, stats.skipped, stats.errors);
         }
         Commands::Repl => unreachable!(),
     }

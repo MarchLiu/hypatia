@@ -25,16 +25,22 @@ pub struct ShelfConfig {
     pub id: ShelfId,
     pub duckdb_path: PathBuf,
     pub sqlite_path: PathBuf,
+    pub model_path: PathBuf,
+    pub tokenizer_path: PathBuf,
 }
 
 impl ShelfConfig {
     pub fn from_shelf_id(id: ShelfId) -> Self {
         let duckdb_path = id.path.join("data.duckdb");
         let sqlite_path = id.path.join("index.sqlite");
+        let model_path = id.path.join("embedding_model.onnx");
+        let tokenizer_path = id.path.join("tokenizer.json");
         Self {
             id,
             duckdb_path,
             sqlite_path,
+            model_path,
+            tokenizer_path,
         }
     }
 

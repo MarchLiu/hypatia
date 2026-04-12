@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::embedding::{Embedder, EmbeddingConfig};
 use crate::error::{HypatiaError, Result};
 use crate::model::{QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
 use crate::storage::{DuckDbStore, SqliteStore, Storage};
@@ -10,6 +11,7 @@ pub struct OpenShelf {
     pub config: ShelfConfig,
     pub duckdb: DuckDbStore,
     pub sqlite: SqliteStore,
+    pub embedder: Embedder,
 }
 
 impl Storage for OpenShelf {
@@ -52,6 +54,51 @@ impl Storage for OpenShelf {
                 map
             })
             .collect();
+        Ok(QueryResult::new(rows))
+    }
+
+    fn execute_similar(
+        &self,
+        query_text: &str,
+        opts: &SearchOpts,
+        target: QueryTarget,
+    ) -> Result<QueryResult> {
+        let query_vector = self.embedder.embed(query_text)?;
+
+        let rows = match target {
+            QueryTarget::Knowledge => {
+                let results = self.duckdb.vector_search_knowledge(&query_vector, opts.limit)?;
+                results.into_iter().map(|(name, content, distance)| {
+                    let mut map = serde_json::Map::new();
+                    map.insert("name".to_string(), serde_json::Value::String(name));
+                    map.insert("content".to_string(), serde_json::Value::String(content));
+                    map.insert(
+                        "distance".to_string(),
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(distance)
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
+                    );
+                    map
+                }).collect()
+            }
+            QueryTarget::Statement => {
+                let results = self.duckdb.vector_search_statements(&query_vector, opts.limit)?;
+                results.into_iter().map(|(triple, content, distance)| {
+                    let mut map = serde_json::Map::new();
+                    map.insert("triple".to_string(), serde_json::Value::String(triple));
+                    map.insert("content".to_string(), serde_json::Value::String(content));
+                    map.insert(
+                        "distance".to_string(),
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(distance)
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
+                    );
+                    map
+                }).collect()
+            }
+        };
         Ok(QueryResult::new(rows))
     }
 }
@@ -122,11 +169,20 @@ impl ShelfManager {
         let duckdb = DuckDbStore::open(&config.duckdb_path)?;
         let sqlite = SqliteStore::open(&config.sqlite_path)?;
 
+        let embedder_config = EmbeddingConfig {
+            model_path: config.model_path.clone(),
+            tokenizer_path: config.tokenizer_path.clone(),
+            dimensions: 768,
+            max_seq_length: 8192,
+        };
+        let embedder = Embedder::new(embedder_config);
+
         let shelf = OpenShelf {
             id: config.id.clone(),
             config,
             duckdb,
             sqlite,
+            embedder,
         };
 
         self.shelves.insert(shelf_name.clone(), shelf);

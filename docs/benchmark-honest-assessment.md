@@ -27,25 +27,38 @@
 
 Hypatia 只覆盖了 MemPalace 内部基准（`PalaceDataGenerator` 合成测试）的对应物，完全没有触及任何学术基准。
 
-## 2.1 LoCoMo 学术基准结果 (2026-04-11)
+## 2.1 LoCoMo 学术基准结果 (2026-04-12, updated)
 
-首次在真实学术基准 LoCoMo 上评测。
+在真实学术基准 LoCoMo 上评测，同时测试 FTS 和向量搜索。
 
 | 配置 | 数据规模 | 查询数 |
 |------|---------|--------|
-| 10 个多会话对话 | ~6,672 knowledge entries | 1,540 (排除 adversarial) |
+| 10 个多会话对话 | 6,426 knowledge entries (含 embeddings) | 1,540 (排除 adversarial) |
+| 嵌入模型 | EmbeddingGemma-300M (ONNX, int8, 768d) | — |
 
-| Category | N | R@1 | R@5 | R@10 | F1 |
-|----------|---|-----|-----|------|-----|
-| Single-hop (Cat 4) | 841 | 0.1% | 0.1% | 0.1% | 0.001 |
-| Multi-hop (Cat 1) | 282 | 0.4% | 0.4% | 0.4% | 0.001 |
-| Temporal (Cat 2) | 321 | 0.0% | 0.0% | 0.0% | 0.000 |
-| Open-domain (Cat 3) | 96 | 1.0% | 1.0% | 1.0% | 0.000 |
-| **OVERALL** | **1,540** | **0.2%** | **0.2%** | **0.2%** | **0.001** |
+### FTS (BM25)
+
+| Category | N | R@1 | R@5 | R@10 |
+|----------|---|-----|-----|------|
+| Single-hop (Cat 4) | 841 | 0.1% | 0.1% | 0.1% |
+| Multi-hop (Cat 1) | 282 | 0.4% | 0.4% | 0.4% |
+| Temporal (Cat 2) | 321 | 0.0% | 0.0% | 0.0% |
+| Open-domain (Cat 3) | 96 | 1.0% | 1.0% | 1.0% |
+| **OVERALL** | **1,540** | **0.2%** | **0.2%** | **0.2%** |
+
+### Vector (EmbeddingGemma-300M, cosine similarity)
+
+| Category | N | R@1 | R@5 | R@10 |
+|----------|---|-----|-----|------|
+| Single-hop (Cat 4) | 841 | 44.7% | 74.6% | **83.8%** |
+| Multi-hop (Cat 1) | 282 | 27.7% | 66.0% | **77.3%** |
+| Temporal (Cat 2) | 321 | 51.7% | 77.6% | **84.1%** |
+| Open-domain (Cat 3) | 96 | 20.8% | 32.3% | **45.8%** |
+| **OVERALL** | **1,540** | **41.6%** | **71.0%** | **80.3%** |
 
 对比 MemPalace：Raw ChromaDB R@10 = 60.3%，Hybrid v5 R@10 = 88.9%。
 
-**结论**：Hypatia 的 FTS 在自然语言问答场景下几乎完全失效。核心原因是 FTS 无法桥接词汇鸿沟（lexical gap）——问题 "When did Caroline go to the LGBTQ support group?" 与原文 "I went to a LGBTQ support group yesterday" 之间没有精确/词干匹配。
+**结论**：向量搜索将 R@10 从 0.2% 提升到 80.3%，超过 MemPalace 的 ChromaDB 基线（60.3%）。核心原因是嵌入模型消除了词汇鸿沟——语义相似的表述被编码到相邻向量空间。Open-domain（45.8%）仍较低，这类问题需要多跳推理，单靠向量相似度不够。
 
 ## 3. 过拟合分析
 
@@ -91,6 +104,13 @@ MemPalace 的学术基准使用用户自然语言提问：
 5. **没有 precision 测试** — 只测了 recall，不知道查询返回了多少无关结果
 
 ## 5. 改进方向
+
+### 已完成：向量搜索集成 (2026-04-12)
+
+- **嵌入模型**：EmbeddingGemma-300M (ONNX, int8)，295MB，本地推理零外部依赖
+- **向量存储**：DuckDB `FLOAT[768]` 列 + `array_cosine_distance` 暴力搜索
+- **结果**：LoCoMo R@10 从 0.2%（FTS）提升到 80.3%（vector）
+- **后续**：hybrid fusion（FTS + vector 分数融合）可能进一步提升到接近 MemPalace 的 88.9%
 
 ### 短期：提高内部基准信度
 

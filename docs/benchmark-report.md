@@ -153,15 +153,15 @@ Medium-scale (10K knowledge) benchmark requires extended runtime due to syntheti
 
 | Dimension | MemPalace | Hypatia |
 |-----------|-----------|---------|
-| **Storage** | ChromaDB (vector) | SQLite FTS5 + DuckDB |
-| **Retrieval** | Cosine similarity on embeddings | Full-text search (Porter stemmer + BM25 multi-column) |
+| **Storage** | ChromaDB (vector) | SQLite FTS5 + DuckDB (structured + vector) |
+| **Retrieval** | Cosine similarity on embeddings | Full-text search (BM25) + cosine similarity (EmbeddingGemma-300M) |
 | **Structured query** | Metadata filtering | JSE (JSON Search Expression) |
 | **Knowledge model** | Drawers in wings/rooms | Knowledge entries + Statement triples |
-| **Embedding model** | bge-large / OpenAI | None required |
+| **Embedding model** | bge-large / OpenAI | EmbeddingGemma-300M (local ONNX, optional) |
 | **LLM dependency** | Optional (rerank) | None |
 | **Per-query cost** | $0 (local) or ~$0.001 (rerank) | $0 |
-| **Cold start** | Model loading (~seconds) | None |
-| **Determinism** | Stochastic (embedding nearest-neighbor) | Deterministic |
+| **Cold start** | Model loading (~seconds) | Model loading (~seconds, optional) |
+| **Determinism** | Stochastic (embedding nearest-neighbor) | FTS deterministic, vector deterministic |
 
 ---
 

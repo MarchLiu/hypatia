@@ -13,6 +13,10 @@ pub enum OperatorResult {
     FtsQuery {
         query: String,
     },
+    /// A semantic similarity query. The evaluator embeds the text and searches vectors.
+    VectorQuery {
+        query_text: String,
+    },
     /// A literal value (from $quote or non-operator expressions).
     Value(serde_json::Value),
 }
@@ -204,6 +208,20 @@ pub fn evaluate_operator(
             };
             Ok(OperatorResult::FtsQuery {
                 query: query_str,
+            })
+        }
+        "$similar" => {
+            let query = if operands.is_empty() {
+                return Err(HypatiaError::Eval("$similar expects a query argument".to_string()));
+            } else {
+                expect_literal(&operands[0])?
+            };
+            let query_str = match &query {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            Ok(OperatorResult::VectorQuery {
+                query_text: query_str,
             })
         }
         "$quote" => {

@@ -21,4 +21,13 @@ pub trait Storage {
     ) -> Result<QueryResult>;
 
     fn execute_search(&self, query: &str, opts: &SearchOpts) -> Result<QueryResult>;
+
+    /// Execute a semantic similarity search using vector embeddings.
+    /// Returns an error if the embedding model is unavailable.
+    fn execute_similar(
+        &self,
+        query_text: &str,
+        opts: &SearchOpts,
+        target: QueryTarget,
+    ) -> Result<QueryResult>;
 }

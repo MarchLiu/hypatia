@@ -70,6 +70,21 @@ impl Evaluator {
                         builder.add_condition(fragment, params);
                     }
                 }
+                OperatorResult::VectorQuery { query_text } => {
+                    // $similar: execute vector search, then use resulting keys
+                    // to build SQL IN conditions (same pattern as FTS).
+                    let search_opts = query_opts_to_search_opts(&opts, target);
+                    let search_result = store.execute_similar(&query_text, &search_opts, target)?;
+                    let keys: Vec<String> = search_result.rows.iter()
+                        .filter_map(|row| row.get("key").and_then(|v| v.as_str()).map(String::from))
+                        .collect();
+                    if keys.is_empty() {
+                        builder.add_condition("1=0".to_string(), Vec::new());
+                    } else {
+                        let (fragment, params) = build_key_match_condition(target, &keys);
+                        builder.add_condition(fragment, params);
+                    }
+                }
                 OperatorResult::Value(_) => {
                     // Ignore literal values in condition context
                 }
@@ -199,6 +214,15 @@ mod tests {
         }
 
         fn execute_search(&self, _query: &str, _opts: &SearchOpts) -> Result<QueryResult> {
+            Ok(QueryResult::new(self.search_results.clone()))
+        }
+
+        fn execute_similar(
+            &self,
+            _query_text: &str,
+            _opts: &SearchOpts,
+            _target: QueryTarget,
+        ) -> Result<QueryResult> {
             Ok(QueryResult::new(self.search_results.clone()))
         }
     }

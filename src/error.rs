@@ -25,6 +25,12 @@ pub enum HypatiaError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("embedding error: {0}")]
+    Embedding(String),
+
+    #[error("model unavailable: {0}")]
+    ModelUnavailable(String),
 }
 
 #[derive(Debug, Error)]

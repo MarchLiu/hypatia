@@ -10,7 +10,8 @@ const KNOWLEDGE_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS knowledge (
     name TEXT PRIMARY KEY,
     content JSON,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    embedding FLOAT[768]
 )";
 
 const STATEMENT_SCHEMA: &str = "\
@@ -22,7 +23,8 @@ CREATE TABLE IF NOT EXISTS statement (
     content JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     tr_start TIMESTAMP,
-    tr_end TIMESTAMP
+    tr_end TIMESTAMP,
+    embedding FLOAT[768]
 );
 CREATE INDEX IF NOT EXISTS idx_stmt_subject ON statement(subject);
 CREATE INDEX IF NOT EXISTS idx_stmt_predicate ON statement(predicate);
@@ -316,6 +318,202 @@ impl DuckDbStore {
         }
         Ok(result)
     }
+
+    // --- Vector operations ---
+
+    /// Store an embedding vector for a knowledge entry.
+    pub fn upsert_knowledge_embedding(&self, name: &str, vector: &[f32]) -> Result<()> {
+        let vec_literal = vector_to_sql_literal(vector);
+        let sql = format!(
+            "UPDATE knowledge SET embedding = {vec_literal}::FLOAT[{}] WHERE name = ?",
+            vector.len()
+        );
+        self.conn
+            .execute(&sql, params![name])
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    /// Store an embedding vector for a statement entry.
+    pub fn upsert_statement_embedding(&self, triple: &str, vector: &[f32]) -> Result<()> {
+        let vec_literal = vector_to_sql_literal(vector);
+        let sql = format!(
+            "UPDATE statement SET embedding = {vec_literal}::FLOAT[{}] WHERE triple = ?",
+            vector.len()
+        );
+        self.conn
+            .execute(&sql, params![triple])
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    /// Clear the embedding vector for a knowledge entry.
+    pub fn clear_knowledge_embedding(&self, name: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE knowledge SET embedding = NULL WHERE name = ?",
+                params![name],
+            )
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    /// Clear the embedding vector for a statement entry.
+    pub fn clear_statement_embedding(&self, triple: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE statement SET embedding = NULL WHERE triple = ?",
+                params![triple],
+            )
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    /// Search knowledge entries by vector similarity (cosine distance).
+    /// Returns (name, content_json, distance) tuples sorted by similarity.
+    pub fn vector_search_knowledge(
+        &self,
+        query_vector: &[f32],
+        limit: i64,
+    ) -> Result<Vec<(String, String, f64)>> {
+        let vec_literal = vector_to_sql_literal(query_vector);
+        let dims = query_vector.len();
+        let sql = format!(
+            "SELECT name, CAST(content AS VARCHAR), \
+             array_cosine_distance(embedding, {vec_literal}::FLOAT[{dims}]) AS distance \
+             FROM knowledge \
+             WHERE embedding IS NOT NULL \
+             ORDER BY distance ASC \
+             LIMIT ?"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                let name: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let distance: f64 = row.get(2)?;
+                Ok((name, content, distance))
+            })
+            .map_err(StorageError::from)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(StorageError::from)?);
+        }
+        Ok(result)
+    }
+
+    /// Search statement entries by vector similarity (cosine distance).
+    /// Returns (triple, content_json, distance) tuples sorted by similarity.
+    pub fn vector_search_statements(
+        &self,
+        query_vector: &[f32],
+        limit: i64,
+    ) -> Result<Vec<(String, String, f64)>> {
+        let vec_literal = vector_to_sql_literal(query_vector);
+        let dims = query_vector.len();
+        let sql = format!(
+            "SELECT triple, CAST(content AS VARCHAR), \
+             array_cosine_distance(embedding, {vec_literal}::FLOAT[{dims}]) AS distance \
+             FROM statement \
+             WHERE embedding IS NOT NULL \
+             ORDER BY distance ASC \
+             LIMIT ?"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                let triple: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let distance: f64 = row.get(2)?;
+                Ok((triple, content, distance))
+            })
+            .map_err(StorageError::from)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(StorageError::from)?);
+        }
+        Ok(result)
+    }
+
+    /// Get all knowledge entries that have embeddings.
+    /// Returns (name, content_json) pairs for backfill skip detection.
+    pub fn knowledge_with_embeddings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, CAST(content AS VARCHAR) FROM knowledge WHERE embedding IS NOT NULL")
+            .map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let name: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                Ok((name, content))
+            })
+            .map_err(StorageError::from)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(StorageError::from)?);
+        }
+        Ok(result)
+    }
+
+    /// Get all knowledge entries that do NOT have embeddings.
+    /// Returns (name, content_json) pairs for backfill.
+    pub fn knowledge_without_embeddings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, CAST(content AS VARCHAR) FROM knowledge WHERE embedding IS NULL")
+            .map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let name: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                Ok((name, content))
+            })
+            .map_err(StorageError::from)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(StorageError::from)?);
+        }
+        Ok(result)
+    }
+
+    /// Get all statement entries that do NOT have embeddings.
+    /// Returns (triple, content_json) pairs for backfill.
+    pub fn statements_without_embeddings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT triple, CAST(content AS VARCHAR) FROM statement WHERE embedding IS NULL")
+            .map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let triple: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                Ok((triple, content))
+            })
+            .map_err(StorageError::from)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(StorageError::from)?);
+        }
+        Ok(result)
+    }
+}
+
+/// Format a vector as a DuckDB SQL array literal: `[0.1, 0.2, ...]`
+fn vector_to_sql_literal(v: &[f32]) -> String {
+    let parts: Vec<String> = v.iter().map(|f| {
+        if f.is_nan() || f.is_infinite() {
+            "0.0".to_string()
+        } else {
+            format!("{f:.8}")
+        }
+    }).collect();
+    format!("[{}]", parts.join(", "))
 }
 
 #[cfg(test)]
@@ -419,5 +617,82 @@ mod tests {
             .unwrap();
         store.delete_statement(&key).unwrap();
         assert!(store.get_statement(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn knowledge_vector_upsert_and_search() {
+        let (_dir, store) = setup();
+        store.insert_knowledge("rust", &Content::new("Rust programming language")).unwrap();
+        store.insert_knowledge("python", &Content::new("Python scripting language")).unwrap();
+
+        // Rust and "memory safety" are semantically closer
+        let vector_a = vec![1.0f32; 768];
+        let vector_b = vec![0.0f32; 768];
+        store.upsert_knowledge_embedding("rust", &vector_a).unwrap();
+        store.upsert_knowledge_embedding("python", &vector_b).unwrap();
+
+        // Search with vector similar to rust's embedding
+        let results = store.vector_search_knowledge(&vector_a, 10).unwrap();
+        assert_eq!(results.len(), 2);
+        // First result should be "rust" (distance 0 = identical)
+        assert_eq!(results[0].0, "rust");
+    }
+
+    #[test]
+    fn statement_vector_upsert_and_search() {
+        let (_dir, store) = setup();
+        let key1 = StatementKey::new("Alice", "knows", "Bob");
+        let key2 = StatementKey::new("Carol", "manages", "Dave");
+        store.insert_statement(&key1, &Content::new("friends"), None, None).unwrap();
+        store.insert_statement(&key2, &Content::new("coworkers"), None, None).unwrap();
+
+        let vector_a = vec![1.0f32; 768];
+        let vector_b = vec![0.0f32; 768];
+        store.upsert_statement_embedding(&key1.to_csv_key(), &vector_a).unwrap();
+        store.upsert_statement_embedding(&key2.to_csv_key(), &vector_b).unwrap();
+
+        let results = store.vector_search_statements(&vector_a, 10).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].0.contains("Alice"));
+    }
+
+    #[test]
+    fn vector_search_excludes_null_embeddings() {
+        let (_dir, store) = setup();
+        store.insert_knowledge("with_vec", &Content::new("data")).unwrap();
+        store.insert_knowledge("no_vec", &Content::new("data")).unwrap();
+
+        let vector = vec![0.5f32; 768];
+        store.upsert_knowledge_embedding("with_vec", &vector).unwrap();
+
+        let results = store.vector_search_knowledge(&vector, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "with_vec");
+    }
+
+    #[test]
+    fn without_embeddings_lists_only_missing() {
+        let (_dir, store) = setup();
+        store.insert_knowledge("has_vec", &Content::new("data")).unwrap();
+        store.insert_knowledge("no_vec", &Content::new("data")).unwrap();
+
+        let vector = vec![0.5f32; 768];
+        store.upsert_knowledge_embedding("has_vec", &vector).unwrap();
+
+        let missing = store.knowledge_without_embeddings().unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].0, "no_vec");
+    }
+
+    #[test]
+    fn clear_embedding() {
+        let (_dir, store) = setup();
+        store.insert_knowledge("k1", &Content::new("data")).unwrap();
+        let vector = vec![0.5f32; 768];
+        store.upsert_knowledge_embedding("k1", &vector).unwrap();
+        assert_eq!(store.knowledge_with_embeddings().unwrap().len(), 1);
+
+        store.clear_knowledge_embedding("k1").unwrap();
+        assert_eq!(store.knowledge_with_embeddings().unwrap().len(), 0);
     }
 }
