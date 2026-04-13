@@ -144,16 +144,22 @@ When searching for information, prefer precise graph operators over broad FTS se
 3. User asks about a type of relationship (e.g., "who works for X")?
    → $triple with wildcard on entity positions
 
-4. User wants to match a pattern (e.g., "names starting with X")?
+4. User wants to explore graph neighborhood (e.g., "who can X reach in 2 hops")?
+   → $k-hop operator (graph traversal)
+
+5. User wants semantic/similarity search (e.g., "find similar concepts")?
+   → hypatia similar (vector search)
+
+6. User wants to match a pattern (e.g., "names starting with X")?
    → $like operator
 
-5. User wants to filter by content attributes (e.g., "markdown entries", "entries with specific format")?
+7. User wants to filter by content attributes (e.g., "markdown entries", "entries with specific format")?
    → $content operator
 
-6. User asks about a specific entity's relationships?
+8. User asks about a specific entity's relationships?
    → $triple + knowledge-get combined
 
-7. Broad/ambiguous query?
+9. Broad/ambiguous query?
    → $search (FTS fallback)
 ```
 
@@ -202,6 +208,23 @@ hypatia search <query> [-c <catalog>] [--limit N] [--offset N]
 | "search knowledge for rust" | `hypatia search "rust" -c knowledge` |
 | "what do you know about databases?" | `hypatia search "databases"` |
 
+## Vector Similarity Search
+
+Semantic search using embedding vectors. Finds entries with similar meaning, even when keywords don't match.
+
+```
+hypatia similar <query> [--limit N]
+```
+
+Requires an embedding model configured in `shelf.toml` (default: BAAI/bge-m3).
+
+### Examples
+
+| User says | Command |
+|---|---|
+| "find similar to distributed systems" | `hypatia similar "distributed systems"` |
+| "semantic search for memory management" | `hypatia similar "memory management" --limit 5` |
+
 ## JSE Query Translation
 
 JSE (JSON Search Expression) enables precise queries against the knowledge or statement tables.
@@ -243,6 +266,7 @@ No conditions means "return all":
 | `$or` | Logical OR | `["$or", cond1, cond2, ...]` |
 | `$not` | Logical NOT | `["$not", condition]` |
 | `$triple` | Triple position match | `["$triple", "Alice", "$*", "Bob"]` |
+| `$k-hop` | K-hop graph traversal (statement only) | `["$k-hop", "subject", "predicate", depth]` |
 
 ### Critical Syntax Rules
 
@@ -313,6 +337,24 @@ Match key-value pairs inside the `content` JSON column. Checks exact string equa
 | "find json-format statements" | `["$statement", ["$content", {"format": "json"}]]` | `hypatia query '["$statement", ["$content", {"format": "json"}]]'` |
 | "find entries with specific data and format" | `["$knowledge", ["$content", {"format": "markdown", "data": "hello"}]]` | `hypatia query '["$knowledge", ["$content", {"format": "markdown", "data": "hello"}]]'` |
 
+### `$k-hop` Operator
+
+K-hop graph traversal on statement triples using recursive CTE. Explores entity neighborhoods and relationship paths.
+
+```
+["$k-hop", "subject", "predicate", depth]
+```
+
+- `"subject"` — starting entity (required)
+- `"predicate"` — filter by predicate, or use `"$*"` for any
+- `depth` — number of hops (positive integer)
+
+| User says | JSE | Command |
+|---|---|---|
+| "who can Alice reach in 2 hops?" | `["$statement", ["$k-hop", "Alice", "$*", 2]]` | `hypatia query '["$statement", ["$k-hop", "Alice", "$*", 2]]'` |
+| "what's reachable from Alice via knows in 3 hops?" | `["$statement", ["$k-hop", "Alice", "knows", 3]]` | `hypatia query '["$statement", ["$k-hop", "Alice", "knows", 3]]'` |
+| "explore the graph around PostgreSQL" | `["$statement", ["$k-hop", "PostgreSQL", "$*", 2]]` | `hypatia query '["$statement", ["$k-hop", "PostgreSQL", "$*", 2]]'` |
+
 ### Natural Language to JSE Examples
 
 | User says | JSE | Command |
@@ -346,10 +388,12 @@ When the user's request is ambiguous, follow this priority:
 1. **Exact name mentioned** ("get Rust", "show Alice") → `knowledge-get` for direct lookup
 2. **Explicit type** ("find knowledge about X" / "find statements about X") → JSE query with the corresponding top-level operator
 3. **Relationship language** ("who does Alice know?", "what is Rust related to?", "relationships of X") → JSE `$statement` query with `$triple` operator
-4. **Pattern matching** ("names starting with X", "entries from January") → JSE with `$like` operator
-5. **Content filtering** ("markdown entries", "entries with format X") → JSE with `$content` operator
-6. **Broad/ambiguous** ("find everything about X", "what do you know about X") → `hypatia search` (covers both knowledge and statements)
-7. **Create/store/remember** → knowledge-create + statement-create (always create relationships alongside knowledge entries)
+4. **Graph exploration** ("who can Alice reach?", "what's connected to X", "neighborhood of X") → JSE with `$k-hop` operator
+5. **Semantic/similarity** ("find similar to X", "things like X", "semantically related") → `hypatia similar` (vector search)
+6. **Pattern matching** ("names starting with X", "entries from January") → JSE with `$like` operator
+7. **Content filtering** ("markdown entries", "entries with format X") → JSE with `$content` operator
+8. **Broad/ambiguous** ("find everything about X", "what do you know about X") → `hypatia search` (covers both knowledge and statements)
+9. **Create/store/remember** → knowledge-create + statement-create (always create relationships alongside knowledge entries)
 
 ## Shell Escaping
 

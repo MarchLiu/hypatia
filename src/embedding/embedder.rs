@@ -31,6 +31,7 @@ mod model_tests {
             tokenizer_path: shelf_dir().join("tokenizer.json"),
             dimensions: 1024,
             max_seq_length: 8192,
+            pooling: crate::embedding::config::PoolingStrategy::Mean,
         };
         Embedder::new(&config)
     }

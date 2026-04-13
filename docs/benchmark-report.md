@@ -1,13 +1,13 @@
 # Hypatia Benchmark Report
 
-> Date: 2026-04-09
+> Date: 2026-04-13 (updated)
 > Hardware: Apple Silicon (macOS)
 > Rust edition: 2024 | SQLite FTS5 + DuckDB
 > Reference: MemPalace benchmark methodology
 
 ## Executive Summary
 
-Hypatia achieves **100.0% Recall@10** on synthetic needle-in-haystack tests (small scale), with FTS search latency of **474 µs p50** — surpassing MemPalace's raw ChromaDB baseline of 96.6% R@5 on LongMemEval, using full-text search instead of vector embeddings and requiring **zero embedding cost**.
+Hypatia achieves **100.0% Recall@10** on synthetic needle-in-haystack tests (small scale), with FTS search latency of **474 µs p50**. Hypatia supports three retrieval modes: **FTS** (BM25 keyword search via SQLite), **Vector** (semantic similarity via DuckDB cosine distance + configurable embedding models), and **Graph** (k-hop traversal via statement triples). On the LoCoMo academic benchmark, vector search with BGE-M3 achieves **75.2% R@10**, significantly outperforming FTS alone (0.2%).
 
 ---
 
@@ -124,10 +124,6 @@ All **20 needle queries were found at rank 1** (Recall@1 = 100.0%). Previous run
 
 20 unique JSE queries were executed (3 runs each, 60 total), exercising:
 
-### 2.3 JSE Query Types Tested
-
-20 unique JSE queries were executed (3 runs each, 60 total), exercising:
-
 | Query Pattern | Example | p50 |
 |--------------|---------|-----|
 | Full scan | `["$knowledge"]` | ~1ms |
@@ -154,30 +150,26 @@ Medium-scale (10K knowledge) benchmark requires extended runtime due to syntheti
 | Dimension | MemPalace | Hypatia |
 |-----------|-----------|---------|
 | **Storage** | ChromaDB (vector) | SQLite FTS5 + DuckDB (structured + vector) |
-| **Retrieval** | Cosine similarity on embeddings | Full-text search (BM25) + cosine similarity (EmbeddingGemma-300M) |
+| **Retrieval** | Cosine similarity on embeddings | FTS (BM25) + Vector (cosine similarity) + Graph (k-hop) |
 | **Structured query** | Metadata filtering | JSE (JSON Search Expression) |
 | **Knowledge model** | Drawers in wings/rooms | Knowledge entries + Statement triples |
-| **Embedding model** | bge-large / OpenAI | EmbeddingGemma-300M (local ONNX, optional) |
+| **Embedding model** | bge-large / OpenAI | BAAI/bge-m3 (local ONNX, default) |
 | **LLM dependency** | Optional (rerank) | None |
 | **Per-query cost** | $0 (local) or ~$0.001 (rerank) | $0 |
-| **Cold start** | Model loading (~seconds) | Model loading (~seconds, optional) |
+| **Cold start** | Model loading (~seconds) | Model loading (~seconds, optional for FTS-only) |
 | **Determinism** | Stochastic (embedding nearest-neighbor) | FTS deterministic, vector deterministic |
 
 ---
 
 ## 4. Key Findings
 
-### 4.1 FTS Recall Surpasses Vector Baseline
+### 4.1 FTS Recall on Synthetic Data
 
-At **100% Recall@10**, Hypatia's FTS5 with Porter stemmer + multi-column BM25 demonstrates that **keyword-based search can exceed vector embedding recall** for structured AI memory use cases where:
-- The stored content contains recognizable keywords
-- Exact or near-exact matching is needed
-
-This aligns with MemPalace's own finding that their "hybrid v1" (keyword overlap) boosted raw embedding recall from 96.6% to 97.8% — keywords add value even in vector systems.
+At **100% Recall@10**, Hypatia's FTS5 with Porter stemmer + multi-column BM25 demonstrates strong keyword-based search on synthetic needle-in-haystack benchmarks where content contains recognizable keywords. For semantic challenges (e.g., LoCoMo), vector search with BGE-M3 achieves **75.2% R@10** vs FTS's 0.2%.
 
 ### 4.2 Latency Advantage
 
-Hypatia's 382 µs FTS p50 is **10-100× faster** than vector embedding retrieval. For interactive AI agent use cases where latency directly impacts user experience, this is a significant advantage.
+Hypatia's 474 µs FTS p50 is **10-100× faster** than vector embedding retrieval. Vector search adds ~43ms p50 latency (BGE-M3) for semantic coverage. The three modes (FTS, Vector, Graph) can be combined depending on use case requirements.
 
 ### 4.3 Where FTS Still Falls Short
 
@@ -186,16 +178,17 @@ Despite the improvements, FTS still struggles with:
 - **Paraphrase matching**: "how to speed up queries" won't match "query optimization techniques" (Porter stemmer helps with word forms but not rephrasing)
 - **Cross-lingual**: No understanding of equivalent terms across languages
 
-MemPalace's vector approach handles these cases through embedding similarity, at the cost of requiring an embedding model and higher query latency. The synonyms field partially bridges this gap for known domain terminology.
+Vector search (enabled by default with BGE-M3) handles these cases through embedding similarity. The synonyms field provides additional domain terminology bridging for FTS.
 
-### 4.4 Complementary, Not Competing
+### 4.4 Three Retrieval Modes
 
-Hypatia's strength lies in **structured, precise retrieval** with zero dependencies. For AI agents that need to:
-- Store and retrieve specific facts, configurations, and decisions
-- Query structured relationships (subject-predicate-object)
-- Operate without GPU or external model dependencies
+Hypatia combines three complementary retrieval modes:
 
-Hypatia provides a lean, fast, and predictable alternative to vector-based systems.
+1. **FTS** — Fast, deterministic keyword search (474 µs p50). Best for known-answer queries with recognizable terms.
+2. **Vector** — Semantic similarity search (43 ms p50 with BGE-M3). Best for paraphrase, cross-lingual, and meaning-based retrieval.
+3. **Graph** — K-hop traversal via statement triples. Best for relationship exploration and neighborhood queries.
+
+For AI agents that need structured, precise retrieval with optional semantic capabilities, Hypatia provides a lean and flexible system.
 
 ---
 

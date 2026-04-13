@@ -34,7 +34,7 @@ Hypatia 只覆盖了 MemPalace 内部基准（`PalaceDataGenerator` 合成测试
 | 配置 | 数据规模 | 查询数 |
 |------|---------|--------|
 | 10 个多会话对话 | 6,426 knowledge entries (含 embeddings) | 1,540 (排除 adversarial) |
-| 嵌入模型 | EmbeddingGemma-300M (ONNX, int8, 768d) | — |
+| 嵌入模型 | BAAI/bge-m3 (ONNX, 1024d) — 也测试了 EmbeddingGemma-300M, gte-multilingual-base, gte-Qwen2-1.5B, Jina v5 | — |
 
 ### FTS (BM25)
 
@@ -46,19 +46,30 @@ Hypatia 只覆盖了 MemPalace 内部基准（`PalaceDataGenerator` 合成测试
 | Open-domain (Cat 3) | 96 | 1.0% | 1.0% | 1.0% |
 | **OVERALL** | **1,540** | **0.2%** | **0.2%** | **0.2%** |
 
-### Vector (EmbeddingGemma-300M, cosine similarity)
+### Vector (BAAI/bge-m3, 1024d, cosine similarity) — 当前默认模型
 
 | Category | N | R@1 | R@5 | R@10 |
 |----------|---|-----|-----|------|
-| Single-hop (Cat 4) | 841 | 44.7% | 74.6% | **83.8%** |
-| Multi-hop (Cat 1) | 282 | 27.7% | 66.0% | **77.3%** |
-| Temporal (Cat 2) | 321 | 51.7% | 77.6% | **84.1%** |
-| Open-domain (Cat 3) | 96 | 20.8% | 32.3% | **45.8%** |
-| **OVERALL** | **1,540** | **41.6%** | **71.0%** | **80.3%** |
+| Single-hop (Cat 4) | 841 | 45.5% | 69.8% | **76.1%** |
+| Multi-hop (Cat 1) | 282 | 30.5% | 62.4% | **75.5%** |
+| Temporal (Cat 2) | 321 | 53.0% | 73.8% | **80.4%** |
+| Open-domain (Cat 3) | 96 | 22.9% | 38.5% | **49.0%** |
+| **OVERALL** | **1,540** | **38.6%** | **65.7%** | **75.2%** |
+
+### 多模型对比
+
+| 模型 | Params | Dims | R@1 | R@5 | R@10 | Vec p50 |
+|------|--------|------|-----|-----|------|---------|
+| Jina v5 text-nano | 239M | 768 | 8.7% | 19.6% | 25.1% | 25 ms |
+| gte-multilingual-base | 305M | 768 | 13.6% | 31.9% | 42.5% | 25 ms |
+| gte-Qwen2-1.5B-instruct | 1.5B | 1536 | 17.7% | 43.6% | 54.9% | 105 ms |
+| Jina v5 text-small | 677M | 1024 | 24.9% | 50.7% | 60.4% | 54 ms |
+| **BAAI/bge-m3 (默认)** | **568M** | **1024** | **38.6%** | **65.7%** | **75.2%** | **43 ms** |
+| EmbeddingGemma-300M (旧默认) | 300M | 768 | 41.6% | 71.0% | 80.3% | 48 ms |
 
 对比 MemPalace：Raw ChromaDB R@10 = 60.3%，Hybrid v5 R@10 = 88.9%。
 
-**结论**：向量搜索将 R@10 从 0.2% 提升到 80.3%，超过 MemPalace 的 ChromaDB 基线（60.3%）。核心原因是嵌入模型消除了词汇鸿沟——语义相似的表述被编码到相邻向量空间。Open-domain（45.8%）仍较低，这类问题需要多跳推理，单靠向量相似度不够。
+**结论**：向量搜索将 R@10 从 0.2% 提升到 75.2%（BGE-M3），超过 MemPalace 的 ChromaDB 基线（60.3%）。核心原因是嵌入模型消除了词汇鸿沟——语义相似的表述被编码到相邻向量空间。Open-domain（49.0%）仍较低，这类问题需要多跳推理，单靠向量相似度不够。BGE-M3 在参数量和速度的平衡上最优；EmbeddingGemma-300M 在纯 recall 上最高但速度较慢。
 
 ## 3. 过拟合分析
 
@@ -105,11 +116,14 @@ MemPalace 的学术基准使用用户自然语言提问：
 
 ## 5. 改进方向
 
-### 已完成：向量搜索集成 (2026-04-12)
+### 已完成：向量搜索 + 图查询集成 (2026-04-12 ~ 04-13)
 
-- **嵌入模型**：EmbeddingGemma-300M (ONNX, int8)，295MB，本地推理零外部依赖
-- **向量存储**：DuckDB `FLOAT[768]` 列 + `array_cosine_distance` 暴力搜索
-- **结果**：LoCoMo R@10 从 0.2%（FTS）提升到 80.3%（vector）
+- **默认嵌入模型**：BAAI/bge-m3 (ONNX, 1024d, 568M params)，本地推理零外部依赖
+- **向量存储**：DuckDB `FLOAT[1024]` 列 + `array_cosine_distance` 暴力搜索
+- **图查询**：`$k-hop` 算子支持 k 跳遍历（recursive CTE on statement triples）
+- **可配置模型**：通过 `shelf.toml` 支持多种本地 ONNX 模型（EmbeddingGemma, gte 系列, Jina v5）和远程 API
+- **池化策略**：支持 mean / CLS / last_token 三种池化，适配不同模型架构
+- **结果**：LoCoMo R@10 从 0.2%（FTS）提升到 75.2%（vector, BGE-M3）
 - **后续**：hybrid fusion（FTS + vector 分数融合）可能进一步提升到接近 MemPalace 的 88.9%
 
 ### 短期：提高内部基准信度
@@ -132,7 +146,7 @@ MemPalace 的学术基准使用用户自然语言提问：
 
 ## 6. Hypatia 的定位声明
 
-Hypatia 的设计目标是**可解释、可管理的 AI 外挂记忆系统**，而非通用向量检索引擎。通过 AI 的推理能力配合精确的结构化查询（JSE），在准确性优先的场景下提供确定性记忆管理。
+Hypatia 的设计目标是**可解释、可管理的 AI 外挂记忆系统**，支持三种检索模式：FTS（关键词精确匹配）、Vector（语义相似度）、Graph（关系遍历）。通过 AI 的推理能力配合精确的结构化查询（JSE），在准确性优先的场景下提供确定性记忆管理。
 
 Benchmark 成绩反映的是特定场景下的能力边界。成绩不理想不是系统的问题，而是帮助用户理解这个系统适合做什么、不适合做什么。这是好事。
 

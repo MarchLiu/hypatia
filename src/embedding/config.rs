@@ -17,12 +17,31 @@ pub enum ProviderKind {
     Remote,
 }
 
+/// Pooling strategy for extracting embeddings from model output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolingStrategy {
+    /// Mean pooling over non-padding tokens (default for BGE-M3).
+    Mean,
+    /// CLS token at position 0.
+    Cls,
+    /// Last non-padding token's hidden state (used by Jina v5).
+    LastToken,
+}
+
+impl Default for PoolingStrategy {
+    fn default() -> Self {
+        Self::Mean
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalConfig {
     pub model_path: PathBuf,
     pub tokenizer_path: PathBuf,
     pub dimensions: usize,
     pub max_seq_length: usize,
+    pub pooling: PoolingStrategy,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +50,13 @@ pub struct RemoteConfig {
     pub api_key_env: String,
     pub api_model: String,
     pub dimensions: usize,
+}
+
+/// Top-level `shelf.toml` structure (currently only `[embedding]` section).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ShelfToml {
+    #[serde(default)]
+    embedding: EmbeddingToml,
 }
 
 /// Parsed `[embedding]` section from `shelf.toml`.
@@ -42,6 +68,7 @@ struct EmbeddingToml {
     tokenizer_path: Option<String>,
     dimensions: Option<usize>,
     max_seq_length: Option<usize>,
+    pooling: Option<PoolingStrategy>,
     api_url: Option<String>,
     api_key_env: Option<String>,
     api_model: Option<String>,
@@ -55,6 +82,7 @@ impl Default for EmbeddingToml {
             tokenizer_path: None,
             dimensions: None,
             max_seq_length: None,
+            pooling: None,
             api_url: None,
             api_key_env: None,
             api_model: None,
@@ -69,7 +97,9 @@ impl EmbeddingConfig {
         let toml_path = shelf_dir.join("shelf.toml");
         let toml = if toml_path.exists() {
             let content = std::fs::read_to_string(&toml_path).unwrap_or_default();
-            toml::from_str::<EmbeddingToml>(&content).unwrap_or_default()
+            toml::from_str::<ShelfToml>(&content)
+                .map(|s| s.embedding)
+                .unwrap_or_default()
         } else {
             EmbeddingToml::default()
         };
@@ -93,6 +123,7 @@ impl EmbeddingConfig {
                 .unwrap_or_else(|| shelf_dir.join("tokenizer.json")),
             dimensions,
             max_seq_length: toml.max_seq_length.unwrap_or(8192),
+            pooling: toml.pooling.unwrap_or_default(),
         };
 
         let remote = RemoteConfig {

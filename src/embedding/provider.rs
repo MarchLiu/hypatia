@@ -6,7 +6,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 use crate::error::HypatiaError;
-use super::config::{EmbeddingConfig, LocalConfig, ProviderKind, RemoteConfig};
+use super::config::{EmbeddingConfig, LocalConfig, PoolingStrategy, ProviderKind, RemoteConfig};
 
 /// Trait for embedding providers (local ONNX or remote API).
 pub trait EmbeddingProvider {
@@ -44,6 +44,7 @@ pub struct OnnxProvider {
     inner: RefCell<OnnxInner>,
     dimensions: usize,
     max_seq_length: usize,
+    pooling: PoolingStrategy,
 }
 
 enum OnnxInner {
@@ -75,6 +76,7 @@ impl OnnxProvider {
             inner: RefCell::new(inner),
             dimensions: config.dimensions,
             max_seq_length: config.max_seq_length,
+            pooling: config.pooling,
         }
     }
 
@@ -85,6 +87,7 @@ impl OnnxProvider {
             }),
             dimensions: 0,
             max_seq_length: 0,
+            pooling: PoolingStrategy::Mean,
         }
     }
 
@@ -139,7 +142,7 @@ impl EmbeddingProvider for OnnxProvider {
         let mut inner = self.inner.borrow_mut();
         match &mut *inner {
             OnnxInner::Ready { session, tokenizer, .. } => {
-                run_onnx_inference(session, tokenizer, text, self.max_seq_length)
+                run_onnx_inference(session, tokenizer, text, self.max_seq_length, self.pooling)
             }
             _ => unreachable!("ensure_loaded should guarantee Ready state"),
         }
@@ -179,6 +182,7 @@ fn run_onnx_inference(
     tokenizer: &tokenizers::Tokenizer,
     text: &str,
     max_seq_length: usize,
+    pooling: PoolingStrategy,
 ) -> Result<Vec<f32>, HypatiaError> {
     let encoding = tokenizer
         .encode(text, true)
@@ -216,44 +220,72 @@ fn run_onnx_inference(
         .try_extract_array::<f32>()
         .map_err(|e| HypatiaError::Embedding(format!("failed to extract output: {e}")))?;
 
-    let embedding = extract_embedding(&output, attention_mask_u32, idx == 0);
+    let embedding = extract_embedding(&output, attention_mask_u32, idx == 0, pooling);
     Ok(l2_normalize(&embedding))
 }
 
 /// Extract embedding from model output.
-/// When `needs_pooling` is true (token_embeddings), apply mean pooling.
-/// Otherwise (sentence_embedding), extract directly.
+/// `needs_pooling` is true when using token_embeddings (index 0), false for sentence_embedding (index 1).
+/// `pooling` determines how to extract from 3D output.
 fn extract_embedding(
     hidden_states: &ndarray::ArrayBase<ndarray::ViewRepr<&f32>, ndarray::IxDyn>,
     attention_mask: &[u32],
     needs_pooling: bool,
+    pooling: PoolingStrategy,
 ) -> Vec<f32> {
     let shape = hidden_states.shape();
 
     if shape.len() == 3 && needs_pooling {
-        // Mean pooling over non-padding tokens
         let seq_len = shape[1];
         let hidden_dim = shape[2];
-        let mut result = vec![0.0f32; hidden_dim];
-        let mut count = 0.0f32;
 
-        for i in 0..seq_len {
-            if attention_mask[i] == 1 {
-                count += 1.0;
-                for j in 0..hidden_dim {
-                    result[j] += hidden_states[[0, i, j]];
+        match pooling {
+            PoolingStrategy::Mean => {
+                // Mean pooling over non-padding tokens
+                let mut result = vec![0.0f32; hidden_dim];
+                let mut count = 0.0f32;
+
+                for i in 0..seq_len {
+                    if attention_mask[i] == 1 {
+                        count += 1.0;
+                        for j in 0..hidden_dim {
+                            result[j] += hidden_states[[0, i, j]];
+                        }
+                    }
                 }
-            }
-        }
 
-        if count > 0.0 {
-            for v in result.iter_mut() {
-                *v /= count;
+                if count > 0.0 {
+                    for v in result.iter_mut() {
+                        *v /= count;
+                    }
+                }
+                result
+            }
+            PoolingStrategy::Cls => {
+                // CLS token: take position 0
+                let mut result = vec![0.0f32; hidden_dim];
+                for j in 0..hidden_dim {
+                    result[j] = hidden_states[[0, 0, j]];
+                }
+                result
+            }
+            PoolingStrategy::LastToken => {
+                // Last non-padding token
+                let mut last_pos = 0;
+                for i in 0..seq_len {
+                    if attention_mask[i] == 1 {
+                        last_pos = i;
+                    }
+                }
+                let mut result = vec![0.0f32; hidden_dim];
+                for j in 0..hidden_dim {
+                    result[j] = hidden_states[[0, last_pos, j]];
+                }
+                result
             }
         }
-        result
     } else if shape.len() == 3 {
-        // CLS token: take position 0
+        // sentence_embedding output but 3D: take position 0 (CLS)
         let hidden_dim = shape[2];
         let mut result = vec![0.0f32; hidden_dim];
         for j in 0..hidden_dim {

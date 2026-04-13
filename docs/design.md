@@ -1,6 +1,6 @@
 # 项目规划和设计
 
-Hypatia 是一个面向 AI 的记忆管理系统。它使用纯文本和内嵌的关系型数据库管理知识。
+Hypatia 是一个面向 AI 的记忆管理系统。它使用文本检索（FTS）、向量搜索（Vector）和图遍历（Graph）三种方式管理和检索知识。
 
 ## 知识图谱
 
@@ -14,7 +14,7 @@ Hypatia 的知识由两大类组成，
 
 Hypatia 的知识通过 shelves 分组，提供一个默认的 shelves，允许用户导入、导出和引用不同的 shelves。
 
-一个 Shelves 是一个目录，每个目录包含两个文件，一个是 duckdb 文件，包含 knowledge 表和 statement 表。另一个是 sqlite 文件，保存当前数据集的全文检索索引（full text index）。
+一个 Shelves 是一个目录，每个目录包含 `data.duckdb`（knowledge 表和 statement 表，含向量列）、`index.sqlite`（全文检索索引）、可选的 `shelf.toml`（嵌入模型配置）和嵌入模型文件。
 
 Hypatia 面向局部环境，因此数据管理也遵循简单原则，例如 knowledge 直接保存 name 作为主键，statement 中直接保存三元组的可读性形式 `subject, predicate, object` 作为主键。content 是一个 json 对象，默认总会包含：
 
@@ -39,6 +39,7 @@ Hypatia 面向局部环境，因此数据管理也遵循简单原则，例如 kn
 create table knowledge (
     name text primary key,
     content json,
+    embedding float[N],   -- N 由嵌入模型维度决定（BGE-M3 为 1024）
     created_at timestamp default now(),
 );
 ```
@@ -49,12 +50,27 @@ create table statement (
     predicate text,
     object text,
     content json,
+    embedding float[N],   -- N 由嵌入模型维度决定
     created_at timestamp default now(),
     tr_start timestamp,
     tr_end timestamp,
     primary key(subject, predicate, object)
 );
 ```
+
+### 嵌入模型配置
+
+通过 `shelf.toml` 配置嵌入模型，支持本地 ONNX 模型和远程 API：
+
+```toml
+[embedding]
+provider = "local"           # "local" (ONNX) 或 "remote" (HTTP API)
+dimensions = 1024            # 向量维度
+max_seq_length = 8192        # 最大序列长度
+pooling = "mean"             # "mean" / "cls" / "last_token"
+```
+
+默认使用 BAAI/bge-m3 (568M params, 1024d, mean pooling)。也支持 EmbeddingGemma-300M、gte 系列、Jina v5 等模型，以及 OpenAI 兼容的远程 API。
 
 ### FTI
 
@@ -115,13 +131,18 @@ Hypatia 的 JSE 指令包含：
 - $or 会转化成 SQL where 条件中的 or
 - $not 会转化成 SQL where 条件中的 not
 - $search 会转化成 SQLite FTS 数据中的查询，它始终在 $knowledge 或 $statement 内部使用，与 $and、$or 等指令一致，不单独传入 opts 参数，而是遵循外部的 opts 参数。$search 的产物是对应的子查询，这些子查询限制 knowledge 的 name 或 statement 的 subject、predicate、object 匹配从 FTS 搜索到的 key
+- $similar 语义向量搜索，将查询文本编码为向量后通过 DuckDB cosine distance 检索最相似的条目
+- $eq 对应等于
+- $ne 对应不等于
 - $gte 对应 大于等于
 - $lte 对应 小于等于
 - $gt 对应大于
 - $lt 对应小于
-- $qe 对应等于
-- $ne 对应不等于
 - $contains 对应对 duckdb 数据表 content 字段的 contains 查询
+- $like 对应 SQL LIKE 模式匹配
+- $content 对应 content JSON 字段的键值匹配
+- $triple 对三元组的位置匹配，支持通配符 $*
+- $k-hop 图遍历查询，基于 statement triples 做 k 跳递归 CTE，探索实体间的关系路径
 - $quote 用于封装对查询的延迟解释，对应 LISP 语言的 quote 形式
 - 以上针对 duckdb 数据集的查询也包含可选的 opts 字典，其中包含
   - catalog

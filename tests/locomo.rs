@@ -169,6 +169,18 @@ fn setup_model_files(shelf_path: &std::path::Path) -> bool {
         }
     }
 
+    // Copy shelf.toml if it exists (for embedding config: dimensions, pooling strategy, etc.)
+    let shelf_toml_src = src_dir.join("shelf.toml");
+    if shelf_toml_src.exists() {
+        let shelf_toml_dest = shelf_path.join("shelf.toml");
+        if std::os::unix::fs::symlink(&shelf_toml_src, &shelf_toml_dest).is_err() {
+            if std::fs::copy(&shelf_toml_src, &shelf_toml_dest).is_err() {
+                // Non-fatal: will fall back to defaults
+                eprintln!("    WARN: Could not copy shelf.toml");
+            }
+        }
+    }
+
     // Verify files are in place
     shelf_path.join("embedding_model.onnx").exists() && shelf_path.join("tokenizer.json").exists()
 }

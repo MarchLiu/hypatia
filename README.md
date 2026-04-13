@@ -7,7 +7,7 @@ AI-oriented memory management system. Stores structured knowledge as a graph of 
 ## Features
 
 - **Knowledge Graph** -- Knowledge entries (named info points with tags) and Statement triples (subject-predicate-object with temporal ranges)
-- **JSE Query Engine** -- JSON-based query language compiling to parameterized SQL + FTS5, supporting `$and`, `$or`, `$not`, `$eq`, `$ne`, `$gt`, `$lt`, `$contains`, `$like`, `$content`, `$search`, `$quote`, `$triple`
+- **JSE Query Engine** -- JSON-based query language compiling to parameterized SQL + FTS5, supporting `$and`, `$or`, `$not`, `$eq`, `$ne`, `$gt`, `$lt`, `$contains`, `$like`, `$content`, `$search`, `$quote`, `$triple`, `$k-hop`
 - **Dual-Database Storage** -- DuckDB for structured queries + vector search, SQLite FTS5 (Porter stemmer + multi-column BM25) for full-text search, auto-synchronized
 - **Configurable Vector Search** -- Local ONNX models (BGE-M3 default) or remote API (OpenAI-compatible) for semantic similarity search via DuckDB cosine distance
 - **Synonyms** -- Per-entry synonym lists for knowledge, per-position (subject/predicate/object) synonyms for statements, indexed in FTS
@@ -105,6 +105,54 @@ hf download google/embedding-gemma-300M --local-dir /tmp/embedding-gemma
 - Max sequence length: 8192
 - Lightweight, fast inference
 
+#### jinaai/jina-embeddings-v5-text-small
+
+```bash
+hf download jinaai/jina-embeddings-v5-text-small-text-matching \
+  onnx/model.onnx onnx/model.onnx_data tokenizer.json \
+  --local-dir /tmp/jina-v5-small
+cp /tmp/jina-v5-small/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
+cp /tmp/jina-v5-small/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
+cp /tmp/jina-v5-small/tokenizer.json ~/.hypatia/default/tokenizer.json
+```
+
+shelf.toml:
+```toml
+[embedding]
+provider = "local"
+dimensions = 1024
+max_seq_length = 32768
+pooling = "last_token"
+```
+
+- Dimensions: 1024
+- Max sequence length: 32768
+- 677M params, last-token pooling
+
+#### jinaai/jina-embeddings-v5-text-nano
+
+```bash
+hf download jinaai/jina-embeddings-v5-text-nano-text-matching \
+  onnx/model.onnx onnx/model.onnx_data tokenizer.json \
+  --local-dir /tmp/jina-v5-nano
+cp /tmp/jina-v5-nano/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
+cp /tmp/jina-v5-nano/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
+cp /tmp/jina-v5-nano/tokenizer.json ~/.hypatia/default/tokenizer.json
+```
+
+shelf.toml:
+```toml
+[embedding]
+provider = "local"
+dimensions = 768
+max_seq_length = 8192
+pooling = "last_token"
+```
+
+- Dimensions: 768
+- Max sequence length: 8192
+- 239M params, last-token pooling, fastest inference
+
 ### Remote API (OpenAI-Compatible)
 
 For cloud-based embeddings without local model files:
@@ -136,6 +184,7 @@ export OPENAI_API_KEY="sk-..."
 | `provider` | `"local"` | `"local"` for ONNX, `"remote"` for HTTP API |
 | `dimensions` | `1024` | Embedding vector dimensions |
 | `max_seq_length` | `8192` | Max tokenizer sequence length (local only) |
+| `pooling` | `"mean"` | Pooling strategy: `"mean"`, `"cls"`, or `"last_token"` (local only) |
 | `model_path` | `embedding_model.onnx` | ONNX model path, relative to shelf dir (local only) |
 | `tokenizer_path` | `tokenizer.json` | Tokenizer path, relative to shelf dir (local only) |
 | `api_url` | OpenAI URL | API endpoint URL (remote only) |
@@ -188,6 +237,7 @@ JSE (JSON Search Expression) enables precise queries against knowledge or statem
 | `$not` | Logical NOT | `["$not", cond]` |
 | `$quote` | Prevent evaluation | `["$quote", ["$eq", "x", "y"]]` |
 | `$triple` | Triple position match | `["$triple", "Alice", "$*", "Bob"]` |
+| `$k-hop` | K-hop graph traversal | `["$k-hop", "Alice", "$*", 2]` |
 
 ### Examples
 
@@ -221,6 +271,12 @@ hypatia query '["$knowledge", ["$search", "query optimization"]]'
 
 # Statements where triple contains Alice or Bob
 hypatia query '["$statement", ["$or", ["$contains", "triple", "Alice"], ["$contains", "triple", "Bob"]]]'
+
+# K-hop: all entities reachable from Alice in 2 hops
+hypatia query '["$statement", ["$k-hop", "Alice", "$*", 2]]'
+
+# K-hop: follow "knows" edges from Alice, 3 hops deep
+hypatia query '["$statement", ["$k-hop", "Alice", "knows", 3]]'
 ```
 
 ## Architecture
@@ -249,14 +305,16 @@ Tested on the LoCoMo long-term conversational memory benchmark (ACL 2024, 10 con
 
 #### Embedding Model Comparison
 
-| Model | Dims | R@1 | R@5 | R@10 | Vec p50 |
-|-------|------|-----|-----|------|---------|
-| FTS (BM25, baseline) | — | 0.2% | 0.2% | 0.2% | 815 ms |
-| gte-multilingual-base | 768 | 41.6% | 71.6% | 80.3% | 48 ms |
-| gte-Qwen2-1.5B-instruct | 1536 | 17.7% | 43.6% | 54.9% | 105 ms |
-| **BAAI/bge-m3** | **1024** | **38.6%** | **65.7%** | **75.2%** | **43 ms** |
+| Model | Params | Dims | Pooling | R@1 | R@5 | R@10 | Vec p50 |
+|-------|--------|------|---------|-----|-----|------|---------|
+| FTS (BM25, baseline) | — | — | — | 0.2% | 0.2% | 0.2% | 815 ms |
+| Jina v5 text-nano | 239M | 768 | last_token | 8.7% | 19.6% | 25.1% | 25 ms |
+| gte-multilingual-base | 305M | 768 | mean | 13.6% | 31.9% | 42.5% | 25 ms |
+| gte-Qwen2-1.5B-instruct | 1.5B | 1536 | mean | 17.7% | 43.6% | 54.9% | 105 ms |
+| Jina v5 text-small | 677M | 1024 | last_token | 24.9% | 50.7% | 60.4% | 54 ms |
+| **BAAI/bge-m3** | **568M** | **1024** | **mean** | **38.6%** | **65.7%** | **75.2%** | **43 ms** |
 
-#### BGE-M3 by Category
+#### BGE-M3 by Category (default model)
 
 | Category | N | FTS R@10 | Vector R@10 | Improvement |
 |----------|---|----------|-------------|-------------|
@@ -274,7 +332,7 @@ Tested on the LoCoMo long-term conversational memory benchmark (ACL 2024, 10 con
 | Vec latency p50 | 43 ms | ~2-50 ms | ~2-50 ms |
 | Ingest time | ~9 min | — | — |
 
-**Note**: LoCoMo is designed as a semantic challenge, which is why BM25 FTS recall is near zero. Vector search closes this gap effectively. The gte-multilingual-base (768d) slightly outperforms BGE-M3 (1024d) on R@10, but BGE-M3 offers better multilingual coverage and faster ingestion.
+**Note**: LoCoMo is designed as a semantic challenge, which is why BM25 FTS recall is near zero. Vector search closes this gap effectively. BGE-M3 (568M, 1024d) achieves the highest recall (R@10=75.2%) with good latency (43ms) and strong multilingual coverage (100+ languages) — the best default choice. Jina v5 text-small (677M) offers mid-range quality (R@10=60.4%) at 54ms. Notably, larger models don't always win: gte-Qwen2 (1.5B) and gte-multilingual-base (305M, ModernBERT) both underperform BGE-M3 on this benchmark.
 
 #### Run the Benchmark
 
