@@ -181,7 +181,8 @@ impl SqliteStore {
     }
 
     pub fn search(&self, query: &str, opts: &SearchOpts) -> Result<Vec<FtsResult>> {
-        let query = sanitize_fts_query(query);
+        let query = crate::text::segment_for_fts(query);
+        let query = sanitize_fts_query(&query);
         let catalog_filter = opts.catalog.as_deref();
         let sql = match catalog_filter {
             Some(_) =>

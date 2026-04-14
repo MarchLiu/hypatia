@@ -83,6 +83,8 @@ impl Content {
 
     /// Build decomposed fields for multi-column FTS indexing.
     pub fn fts_fields(&self, name: &str) -> FtsFields {
+        use crate::text::segment_for_fts;
+
         let synonyms_text = match &self.synonyms {
             Some(Synonyms::Flat(list)) => list.join(" "),
             Some(Synonyms::Positional(map)) => map
@@ -94,10 +96,10 @@ impl Content {
             None => String::new(),
         };
         FtsFields {
-            key: name.to_string(),
-            data: self.data.clone(),
-            tags: self.tags.join(" "),
-            synonyms: synonyms_text,
+            key: segment_for_fts(name),
+            data: segment_for_fts(&self.data),
+            tags: segment_for_fts(&self.tags.join(" ")),
+            synonyms: segment_for_fts(&synonyms_text),
         }
     }
 
