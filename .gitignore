@@ -1,3 +1,5 @@
 /target
 /default
 bench_report*.json
+longmemeval_*.json
+longmemeval_*_results.jsonl

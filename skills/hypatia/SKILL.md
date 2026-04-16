@@ -1,5 +1,5 @@
 ---
-name: hypatia-query
+name: hypatia
 description: "Interact with the Hypatia AI memory system using natural language. Translate user requests into hypatia CLI commands for knowledge CRUD, statement (RDF triple) management, JSE queries, full-text search, and shelf management. Trigger when: user mentions memories, knowledge bases, knowledge graphs, triples, statements, relationships, shelves, or asks to store, recall, remember, record, save, find, or search information in hypatia. Also trigger when user wants to create or explore relationships between concepts, query existing knowledge, or manage shelves. Examples: 'remember that Rust is a systems language', 'find everything about Alice', 'record that Alice knows Bob', 'search for programming', 'show all knowledge', 'list shelves'."
 user-invocable: true
 allowed-tools: Bash, Read, Grep, Glob
