@@ -72,4 +72,12 @@ impl QueryTarget {
             QueryTarget::Statement => "statement",
         }
     }
+
+    /// Primary key column name for this target, used for FTS/vector key matching.
+    pub fn key_column(&self) -> &'static str {
+        match self {
+            QueryTarget::Knowledge => "name",
+            QueryTarget::Statement => "triple",
+        }
+    }
 }

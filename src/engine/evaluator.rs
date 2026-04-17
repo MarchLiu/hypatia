@@ -76,7 +76,7 @@ impl Evaluator {
                     let search_opts = query_opts_to_search_opts(&opts, target);
                     let search_result = store.execute_similar(&query_text, &search_opts, target)?;
                     let keys: Vec<String> = search_result.rows.iter()
-                        .filter_map(|row| row.get("key").and_then(|v| v.as_str()).map(String::from))
+                        .filter_map(|row| row.get(target.key_column()).and_then(|v| v.as_str()).map(String::from))
                         .collect();
                     if keys.is_empty() {
                         builder.add_condition("1=0".to_string(), Vec::new());
@@ -162,10 +162,7 @@ fn query_opts_to_search_opts(opts: &QueryOpts, target: QueryTarget) -> SearchOpt
 /// For Knowledge: `name IN (?, ?, ...)`
 /// For Statement: `triple IN (?, ?, ...)`
 fn build_key_match_condition(target: QueryTarget, keys: &[String]) -> (String, Vec<serde_json::Value>) {
-    let pk_column = match target {
-        QueryTarget::Knowledge => "name",
-        QueryTarget::Statement => "triple",
-    };
+    let pk_column = target.key_column();
     let params: Vec<serde_json::Value> = keys.iter()
         .map(|k| serde_json::Value::String(k.clone()))
         .collect();
@@ -336,6 +333,43 @@ mod tests {
             &mock,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn eval_similar_inside_knowledge() {
+        // $similar returns rows with "name" field (not "key")
+        let mut similar_row = serde_json::Map::new();
+        similar_row.insert("name".to_string(), json!("rust"));
+        similar_row.insert("distance".to_string(), json!(0.1));
+
+        let mut query_row = serde_json::Map::new();
+        query_row.insert("name".to_string(), json!("rust"));
+
+        let mock = MockStorage::with_search_results(vec![query_row], vec![similar_row]);
+        let result = Evaluator::execute(
+            &json!(["$knowledge", ["$similar", "systems programming"]]),
+            &mock,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["name"], json!("rust"));
+    }
+
+    #[test]
+    fn eval_similar_inside_statement() {
+        // $similar returns rows with "triple" field for statements
+        let mut similar_row = serde_json::Map::new();
+        similar_row.insert("triple".to_string(), json!("Alice,knows,Bob"));
+        similar_row.insert("distance".to_string(), json!(0.2));
+
+        let mut query_row = serde_json::Map::new();
+        query_row.insert("triple".to_string(), json!("Alice,knows,Bob"));
+
+        let mock = MockStorage::with_search_results(vec![query_row], vec![similar_row]);
+        let result = Evaluator::execute(
+            &json!(["$statement", ["$similar", "relationships"]]),
+            &mock,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
     }
 
     #[test]
