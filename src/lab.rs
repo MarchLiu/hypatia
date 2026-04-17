@@ -66,7 +66,7 @@ impl Lab {
         let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
-        Ok(shelf_ref.duckdb.get_knowledge(name)?)
+        shelf_ref.duckdb.get_knowledge(name)
     }
 
     pub fn update_knowledge(&mut self, shelf: &str, name: &str, content: Content) -> Result<Knowledge> {
@@ -106,7 +106,7 @@ impl Lab {
         let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
-        Ok(shelf_ref.duckdb.get_statement(key)?)
+        shelf_ref.duckdb.get_statement(key)
     }
 
     pub fn delete_statement(&mut self, shelf: &str, key: &StatementKey) -> Result<()> {

@@ -526,10 +526,7 @@ impl DuckDbStore {
                 "AND predicate = ?".to_string(),
                 "AND s.predicate = ?".to_string(),
                 {
-                    let mut v = Vec::new();
-                    v.push(subject.to_string());
-                    v.push(p.to_string());
-                    v
+                    vec![subject.to_string(), p.to_string()]
                 },
             ),
             None => (String::new(), String::new(), vec![subject.to_string()]),
