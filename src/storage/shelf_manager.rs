@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::embedding::{EmbeddingConfig, EmbeddingProvider, build_provider};
 use crate::error::{HypatiaError, Result};
 use crate::model::{QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
-use crate::storage::{DuckDbStore, SqliteStore, Storage};
+use crate::storage::{DuckDbStore, ShelfRegistry, SqliteStore, Storage};
 
 pub struct OpenShelf {
     pub id: ShelfId,
@@ -151,17 +151,58 @@ fn statement_to_row(s: &crate::model::Statement) -> serde_json::Map<String, serd
     map
 }
 
-#[derive(Default)]
 pub struct ShelfManager {
     shelves: HashMap<String, OpenShelf>,
+    registry: ShelfRegistry,
+    registry_path: std::path::PathBuf,
 }
 
 impl ShelfManager {
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new ShelfManager, loading the persistent registry and restoring all connections.
+    pub fn new() -> Result<Self> {
+        let registry_path = ShelfRegistry::registry_path();
+        let registry = ShelfRegistry::load(&registry_path)?;
+
+        let mut manager = Self {
+            shelves: HashMap::new(),
+            registry,
+            registry_path,
+        };
+
+        // Restore all registered shelves; ensure default exists.
+        manager.ensure_default()?;
+        manager.restore_registered();
+
+        Ok(manager)
     }
 
+    /// Restore all shelves from the registry (except "default", already connected).
+    fn restore_registered(&mut self) {
+        let entries: Vec<(String, std::path::PathBuf)> = self
+            .registry
+            .shelves
+            .iter()
+            .filter(|(name, _)| *name != "default")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (name, path) in entries {
+            if let Err(e) = self.connect_internal(&path, Some(&name)) {
+                eprintln!("warning: failed to restore shelf '{}': {}", name, e);
+            }
+        }
+    }
+
+    /// Connect to a shelf and persist the registration.
     pub fn connect(&mut self, path: &Path, name: Option<&str>) -> Result<String> {
+        let shelf_name = self.connect_internal(path, name)?;
+        self.registry.register(&shelf_name, &path.to_path_buf());
+        self.registry.save(&self.registry_path)?;
+        Ok(shelf_name)
+    }
+
+    /// Internal connect logic without registry persistence.
+    fn connect_internal(&mut self, path: &Path, name: Option<&str>) -> Result<String> {
         // Ensure directory exists
         std::fs::create_dir_all(path)?;
 
@@ -197,12 +238,15 @@ impl ShelfManager {
         Ok(shelf_name)
     }
 
+    /// Disconnect a shelf and remove from the persistent registry.
     pub fn disconnect(&mut self, name: &str) -> Result<()> {
         if self.shelves.remove(name).is_none() {
             return Err(HypatiaError::Shelf(format!(
                 "shelf '{name}' is not connected"
             )));
         }
+        self.registry.unregister(name);
+        self.registry.save(&self.registry_path)?;
         Ok(())
     }
 
@@ -214,8 +258,14 @@ impl ShelfManager {
         self.shelves.get_mut(name)
     }
 
-    pub fn list(&self) -> Vec<&ShelfId> {
-        self.shelves.values().map(|s| &s.id).collect()
+    /// List all registered shelves with their paths.
+    /// Returns (name, path, is_connected) tuples.
+    pub fn list(&self) -> Vec<(&str, &std::path::PathBuf, bool)> {
+        self.registry
+            .list()
+            .into_iter()
+            .map(|(name, path)| (name, path, self.shelves.contains_key(name)))
+            .collect()
     }
 
     pub fn export(&self, name: &str, dest: &Path) -> Result<()> {
@@ -247,12 +297,20 @@ impl ShelfManager {
             .map(|s| s.config.archives_path.clone())
     }
 
+    /// Ensure the default shelf is registered and connected.
     pub fn ensure_default(&mut self) -> Result<String> {
         let default_path = dirs_home().join(".hypatia").join("default");
         if self.shelves.contains_key("default") {
             return Ok("default".to_string());
         }
-        self.connect(&default_path, Some("default"))
+
+        // Register in registry if not present
+        if !self.registry.contains("default") {
+            self.registry.register("default", &default_path);
+            self.registry.save(&self.registry_path)?;
+        }
+
+        self.connect_internal(&default_path, Some("default"))
     }
 }
 
@@ -291,19 +349,18 @@ mod tests {
     #[test]
     fn connect_and_list() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         let name = mgr.connect(dir.path(), Some("test-shelf")).unwrap();
         assert_eq!(name, "test-shelf");
 
         let shelves = mgr.list();
-        assert_eq!(shelves.len(), 1);
-        assert_eq!(shelves[0].name, "test-shelf");
+        assert!(shelves.iter().any(|(n, _, _)| *n == "test-shelf"));
     }
 
     #[test]
     fn connect_duplicate_fails() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         mgr.connect(dir.path(), Some("dup")).unwrap();
         assert!(mgr.connect(dir.path(), Some("dup")).is_err());
     }
@@ -311,22 +368,23 @@ mod tests {
     #[test]
     fn disconnect() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         mgr.connect(dir.path(), Some("tmp")).unwrap();
         mgr.disconnect("tmp").unwrap();
-        assert!(mgr.list().is_empty());
+        let shelves = mgr.list();
+        assert!(!shelves.iter().any(|(n, _, _)| *n == "tmp"));
     }
 
     #[test]
     fn disconnect_nonexistent_fails() {
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         assert!(mgr.disconnect("nonexistent").is_err());
     }
 
     #[test]
     fn get_shelf() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         mgr.connect(dir.path(), Some("my-shelf")).unwrap();
         assert!(mgr.get("my-shelf").is_some());
         assert!(mgr.get("other").is_none());
@@ -336,7 +394,7 @@ mod tests {
     fn export_shelf() {
         let dir = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         mgr.connect(dir.path(), Some("export-test")).unwrap();
 
         // Add some data
@@ -354,7 +412,7 @@ mod tests {
     #[test]
     fn connect_creates_archives_dir() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         mgr.connect(dir.path(), Some("ar-test")).unwrap();
         let ap = mgr.archives_path("ar-test").unwrap();
         assert!(ap.exists());
@@ -365,7 +423,7 @@ mod tests {
     fn export_includes_archives_dir() {
         let dir = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new();
+        let mut mgr = ShelfManager::new().unwrap();
         mgr.connect(dir.path(), Some("ar-export")).unwrap();
 
         // Put a file in archives/
@@ -382,11 +440,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let default_path = tmp.path().join(".hypatia").join("default");
 
-        let mut mgr = ShelfManager::new();
-        // Override HOME for test
-        // Since ensure_default uses dirs_home(), we can't easily test this
-        // without env var manipulation, so just verify connect works
-        mgr.connect(&default_path, Some("default")).unwrap();
-        assert!(mgr.get("default").is_some());
+        let mut mgr = ShelfManager::new().unwrap();
+        // Since ensure_default uses the real HOME, just verify connect works
+        mgr.connect(&default_path, Some("test-default-2")).unwrap();
+        assert!(mgr.get("test-default-2").is_some());
+    }
+
+    #[test]
+    fn list_shows_connected_status() {
+        let dir = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::new().unwrap();
+        mgr.connect(dir.path(), Some("status-test")).unwrap();
+
+        let shelves = mgr.list();
+        let entry = shelves.iter().find(|(n, _, _)| *n == "status-test").unwrap();
+        assert!(entry.2); // is_connected = true
     }
 }

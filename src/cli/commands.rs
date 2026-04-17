@@ -161,19 +161,22 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
     match cmd {
         Commands::Connect { path, name } => {
             let shelf_name = lab.connect_shelf(&path, name.as_deref())?;
-            println!("Connected to shelf: {shelf_name}");
+            println!("Shelf '{}' connected and registered.", shelf_name);
         }
         Commands::Disconnect { name } => {
             lab.disconnect_shelf(&name)?;
-            println!("Disconnected from shelf: {name}");
+            println!("Shelf '{}' disconnected and unregistered.", name);
         }
         Commands::List => {
             let shelves = lab.list_shelves();
             if shelves.is_empty() {
-                println!("No shelves connected.");
+                println!("No shelves registered.");
             } else {
-                for name in &shelves {
-                    println!("  {name}");
+                // Calculate column widths for alignment
+                let max_name = shelves.iter().map(|(n, _, _)| n.len()).max().unwrap_or(0);
+                for (name, path, connected) in &shelves {
+                    let status = if *connected { "[connected]" } else { "[disconnected]" };
+                    println!("  {:width$}  {}  {}", name, path.display(), status, width = max_name);
                 }
             }
         }

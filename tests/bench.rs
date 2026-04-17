@@ -49,7 +49,7 @@ fn run_benchmark() {
     // Setup shelf in temp directory
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let shelf_path = tmp_dir.path().join("bench_shelf");
-    let mut mgr = ShelfManager::new();
+    let mut mgr = ShelfManager::new().expect("create shelf manager");
     let shelf_name = mgr.connect(&shelf_path, Some("bench")).expect("connect shelf");
 
     // ── Phase 1: Ingest ────────────────────────────────────────────

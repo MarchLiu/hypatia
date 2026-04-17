@@ -295,7 +295,7 @@ fn run_longmemeval_benchmark() {
         println!("  Embedding model: NOT FOUND (vector search disabled)");
     }
 
-    let mut mgr = ShelfManager::new();
+    let mut mgr = ShelfManager::new().expect("create shelf manager");
     let shelf_name = mgr
         .connect(&shelf_path, Some("longmemeval"))
         .expect("connect shelf");

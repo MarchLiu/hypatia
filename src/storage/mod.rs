@@ -1,9 +1,11 @@
 pub mod duckdb_store;
 pub mod shelf_manager;
+pub mod shelf_registry;
 pub mod sqlite_store;
 
 pub use duckdb_store::DuckDbStore;
 pub use shelf_manager::{OpenShelf, ShelfManager};
+pub use shelf_registry::ShelfRegistry;
 pub use sqlite_store::{sanitize_fts_query, FtsDoc, SqliteStore};
 
 use crate::error::Result;

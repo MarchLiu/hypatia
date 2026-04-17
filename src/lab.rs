@@ -20,8 +20,7 @@ pub struct Lab {
 
 impl Lab {
     pub fn new() -> Result<Self> {
-        let mut shelf_manager = ShelfManager::new();
-        shelf_manager.ensure_default()?;
+        let shelf_manager = ShelfManager::new()?;
         Ok(Self { shelf_manager })
     }
 
@@ -35,8 +34,8 @@ impl Lab {
         self.shelf_manager.disconnect(name)
     }
 
-    pub fn list_shelves(&self) -> Vec<String> {
-        self.shelf_manager.list().iter().map(|id| id.name.clone()).collect()
+    pub fn list_shelves(&self) -> Vec<(&str, &std::path::PathBuf, bool)> {
+        self.shelf_manager.list()
     }
 
     pub fn export_shelf(&self, name: &str, dest: &Path) -> Result<()> {

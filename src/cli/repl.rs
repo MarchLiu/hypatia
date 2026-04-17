@@ -93,10 +93,12 @@ impl Repl {
             "list" => {
                 let shelves = self.lab.list_shelves();
                 if shelves.is_empty() {
-                    println!("No shelves connected.");
+                    println!("No shelves registered.");
                 } else {
-                    for name in &shelves {
-                        println!("  {name}");
+                    let max_name = shelves.iter().map(|(n, _, _)| n.len()).max().unwrap_or(0);
+                    for (name, path, connected) in &shelves {
+                        let status = if *connected { "[connected]" } else { "[disconnected]" };
+                        println!("  {:width$}  {}  {}", name, path.display(), status, width = max_name);
                     }
                 }
             }
