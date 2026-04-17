@@ -46,7 +46,7 @@ enum Commands {
         #[arg(short, long, default_value = "")]
         tags: String,
         /// Synonyms (comma-separated)
-        #[arg(short, long, default_value = "")]
+        #[arg(short = 'y', long, default_value = "")]
         synonyms: String,
         /// Binary figure references (comma-separated, e.g. binary://euclid/fig1.png)
         #[arg(short, long, default_value = "")]
@@ -84,7 +84,7 @@ enum Commands {
         #[arg(short, long, default_value = "")]
         data: String,
         /// Synonyms as JSON: {"subject":["Bob"],"predicate":["leads"],"object":["DB"]}
-        #[arg(short, long)]
+        #[arg(short = 'y', long)]
         synonyms: Option<String>,
         #[arg(short, long, default_value = "default")]
         shelf: String,
