@@ -151,15 +151,14 @@ fn statement_to_row(s: &crate::model::Statement) -> serde_json::Map<String, serd
     map
 }
 
+#[derive(Default)]
 pub struct ShelfManager {
     shelves: HashMap<String, OpenShelf>,
 }
 
 impl ShelfManager {
     pub fn new() -> Self {
-        Self {
-            shelves: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn connect(&mut self, path: &Path, name: Option<&str>) -> Result<String> {

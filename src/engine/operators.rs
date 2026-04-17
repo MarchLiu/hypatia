@@ -461,40 +461,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_eval(ops: &[(&str, Vec<AstNode>)]) -> Box<dyn Fn(&AstNode) -> Result<OperatorResult>> {
-        // Simple eval that matches operator patterns
-        let pairs: Vec<(String, Vec<AstNode>)> = ops
-            .iter()
-            .map(|(op, args)| (op.to_string(), args.clone()))
-            .collect();
-        Box::new(move |node: &AstNode| {
-            match node {
-                AstNode::Operator { operator, operands, .. } => {
-                    evaluate_operator(
-                        operator,
-                        operands,
-                        &serde_json::Map::new(),
-                        &|n| {
-                            // Recursive eval for nested operators
-                            match n {
-                                AstNode::Operator { operator, operands, .. } => {
-                                    evaluate_operator(operator, operands, &serde_json::Map::new(), &|_| {
-                                        Err(HypatiaError::Eval("unexpected deep nesting".to_string()))
-                                    })
-                                }
-                                _ => Err(HypatiaError::Eval("expected operator".to_string())),
-                            }
-                        },
-                    )
-                }
-                _ => Err(HypatiaError::Eval("expected operator".to_string())),
-            }
-        })
-    }
-
     #[test]
     fn eq_operator() {
-        let eval = make_eval(&[]);
         let result = evaluate_operator(
             "$eq",
             &[AstNode::Symbol("$name".to_string()), AstNode::Literal(json!("Alice"))],

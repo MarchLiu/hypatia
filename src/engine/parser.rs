@@ -39,33 +39,31 @@ impl Parser {
                     return Ok(AstNode::Array(Vec::new()));
                 }
                 // Check if first element is an operator string
-                if let Some(Value::String(first)) = arr.first() {
-                    if first.starts_with('$') {
-                        let operator = first.clone();
-                        if operator == "$quote" {
-                            // Quote: parse inner but wrap in Quote node
-                            if arr.len() != 2 {
-                                return Err(HypatiaError::Parse(
-                                    "$quote expects exactly one argument".to_string(),
-                                ));
-                            }
-                            let inner = Self::parse(&arr[1])?;
-                            return Ok(AstNode::Quote(Box::new(inner)));
+                if let Some(Value::String(first)) = arr.first().filter(|v| matches!(v, Value::String(s) if s.starts_with('$'))) {
+                    let operator = first.clone();
+                    if operator == "$quote" {
+                        // Quote: parse inner but wrap in Quote node
+                        if arr.len() != 2 {
+                            return Err(HypatiaError::Parse(
+                                "$quote expects exactly one argument".to_string(),
+                            ));
                         }
-                        // Regular operator call: [operator, arg1, arg2, ...]
-                        let operands: Vec<AstNode> = arr[1..]
-                            .iter()
-                            .map(|v| Self::parse(v))
-                            .collect::<Result<Vec<_>>>()?;
-                        return Ok(AstNode::Operator {
-                            operator,
-                            operands,
-                            metadata: Map::new(),
-                        });
+                        let inner = Self::parse(&arr[1])?;
+                        return Ok(AstNode::Quote(Box::new(inner)));
                     }
+                    // Regular operator call: [operator, arg1, arg2, ...]
+                    let operands: Vec<AstNode> = arr[1..]
+                        .iter()
+                        .map(Self::parse)
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(AstNode::Operator {
+                        operator,
+                        operands,
+                        metadata: Map::new(),
+                    });
                 }
                 // Plain array: parse each element
-                let nodes: Vec<AstNode> = arr.iter().map(|v| Self::parse(v)).collect::<Result<Vec<_>>>()?;
+                let nodes: Vec<AstNode> = arr.iter().map(Self::parse).collect::<Result<Vec<_>>>()?;
                 Ok(AstNode::Array(nodes))
             }
             Value::Object(obj) => {
@@ -94,7 +92,7 @@ impl Parser {
                         // - A single value: {"$eq": "value"}
                         let operands = match op_value {
                             Value::Array(arr) => {
-                                arr.iter().map(|v| Self::parse(v)).collect::<Result<Vec<_>>>()?
+                                arr.iter().map(Self::parse).collect::<Result<Vec<_>>>()?
                             }
                             _ => vec![Self::parse(op_value)?],
                         };

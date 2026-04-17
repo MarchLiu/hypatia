@@ -22,9 +22,6 @@ use hypatia::storage::{ShelfManager, Storage};
 // ── LoCoMo data structures ───────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct LoCoMoData(Vec<Conversation>);
-
-#[derive(Debug, Deserialize)]
 struct Conversation {
     sample_id: String,
     conversation: ConversationData,
@@ -489,7 +486,9 @@ fn run_locomo_benchmark() {
         let record = json!({
             "sample_id": r.sample_id,
             "question": r.question,
+            "answer": r.answer,
             "category": r.category,
+            "evidence_names": r.evidence_names,
             "fts_query": r.fts_query,
             "fts_top_keys": r.fts_top_keys,
             "fts_recall_at_1": r.fts_recall_at_1,

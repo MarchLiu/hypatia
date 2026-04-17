@@ -47,6 +47,7 @@ pub struct OnnxProvider {
     pooling: PoolingStrategy,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum OnnxInner {
     Unavailable { reason: String },
     Pending { model_path: std::path::PathBuf, tokenizer_path: std::path::PathBuf },
@@ -272,8 +273,8 @@ fn extract_embedding(
             PoolingStrategy::LastToken => {
                 // Last non-padding token
                 let mut last_pos = 0;
-                for i in 0..seq_len {
-                    if attention_mask[i] == 1 {
+                for (i, &mask) in attention_mask.iter().enumerate().take(seq_len) {
+                    if mask == 1 {
                         last_pos = i;
                     }
                 }

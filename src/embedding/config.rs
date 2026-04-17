@@ -18,21 +18,16 @@ pub enum ProviderKind {
 }
 
 /// Pooling strategy for extracting embeddings from model output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolingStrategy {
     /// Mean pooling over non-padding tokens (default for BGE-M3).
+    #[default]
     Mean,
     /// CLS token at position 0.
     Cls,
     /// Last non-padding token's hidden state (used by Jina v5).
     LastToken,
-}
-
-impl Default for PoolingStrategy {
-    fn default() -> Self {
-        Self::Mean
-    }
 }
 
 #[derive(Debug, Clone)]
