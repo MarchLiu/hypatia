@@ -31,6 +31,9 @@ pub enum HypatiaError {
 
     #[error("model unavailable: {0}")]
     ModelUnavailable(String),
+
+    #[error("config error: {0}")]
+    Config(String),
 }
 
 #[derive(Debug, Error)]

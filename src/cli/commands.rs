@@ -146,8 +146,29 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
+    /// Manage embedding models
+    #[command(subcommand)]
+    Model(ModelCommands),
     /// Enter interactive REPL mode
     Repl,
+}
+
+#[derive(Subcommand)]
+enum ModelCommands {
+    /// List available models in ~/.hypatia/models/
+    List,
+    /// Register a local model directory as a named model
+    Register {
+        /// Model name in Org/Name format (e.g. "BAAI/bge-m3")
+        name: String,
+        /// Path to the model directory containing ONNX and tokenizer files
+        path: PathBuf,
+    },
+    /// Show details of a registered model
+    Show {
+        /// Model name or path
+        name: String,
+    },
 }
 
 pub fn run() -> crate::error::Result<()> {
@@ -396,7 +417,81 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 println!("  ({} files)", files.len());
             }
         }
+        Commands::Model(cmd) => execute_model_command(cmd)?,
         Commands::Repl => unreachable!(),
+    }
+    Ok(())
+}
+
+fn execute_model_command(cmd: ModelCommands) -> crate::error::Result<()> {
+    match cmd {
+        ModelCommands::List => {
+            let models = crate::embedding::config::list_local_models();
+            if models.is_empty() {
+                println!("No models found in ~/.hypatia/models/");
+                println!("Use 'hypatia model register <name> <path>' to register a model.");
+            } else {
+                for (name, path) in &models {
+                    // Show symlink target if applicable
+                    let resolved = std::fs::canonicalize(path)
+                        .unwrap_or_else(|_| path.clone());
+                    if resolved != *path {
+                        println!("  {} -> {}", name, resolved.display());
+                    } else {
+                        println!("  {}  {}", name, path.display());
+                    }
+                }
+                println!("  ({} models)", models.len());
+            }
+        }
+        ModelCommands::Register { name, path } => {
+            let abs_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            match crate::embedding::config::register_model(&name, &abs_path) {
+                Ok(target) => {
+                    println!("Registered model '{}' -> {}", name, abs_path.display());
+                    println!("  Location: {}", target.display());
+                }
+                Err(e) => {
+                    return Err(crate::error::HypatiaError::Config(format!(
+                        "failed to register model '{}': {}", name, e
+                    )));
+                }
+            }
+        }
+        ModelCommands::Show { name } => {
+            match crate::embedding::config::model_info(&name) {
+                Ok(info) => {
+                    println!("Model: {}", info.name);
+                    println!("Directory: {}", info.directory.display());
+                    println!("ONNX: {}", info.model_path.display());
+                    println!("Tokenizer: {}", info.tokenizer_path.display());
+                    println!("Files:");
+                    for f in &info.files {
+                        let size = if f.size_bytes >= 1_073_741_824 {
+                            format!("{:.1} GB", f.size_bytes as f64 / 1_073_741_824.0)
+                        } else if f.size_bytes >= 1_048_576 {
+                            format!("{:.1} MB", f.size_bytes as f64 / 1_048_576.0)
+                        } else if f.size_bytes >= 1024 {
+                            format!("{:.1} KB", f.size_bytes as f64 / 1024.0)
+                        } else {
+                            format!("{} B", f.size_bytes)
+                        };
+                        println!("  {:30} {}", f.name, size);
+                    }
+                    let total = if info.total_size_bytes >= 1_073_741_824 {
+                        format!("{:.1} GB", info.total_size_bytes as f64 / 1_073_741_824.0)
+                    } else {
+                        format!("{:.1} MB", info.total_size_bytes as f64 / 1_048_576.0)
+                    };
+                    println!("Total: {}", total);
+                }
+                Err(e) => {
+                    return Err(crate::error::HypatiaError::Config(format!(
+                        "model '{}' not found: {}", name, e
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
