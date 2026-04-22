@@ -53,6 +53,21 @@ To reference an archive when creating knowledge:
 hypatia knowledge-create "Euclid Prop 1" -d "equilateral triangle" --figures "archive://euclid/fig1.png"
 ```
 
+### Scopes
+
+Use `--scopes` to assign project or global scope to knowledge and statements. Empty string `""` means global. Comma-separated.
+
+```bash
+# Project-scoped only
+hypatia knowledge-create "API convention" -d "REST endpoints use kebab-case" --tags "rule" --scopes "my-project"
+
+# Global scope (empty string)
+hypatia knowledge-create "prefer immutable" -d "always create new objects" --tags "rule" --scopes ""
+
+# Both project and global
+hypatia knowledge-create "no mock DB" -d "never mock database in tests" --tags "taboo" --scopes "my-project,"
+```
+
 ## Knowledge CRUD
 
 Knowledge entries are independent information points with a name, content, and tags.

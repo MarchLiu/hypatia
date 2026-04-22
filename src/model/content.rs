@@ -33,6 +33,10 @@ pub struct Content {
     /// Uses the `archive://<relative_path>` convention.
     #[serde(default)]
     pub figures: Option<Vec<String>>,
+    /// Scope labels for filtering knowledge by project or global context.
+    /// Empty string `""` represents global scope.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -51,6 +55,7 @@ impl Default for Content {
             tags: Vec::new(),
             synonyms: None,
             figures: None,
+            scopes: None,
         }
     }
 }
@@ -83,6 +88,15 @@ impl Content {
             None
         } else {
             Some(figures)
+        };
+        self
+    }
+
+    pub fn with_scopes(mut self, scopes: Vec<String>) -> Self {
+        self.scopes = if scopes.is_empty() {
+            None
+        } else {
+            Some(scopes)
         };
         self
     }
@@ -166,6 +180,7 @@ mod tests {
         assert_eq!(c.data, "hello");
         assert!(c.synonyms.is_none());
         assert!(c.figures.is_none());
+        assert!(c.scopes.is_none());
     }
 
     #[test]
@@ -185,6 +200,21 @@ mod tests {
             Some("euclid/fig1.png")
         );
         assert_eq!(Content::resolve_figure_path("/some/abs/path"), None);
+    }
+
+    #[test]
+    fn scopes_roundtrip() {
+        let c = Content::new("data").with_scopes(vec!["project-a".to_string(), "".to_string()]);
+        let json = c.to_json_string();
+        let c2 = Content::from_json_str(&json).unwrap();
+        assert_eq!(c, c2);
+        assert_eq!(c2.scopes.unwrap(), vec!["project-a", ""]);
+    }
+
+    #[test]
+    fn scopes_empty_becomes_none() {
+        let c = Content::new("data").with_scopes(vec![]);
+        assert!(c.scopes.is_none());
     }
 
     #[test]

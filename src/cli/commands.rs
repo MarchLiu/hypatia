@@ -51,6 +51,9 @@ enum Commands {
         /// Binary figure references (comma-separated, e.g. binary://euclid/fig1.png)
         #[arg(short, long, default_value = "")]
         figures: String,
+        /// Scopes (comma-separated, e.g. "project-a," for global)
+        #[arg(long, default_value = "")]
+        scopes: String,
         /// Shelf name
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -86,6 +89,9 @@ enum Commands {
         /// Synonyms as JSON: {"subject":["Bob"],"predicate":["leads"],"object":["DB"]}
         #[arg(long)]
         synonyms: Option<String>,
+        /// Scopes (comma-separated, e.g. "project-a," for global)
+        #[arg(long, default_value = "")]
+        scopes: String,
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
@@ -186,7 +192,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let result = lab.query(&shelf, &json)?;
             print_result(&result);
         }
-        Commands::KnowledgeCreate { name, data, tags, synonyms, figures, shelf } => {
+        Commands::KnowledgeCreate { name, data, tags, synonyms, figures, scopes, shelf } => {
             let tags_vec: Vec<String> = if tags.is_empty() {
                 Vec::new()
             } else {
@@ -206,10 +212,24 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             } else {
                 figures.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
             };
+            let scopes_vec: Vec<String> = if scopes.is_empty() {
+                Vec::new()
+            } else {
+                scopes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+            };
+            // Treat trailing comma as implicit global scope
+            let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
+                let mut v = scopes_vec;
+                v.push(String::new());
+                v
+            } else {
+                scopes_vec
+            };
             let content = Content::new(&data)
                 .with_tags(tags_vec)
                 .with_synonyms(syn)
-                .with_figures(figures_vec);
+                .with_figures(figures_vec)
+                .with_scopes(scopes_vec);
             let k = lab.create_knowledge(&shelf, &name, content)?;
             println!("Created knowledge: {}", k.name);
         }
@@ -235,7 +255,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             lab.delete_statement(&shelf, &key)?;
             println!("Deleted statement: ({}, {}, {})", subject, predicate, object);
         }
-        Commands::StatementCreate { subject, predicate, object, data, synonyms, shelf } => {
+        Commands::StatementCreate { subject, predicate, object, data, synonyms, scopes, shelf } => {
             let key = StatementKey::new(&subject, &predicate, &object);
             let syn = match synonyms {
                 Some(ref json_str) => {
@@ -248,7 +268,19 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 }
                 None => None,
             };
-            let content = Content::new(&data).with_synonyms(syn);
+            let scopes_vec: Vec<String> = if scopes.is_empty() {
+                Vec::new()
+            } else {
+                scopes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+            };
+            let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
+                let mut v = scopes_vec;
+                v.push(String::new());
+                v
+            } else {
+                scopes_vec
+            };
+            let content = Content::new(&data).with_synonyms(syn).with_scopes(scopes_vec);
             let s = lab.create_statement(&shelf, &key, content, None, None)?;
             println!("Created statement: ({}, {}, {})", s.key.subject, s.key.predicate, s.key.object);
         }
