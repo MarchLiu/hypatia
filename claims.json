@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "meta": {
+    "question": "What is the architecture and design of Hypatia? Analyze its module structure, data flow, CLI design, storage patterns, and key design decisions.",
+    "initiated": "2026-04-21",
+    "audience": [
+      "engineers"
+    ],
+    "phase": "define",
+    "connectors": []
+  },
+  "claims": [
+    {
+      "id": "d001",
+      "type": "constraint",
+      "topic": "sprint-scope",
+      "content": "Rust codebase",
+      "source": {
+        "origin": "stakeholder",
+        "artifact": null,
+        "connector": null
+      },
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "define",
+      "timestamp": "2026-04-21T06:42:04.135Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": []
+    },
+    {
+      "id": "d002",
+      "type": "constraint",
+      "topic": "sprint-scope",
+      "content": "CLI tool for knowledge management",
+      "source": {
+        "origin": "stakeholder",
+        "artifact": null,
+        "connector": null
+      },
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "define",
+      "timestamp": "2026-04-21T06:42:04.135Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": []
+    },
+    {
+      "id": "d003",
+      "type": "constraint",
+      "topic": "done-criteria",
+      "content": "Done looks like: A comprehensive architecture overview with component descriptions, data flow diagrams, and design rationale",
+      "source": {
+        "origin": "stakeholder",
+        "artifact": null,
+        "connector": null
+      },
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "define",
+      "timestamp": "2026-04-21T06:42:04.135Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "done-criteria"
+      ]
+    }
+  ]
+}
