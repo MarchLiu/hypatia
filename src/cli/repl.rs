@@ -14,7 +14,7 @@ impl Repl {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        println!("hypatia 0.1.0 — AI-oriented memory management");
+        println!("hypatia {} — AI-oriented memory management", env!("CARGO_PKG_VERSION"));
         println!("Type .help for commands, or enter JSE queries as JSON.");
 
         loop {
