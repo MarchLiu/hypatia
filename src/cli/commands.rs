@@ -107,6 +107,20 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
+    /// Find semantically similar entries using vector embeddings
+    Similar {
+        /// Query text to search for similar entries
+        query: String,
+        /// Search target: knowledge, statement, or both
+        #[arg(short, long, default_value = "both")]
+        target: String,
+        /// Maximum number of results
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+        /// Shelf to search
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
     /// Export a shelf to another directory
     Export {
         name: String,
@@ -312,6 +326,10 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 offset,
             };
             let result = lab.search(&shelf, &query, opts)?;
+            print_result(&result);
+        }
+        Commands::Similar { query, target, limit, shelf } => {
+            let result = lab.similar(&shelf, &query, &target, limit)?;
             print_result(&result);
         }
         Commands::Export { name, dest } => {

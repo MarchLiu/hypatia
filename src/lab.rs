@@ -125,6 +125,77 @@ impl Lab {
         shelf_ref.execute_search(query, &opts)
     }
 
+    // --- Similarity search ---
+
+    pub fn similar(
+        &self,
+        shelf: &str,
+        query: &str,
+        target: &str,
+        limit: i64,
+    ) -> Result<QueryResult> {
+        let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+
+        let opts = SearchOpts {
+            catalog: None,
+            offset: 0,
+            limit,
+        };
+
+        match target {
+            "knowledge" => {
+                shelf_ref.execute_similar(query, &opts, QueryTarget::Knowledge)
+            }
+            "statement" => {
+                shelf_ref.execute_similar(query, &opts, QueryTarget::Statement)
+            }
+            "both" => {
+                let mut knowledge_rows = shelf_ref
+                    .execute_similar(query, &opts, QueryTarget::Knowledge)?
+                    .rows;
+                let mut statement_rows = shelf_ref
+                    .execute_similar(query, &opts, QueryTarget::Statement)?
+                    .rows;
+
+                for row in &mut knowledge_rows {
+                    row.insert(
+                        "catalog".to_string(),
+                        serde_json::Value::String("knowledge".to_string()),
+                    );
+                }
+                for row in &mut statement_rows {
+                    row.insert(
+                        "catalog".to_string(),
+                        serde_json::Value::String("statement".to_string()),
+                    );
+                }
+
+                let mut all_rows = knowledge_rows;
+                all_rows.extend(statement_rows);
+                all_rows.sort_by(|a, b| {
+                    let da = a
+                        .get("distance")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(f64::MAX);
+                    let db = b
+                        .get("distance")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(f64::MAX);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                all_rows.truncate(limit as usize);
+                Ok(QueryResult::new(all_rows))
+            }
+            _ => Err(crate::error::HypatiaError::Validation(
+                format!(
+                    "invalid target '{target}': must be 'knowledge', 'statement', or 'both'"
+                ),
+            )),
+        }
+    }
+
     // --- Archive files ---
 
     /// Store a file in the shelf's archives/ directory.
