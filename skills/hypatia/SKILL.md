@@ -167,11 +167,86 @@ When creating knowledge entries, automatically extract and create statements for
 3. **Relationships**: if the content mentions other entities → link them with appropriate predicates
 4. **Containment**: if X is part of Y → `X belongs_to Y`
 
+## Thinking Aloud Protocol
+
+**Every query execution MUST be preceded by a brief explanation.** Before running any hypatia command, output a thinking block in this format:
+
+```
+**Step N: <goal>**
+
+> `hypatia <command>`
+
+为什么用这个查询：<1-2 sentence explanation of why this operator/strategy was chosen>
+预期结果：<what kind of results to expect>
+```
+
+Then execute the command. After results come back, briefly interpret them before deciding the next step.
+
+### Example Walkthrough
+
+User asks: *"查找与 Alice 相关的所有知识，以及她的关系网络"*
+
+```
+**Step 1: 直接获取 Alice 的知识条目**
+
+> `hypatia knowledge-get "Alice"`
+
+为什么用这个查询：用户提到了明确的实体名 "Alice"，先尝试直接 lookup 获取完整条目。
+预期结果：如果存在，返回 Alice 的知识条目（content, tags, figures 等）。
+```
+
+(执行... 得到结果或 "not found")
+
+```
+**Step 2: 查找 Alice 参与的所有三元组关系**
+
+> `hypatia query '["$statement", ["$triple", "Alice", "$*", "$*"]]'`
+
+为什么用这个查询：用 $triple 对 subject 位精确匹配 "Alice"，wildcard predicate 和 object，
+这样可以拿到 Alice 作为主语的所有关系（knows, is_a, works_for 等），$triple 走索引，比 $search 更快更精确。
+预期结果：返回所有 Alice 作为 subject 的 statement triples。
+```
+
+(执行... 得到结果)
+
+```
+**Step 3: 查找指向 Alice 的关系（Alice 作为 object）**
+
+> `hypatia query '["$statement", ["$triple", "$*", "$*", "Alice"]]'`
+
+为什么用这个查询：上一步只查了 Alice 作为 subject 的关系，但其他人可能指向 Alice（如 "Bob knows Alice"），
+需要查 object 位 = Alice 的三元组才能得到完整的关系网络。
+预期结果：返回所有以 Alice 为宾语的 statement triples。
+```
+
+(执行... 得到结果)
+
+```
+**Step 4: 2-hop 图遍历，探索 Alice 的更远关系**
+
+> `hypatia query '["$statement", ["$k-hop", "Alice", "$*", 2]]'`
+
+为什么用这个查询：前两步只查了 Alice 的直接关系，用户问的是"关系网络"，需要通过 2-hop 递归遍历
+发现 Alice → Bob → Charlie 这样的间接关系。$k-hop 用递归 CTE 实现，适合图探索。
+预期结果：返回 Alice 的 2-hop 邻域内所有 statement triples。
+```
+
+### Rules for Thinking Aloud
+
+1. **Always explain before executing** — never run a query silently
+2. **Explain the "why"** — which operator was chosen and why, not just what it does
+3. **Keep it concise** — 1-2 sentences for explanation, 1 sentence for expected results
+4. **Interpret results** — after each step, briefly note what was found before deciding next steps
+5. **Multi-step reasoning** — for complex requests, show the decomposition into steps and explain the strategy
+6. **Empty results are informative** — if a query returns nothing, explain what that tells us and adjust strategy
+
 ## Search Strategy — Graph-First Retrieval
 
 When searching for information, prefer precise graph operators over broad FTS search. Use the following decision tree:
 
 ### Search Decision Tree
+
+For each step, include the thinking aloud explanation before executing.
 
 ```
 1. User mentions a specific entity name?
