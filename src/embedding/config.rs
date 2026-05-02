@@ -159,13 +159,12 @@ fn resolve_model_dir(dir: &Path, _model_ref: &str) -> Result<ResolvedModel, Stri
         )
     })?;
 
-    let tokenizer_path = dir.join("tokenizer.json");
-    if !tokenizer_path.exists() {
-        return Err(format!(
+    let tokenizer_path = find_tokenizer_file(dir).ok_or_else(|| {
+        format!(
             "no tokenizer.json found in {}",
             dir.display()
-        ));
-    }
+        )
+    })?;
 
     Ok(ResolvedModel {
         model_dir: dir.to_path_buf(),
@@ -175,9 +174,13 @@ fn resolve_model_dir(dir: &Path, _model_ref: &str) -> Result<ResolvedModel, Stri
 }
 
 /// Find the ONNX model file in a directory, preferring specific names.
+/// Searches top-level first, then standard subdirectories (onnx/, ONNX/, model/),
+/// then falls back to a recursive walk.
 fn find_onnx_file(dir: &Path) -> Option<PathBuf> {
     // Priority order for model file names
     let preferred = ["embedding_model.onnx", "model.onnx", "model_quantized.onnx"];
+
+    // Check top-level first
     for name in &preferred {
         let candidate = dir.join(name);
         if candidate.exists() {
@@ -185,24 +188,67 @@ fn find_onnx_file(dir: &Path) -> Option<PathBuf> {
         }
     }
 
-    // Fallback: any .onnx file (excluding .onnx.data and similar external data)
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.ends_with(".onnx") && !name.contains(".onnx.") {
-                    return Some(path);
+    // Check standard subdirectories where HuggingFace models place ONNX exports
+    for sub in &["onnx", "ONNX", "model"] {
+        let sub_dir = dir.join(sub);
+        if sub_dir.is_dir() {
+            for name in &preferred {
+                let candidate = sub_dir.join(name);
+                if candidate.exists() {
+                    return Some(candidate);
                 }
             }
+        }
+    }
+
+    // Recursive fallback: any .onnx file (excluding .onnx.data external data files)
+    fn walk(dir: &Path) -> Option<PathBuf> {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.ends_with(".onnx") && !name.contains(".onnx.") {
+                        return Some(path);
+                    }
+                }
+                if path.is_dir() {
+                    if let Some(found) = walk(&path) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    walk(dir)
+}
+
+/// Find tokenizer.json in a directory, checking subdirectories.
+fn find_tokenizer_file(dir: &Path) -> Option<PathBuf> {
+    let candidate = dir.join("tokenizer.json");
+    if candidate.exists() {
+        return Some(candidate);
+    }
+
+    for sub in &["onnx", "ONNX"] {
+        let candidate = dir.join(sub).join("tokenizer.json");
+        if candidate.exists() {
+            return Some(candidate);
         }
     }
 
     None
 }
 
-/// Find the latest snapshot directory in HF cache.
+/// Find the best snapshot directory in HF cache.
+/// Tries snapshots in mtime order (newest first), but only returns one
+/// that actually contains usable model files (ONNX or tokenizer.json).
+/// Falls back to the latest snapshot by mtime if none contain ONNX files,
+/// so the caller gets a clear "no ONNX model file" error instead of a
+/// misleading "no snapshots" error.
 fn find_latest_snapshot(snapshots_dir: &Path) -> Result<PathBuf, String> {
-    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    let mut snapshots: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
 
     let entries = std::fs::read_dir(snapshots_dir)
         .map_err(|e| format!("failed to read snapshots dir: {e}"))?;
@@ -215,17 +261,26 @@ fn find_latest_snapshot(snapshots_dir: &Path) -> Result<PathBuf, String> {
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
-            match &latest {
-                Some((_, prev_time)) if modified <= *prev_time => {}
-                _ => latest = Some((path, modified)),
-            }
+            snapshots.push((path, modified));
         }
     }
 
-    latest
-        .map(|(p, _)| p)
-        .ok_or_else(|| "no snapshots found in HuggingFace cache".to_string())
+    if snapshots.is_empty() {
+        return Err("no snapshots found in HuggingFace cache".to_string());
+    }
+
+    // Sort by mtime descending (newest first)
+    snapshots.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Prefer the newest snapshot that contains ONNX or tokenizer files
+    for (path, _) in &snapshots {
+        if find_onnx_file(path).is_some() || find_tokenizer_file(path).is_some() {
+            return Ok(path.clone());
+        }
+    }
+
+    // Fall back to the latest snapshot (so we get a descriptive error message)
+    Ok(snapshots.into_iter().map(|(p, _)| p).next().unwrap())
 }
 
 /// List all models in ~/.hypatia/models/.
@@ -280,9 +335,9 @@ pub fn list_local_models() -> Vec<(String, PathBuf)> {
             if let Some(name) = entry.file_name().to_str() {
                 // Skip if already listed as part of an org/name pair
                 if !name.contains('/') && !results.iter().any(|(n, _)| n.starts_with(&format!("{}/", name))) {
-                    if is_model_dir(&path) && !path.join("tokenizer.json").exists() {
+                    if is_model_dir(&path) && find_tokenizer_file(&path).is_none() {
                         // This is an org dir, not a flat model
-                    } else if is_model_dir(&path) && path.join("tokenizer.json").exists() {
+                    } else if is_model_dir(&path) && find_tokenizer_file(&path).is_some() {
                         // Single-level model (no org)
                         // Only add if it wasn't already picked up as an org
                         let already = results.iter().any(|(n, _)| n.starts_with(name));
@@ -301,7 +356,7 @@ pub fn list_local_models() -> Vec<(String, PathBuf)> {
 
 /// Check if a directory looks like a model directory (has ONNX or tokenizer files).
 fn is_model_dir(dir: &Path) -> bool {
-    find_onnx_file(dir).is_some() || dir.join("tokenizer.json").exists()
+    find_onnx_file(dir).is_some() || find_tokenizer_file(dir).is_some()
 }
 
 /// Register a model by creating a symlink from ~/.hypatia/models/<name> to the source path.
