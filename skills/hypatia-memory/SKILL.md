@@ -11,13 +11,15 @@ You are an automatic memory management system built on top of hypatia. Your job 
 
 ## Trigger Conditions
 
-This skill is activated when the hook script outputs a trigger signal:
+This skill is activated via hooks in `~/.claude/settings.json`:
 
-- `TRIGGER:immediate` — User explicitly asked to remember/forget/modify memory
-- `TRIGGER:periodic` — Every 10 turns of conversation
-- `TRIGGER:session-end` — Session is ending or being compacted
+| Hook Event | When | Output Signal | AI Response |
+|---|---|---|---|
+| `UserPromptSubmit` | Every user message | `TRIGGER:immediate` | User explicitly asked to remember/forget — extract immediately |
+| `UserPromptSubmit` | Every 5 turns | `TRIGGER:extract` | Periodic check — scan for completed work units, extract if found |
+| `Stop` | Session ending | `TRIGGER:session-end` | Final pass — extract all remaining completed work units |
 
-If you see `TRIGGER:skip`, do nothing.
+If the hook outputs nothing (no trigger), no action is needed.
 
 ## Session Startup
 
@@ -36,90 +38,174 @@ hypatia query '["$knowledge", ["$contains", "tags", "taboo"], ["$or", ["$contain
 
 3. Internalize these rules and taboos for the current session. Follow rules and avoid taboos in all interactions.
 
-## Memory Extraction (TRIGGER:immediate or TRIGGER:periodic)
+## Work Unit Extraction Protocol
 
-### Step 1: Analyze Recent Conversation
+This is the core extraction logic. It identifies completed "work units" in the conversation — coherent segments where a task was requested, explored, and resolved — and synthesizes them into concise memories.
 
-Review the recent conversation turns (last 10-20 messages for periodic, or the specific user message for immediate). Identify information worth remembering:
+### Phase 1: Assess Topic Continuity
 
-**Worth remembering:**
-- User's explicit preferences and rules
+When receiving `TRIGGER:extract`:
+
+1. **Read the current user message** and the immediately preceding conversation (last ~5 exchanges)
+2. **Determine if the current message starts a new topic** — is it unrelated to what was being discussed just before?
+3. **Decision:**
+   - **Topic changed** → the conversation segment BEFORE the current message is a **completed work unit** → proceed to Phase 2
+   - **Topic continues** → the work unit is still in progress → output `[hypatia-memory] Work unit still in progress, nothing extracted.` and stop
+   - **TRIGGER:immediate** → bypass topic detection, extract what user asked about directly → jump to Phase 4
+
+For `TRIGGER:session-end`:
+- Treat ALL conversation since last extraction as potentially containing completed work units
+- Run a full pass: find all boundaries, extract each work unit
+
+### Phase 2: Delimit the Work Unit
+
+When a completed work unit is detected:
+
+1. **Read backwards** from just before the current (topic-changing) message
+2. **Find the boundary** — the first message that introduced this topic:
+   - A clear task request ("帮我写...", "fix the bug in...", "explain how...")
+   - An explicit topic switch from a previous subject
+   - The beginning of the session (if this is the first work unit)
+3. **The work unit spans** from that boundary message to the last message before the current one
+
+Skip short or insubstantial segments (greetings, single-line acknowledgments like "thanks" or "ok").
+
+### Phase 3: Classify the Work Unit
+
+| Pattern | Signature | Extraction Strategy |
+|---------|-----------|---------------------|
+| **One-shot correct** | Question → correct answer, no back-and-forth | Extract Q+A directly |
+| **Correction chain** | Question → answer → user correction → fix → ... → final correct answer | Synthesize: initial Q + each correction's insight + final answer |
+| **Exploration** | Open-ended discussion without a single "correct" answer | Extract key findings, decisions, and rationale |
+| **Bug fix** | Bug report → investigation → root cause → fix | Extract: symptoms, root cause, fix approach |
+| **Design decision** | Tradeoff discussion → decision → rationale | Extract: options considered, decision, why |
+| **Trivial** | Greeting, chitchat, simple factual lookup | **Skip** — not worth remembering |
+
+### Phase 4: Synthesize the Memory
+
+The goal is to distill a potentially lengthy conversation into a concise, reusable memory.
+
+**For one-shot correct (most common):**
+```
+Title: <topic-slug>
+Content:
+  ## Context
+  <1 line: what was being worked on and why>
+
+  ## Solution
+  <the answer, code pattern, or approach that worked>
+
+  ## Key Detail
+  <any non-obvious detail worth preserving>
+```
+
+**For correction chains:**
+```
+Title: <topic-slug>
+Content:
+  ## Context
+  <1 line: what was being worked on>
+
+  ## Initial Attempt
+  <what was first tried>
+
+  ## Why It Was Wrong
+  <the problem with the initial approach>
+
+  ## Correct Approach
+  <what actually worked>
+
+  ## Lesson
+  <the generalizable insight — this is the most valuable part>
+```
+
+**Synthesis rules:**
+- **Capture the lesson, not the log.** Don't store step-by-step traces. Store what someone would need to know to avoid repeating the same mistakes.
+- **Be specific.** "Use `Arc<Mutex<T>>` for shared mutable state" is good. "Use proper synchronization" is useless.
+- **Include non-obvious details.** If the solution is obvious from the question, memory adds no value.
+- **Name things well.** The title should make the topic immediately recognizable.
+
+### Phase 5: Selective Extraction
+
+**What to include:**
 - Technical decisions and their rationale
-- Project context (architecture, conventions, constraints)
-- Repeated patterns in user behavior
-- Corrections the user made to your approach
+- Non-obvious solutions to problems
+- Error patterns and their fixes
+- Design patterns that worked
+- User preferences and corrections to your approach
+- Project-specific conventions discovered during the work
 
-**Not worth remembering:**
-- Transient debugging steps
-- Temporary file paths
-- One-off command executions
-- Information already stored in hypatia
+**What to discard:**
+- Full debug logs and stack traces (capture only the error type and root cause)
+- Temporary file paths and intermediate outputs
+- Verbose tool outputs (just the conclusion from them)
+- Repetitive retries of the same approach
+- "Thank you" / "OK" style exchanges
 
-### Step 2: Classify
+**The AI can always re-derive intermediate steps from a good memory. The memory should contain the INSIGHT, not the PROCESS.**
 
-For each piece of information, classify it:
+### Phase 6: Store
 
-| Type | Tag | When to use |
-|------|-----|-------------|
-| **rule** | `["rule"]` | User explicitly affirmed a rule, or a pattern appeared 3+ times |
-| **taboo** | `["taboo"]` | User explicitly rejected an approach or stated "don't do X" |
-| **memory** | `["memory"]` | General knowledge (facts, decisions, context) |
+For each work unit, create knowledge entries and relationships:
 
-### Step 3: Determine Scopes
+```bash
+# Create the work unit memory
+hypatia knowledge-create "wu-<date>-<slug>" \
+  -d "<synthesized content in markdown>" \
+  --tags "memory,work-unit,<topic-tags>" \
+  --scopes "<project>"
 
-For each knowledge entry, determine its scope:
+# At minimum, create one is_a statement
+hypatia statement-create "wu-<date>-<slug>" "is_a" "work-unit" \
+  --tags "memory" \
+  --scopes "<project>"
+```
 
-1. Always include the current project name (from git root or CWD basename)
-2. If the knowledge is clearly universal/global (e.g., coding style preferences, general rules), also include empty string `""`
-3. Example: `--scopes "my-project,"` means "my-project" + global
+If the work unit relates to existing knowledge entries (e.g., it refines a previously stored rule), create linking statements:
 
-### Step 4: Deduplicate
+```bash
+hypatia statement-create "wu-<date>-<slug>" "refines" "<existing-knowledge-name>"
+```
+
+### Deduplication
 
 Before storing, check if similar knowledge already exists:
 
 ```bash
-hypatia search "<keywords from the knowledge>" --limit 5
+hypatia search "<keywords from the work unit>" --limit 5 -c knowledge
 ```
 
-If a similar entry exists, skip or update it instead of creating a duplicate.
+If a similar entry exists:
+- **Supersedes**: If the new finding contradicts or improves upon the old → create new entry + `supersedes` statement linking old to new
+- **Duplicates**: If essentially identical → skip
+- **Extends**: If the new finding adds to the old → create a `extends` statement
 
-### Step 5: Store
+## Explicit Memory Operations (TRIGGER:immediate)
 
-Create knowledge entries:
+When the user explicitly asks to remember or forget something, follow these rules:
 
-```bash
-hypatia knowledge-create "<descriptive-name>" \
-  -d "<knowledge content as clear text>" \
-  --tags "memory,<type>" \
-  --scopes "<project>,<optional-global>"
-```
+### Remember / Store
 
-**Naming convention**: Use concise, descriptive names like:
+1. Identify exactly what the user wants remembered
+2. Classify as `rule`, `taboo`, or general `memory`
+3. Determine scopes (project name + optional global `""`)
+4. Create knowledge entry:
+   ```bash
+   hypatia knowledge-create "<descriptive-name>" \
+     -d "<knowledge content as clear text>" \
+     --tags "memory,<type>" \
+     --scopes "<project>,<optional-global>"
+   ```
+5. Create at least one `is_a` statement
+6. Create relationship statements to connect with existing knowledge
+
+**Naming convention**: Use concise, descriptive names:
 - `rule:prefer-immutable-patterns`
 - `taboo:no-mock-database`
 - `memory:auth-middleware-rewrite-reason`
 - `project:api-endpoint-convention`
 
-### Step 6: Build Relationships
-
-For related knowledge entries, create statements to connect them:
-
-```bash
-hypatia statement-create "<subject>" "relates_to" "<object>" \
-  -d "<relationship description>" \
-  --tags "memory" \
-  --scopes "<project>"
-```
-
-Common relationship predicates:
-- `relates_to` — general association
-- `caused` — causal relationship
-- `supersedes` — newer version replaces older
-- `depends_on` — dependency
-
-## Forget (TRIGGER:immediate only)
-
-When the user asks to forget something:
+### Forget
 
 1. Search for related knowledge:
    ```bash
@@ -135,16 +221,28 @@ When the user asks to forget something:
 
 ## Output Format
 
-After memory extraction, output a brief summary (not visible to user unless they ask):
+After memory extraction, output a brief summary:
 
+**For work unit extraction:**
 ```
-[hypatia-memory] Stored 2 entries, 1 relationship, 0 duplicates skipped.
+[hypatia-memory] Extracted 2 work units (1 one-shot, 1 correction-chain), skipped 1 trivial.
+  wu-2026-05-10-sort-function    → memory,work-unit,rust
+  wu-2026-05-10-db-connection    → memory,work-unit,postgresql,correction
 ```
 
-For forget operations:
+**For immediate operations:**
+```
+[hypatia-memory] Stored: "rule:prefer-immutable-patterns" (rule, scoped to my-project).
+```
 
+**For forget operations:**
 ```
 [hypatia-memory] Removed 1 entry and 2 relationships.
+```
+
+**When nothing to extract:**
+```
+[hypatia-memory] Work unit still in progress, nothing extracted.
 ```
 
 Keep output minimal — this is background operation.
@@ -152,8 +250,11 @@ Keep output minimal — this is background operation.
 ## Important Rules
 
 1. **Never store sensitive information** — no passwords, API keys, tokens, or private data
-2. **Be conservative** — when unsure whether to remember something, don't
-3. **Be concise** — knowledge content should be clear and specific, not verbose
-4. **Use structured tags** — always include the type tag (`rule`, `taboo`, or `memory`)
-5. **Don't interrupt the user** — memory operations are background tasks
-6. **Check Claude Code memory first** — if information is already in `~/.claude/projects/*/memory/`, don't duplicate it in hypatia. Use hypatia for project-specific and cross-session knowledge.
+2. **Be conservative with work unit quality** — when unsure whether a segment is substantive enough to remember, skip it
+3. **Be aggressive with extraction frequency** — check every 5 turns; many problems are solved in one shot and should be remembered
+4. **Synthesize, don't transcribe** — the memory should contain insights, not logs
+5. **Correction chains are gold** — the most valuable memories come from mistakes and their fixes
+6. **Use structured tags** — always include `memory` tag; use `work-unit`, `rule`, `taboo`, `correction` as appropriate
+7. **Don't interrupt the user** — memory operations are background tasks; output the summary line only
+8. **Check Claude Code memory first** — if information is already in `~/.claude/projects/*/memory/`, don't duplicate it in hypatia
+9. **Prefer creating over not creating** — when in doubt about whether a completed work unit is worth remembering, err on the side of storing it
