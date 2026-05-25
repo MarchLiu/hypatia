@@ -1,11 +1,31 @@
 # Memory
 
-1. 用户每发送对话检查一次，如果内容包括用户明确的提及hypatia，进行下一步检查
-2. 如果用户明确的提及记住、遗忘、和对记忆的修改，进入记忆提取环节
-3. 否则每10轮，或者在session结束、或者session compact的时候，才触发记忆提取
-4. 记忆提取时除了提取内容，还要建立必要的关系
-5. 对于需要遗忘的消息，也要删除相关的知识条目和条目的关系
-6. 对于用户明确提及的肯定规则，或者在session中反复出现的模式，记忆为 rule，对于否定规则，记忆为 tabo
-7. hypatia的kowledge和statemewnt中，每一条数据包含名为 scope 的字符串数组，在meta中记录收集到的这条知识时涉及的project，记录到scopes中，如果用户明确提及，或者AI整理出了某个可以作用于全局的内容，在scope中加入一个名为"”的字符串项
-8. 新建立—个session的时候，从匹配的项目 （session的项目加上"）中load规则和禁忌
-9. 每12小时整理一次hypatia的default库，review新加入的session与既往知识是否存在可以添加的关联
+Agent memory in Hypatia has two layers (see `skills/hypatia-memory/SKILL.md`):
+
+## Layer 1: Conversation log (every message)
+
+1. Every user and assistant message is stored as one `knowledge` entry, tag `message`.
+2. When a session summary is available (compaction, end-of-session digest), store it as `knowledge` with tag `session`.
+3. Messages in a session link to the session: `message belongTo session`.
+4. After each new message, count messages without a level-1 summary link using `$not-summaried` (native JSE operator with LEFT JOIN). When count reaches **16**, synthesize one `summary-l1` and create `summarizes` statements to all 16 messages.
+5. Repeat for level 2 (`summary-l2` over 16× `summary-l1`), level 3, … until a level has fewer than 16 unlinked items.
+6. Batch order is **FIFO** (oldest unlinked items first).
+
+## Layer 2: Semantic extraction (unchanged)
+
+1. On explicit remember/forget mentions of hypatia → immediate extraction.
+2. Otherwise every 5 turns, or session end / compact → work-unit extraction.
+3. Extraction creates knowledge **and** relationship statements.
+4. Forget also deletes related knowledge and statements.
+5. Affirmative patterns → `rule`; negative patterns → `taboo`.
+6. Every entry records `scopes` (project name; global rules use `""`).
+7. New sessions load matching project + global rules and taboos.
+8. Optional periodic review of default shelf for cross-session links.
+
+## Predicates
+
+| Predicate | Subject | Object |
+|-----------|---------|--------|
+| `belongTo` | message | session |
+| `summarizes` | summary-lN | message or summary-l(N-1) |
+| `is_a`, `refines`, `extends`, `supersedes`, `derivedFrom` | semantic layer | (as before) |

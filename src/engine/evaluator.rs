@@ -21,18 +21,18 @@ impl Evaluator {
                 match operator.as_str() {
                     "$knowledge" => Self::eval_query(QueryTarget::Knowledge, operands, metadata, store),
                     "$statement" => Self::eval_query(QueryTarget::Statement, operands, metadata, store),
-                    _ => Err(HypatiaError::Eval(format!(
-                        "top-level operator must be $knowledge or $statement, got {operator}"
-                    ))),
+                    "$not-summaried" => Self::eval_not_summaried(operands, metadata, store),
+                        _ => Err(HypatiaError::Eval(format!(
+                            "top-level operator must be $knowledge, $statement, or $not-summaried, got {operator}"
+                        ))),
+                    }
                 }
-            }
-            AstNode::Quote(_inner) => {
-                // A quoted expression at the top level is not a valid query
-                Err(HypatiaError::Eval("quoted expression is not a valid query".to_string()))
-            }
-            _ => Err(HypatiaError::Eval(
-                "top-level expression must be an operator ($knowledge or $statement)".to_string(),
-            )),
+                AstNode::Quote(_inner) => {
+                    Err(HypatiaError::Eval("quoted expression is not a valid query".to_string()))
+                }
+                _ => Err(HypatiaError::Eval(
+                    "top-level expression must be an operator ($knowledge, $statement, or $not-summaried)".to_string(),
+                )),
         }
     }
 
@@ -113,6 +113,105 @@ impl Evaluator {
         store.execute_query(target, &sql, params)
     }
 
+    fn eval_not_summaried(
+        operands: &[AstNode],
+        metadata: &serde_json::Map<String, serde_json::Value>,
+        store: &dyn Storage,
+    ) -> Result<QueryResult> {
+        use serde_json::Value;
+
+        if operands.is_empty() {
+            return Err(HypatiaError::Eval(
+                "$not-summaried expects at least a tag argument (e.g. \"message\", \"summary-l1\")".to_string(),
+            ));
+        }
+
+        let tag = match &operands[0] {
+            AstNode::Literal(Value::String(s)) => s.clone(),
+            AstNode::Symbol(s) => s.clone(),
+            _ => {
+                return Err(HypatiaError::Eval(
+                    "$not-summaried first argument must be a tag string".to_string(),
+                ));
+            }
+        };
+
+        let opts = extract_query_opts(metadata);
+
+        let mut conditions = Vec::new();
+        let mut cond_params = Vec::new();
+
+        for operand in &operands[1..] {
+            let result = Self::eval_condition(operand)?;
+            match result {
+                OperatorResult::SqlCondition { fragment, params } => {
+                    let aliased = alias_knowledge_columns(&fragment);
+                    conditions.push(aliased);
+                    cond_params.extend(params);
+                }
+                OperatorResult::FtsQuery { query } => {
+                    let search_opts = query_opts_to_search_opts(&opts, QueryTarget::Knowledge);
+                    let search_result = store.execute_search(&query, &search_opts)?;
+                    let keys: Vec<String> = search_result.rows.iter()
+                        .filter_map(|row| row.get("key").and_then(|v| v.as_str()).map(String::from))
+                        .collect();
+                    if keys.is_empty() {
+                        conditions.push("1=0".to_string());
+                    } else {
+                        let (fragment, params) = build_key_match_condition(QueryTarget::Knowledge, &keys);
+                        conditions.push(alias_knowledge_columns(&fragment));
+                        cond_params.extend(params);
+                    }
+                }
+                OperatorResult::VectorQuery { query_text } => {
+                    let search_opts = query_opts_to_search_opts(&opts, QueryTarget::Knowledge);
+                    let search_result = store.execute_similar(&query_text, &search_opts, QueryTarget::Knowledge)?;
+                    let keys: Vec<String> = search_result.rows.iter()
+                        .filter_map(|row| row.get("name").and_then(|v| v.as_str()).map(String::from))
+                        .collect();
+                    if keys.is_empty() {
+                        conditions.push("1=0".to_string());
+                    } else {
+                        let (fragment, params) = build_key_match_condition(QueryTarget::Knowledge, &keys);
+                        conditions.push(alias_knowledge_columns(&fragment));
+                        cond_params.extend(params);
+                    }
+                }
+                OperatorResult::KHop { .. } => {
+                    return Err(HypatiaError::Eval(
+                        "$k-hop is not valid inside $not-summaried".to_string(),
+                    ));
+                }
+                OperatorResult::Value(_) => {}
+            }
+        }
+
+        let tag_pattern = format!("%{}%", tag);
+        let mut all_params: Vec<Value> = vec![Value::String(tag_pattern)];
+        all_params.extend(cond_params);
+        all_params.push(Value::Number(opts.limit.into()));
+        all_params.push(Value::Number(opts.offset.into()));
+
+        let extra_conditions = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT knowledge.name, knowledge.content, CAST(knowledge.created_at AS VARCHAR) AS created_at \
+             FROM knowledge \
+             LEFT JOIN statement ON knowledge.name = statement.object AND statement.predicate = 'summarizes' \
+             WHERE statement.subject IS NULL \
+             AND json_extract_string(knowledge.content, '$.tags') LIKE ?{} \
+             ORDER BY knowledge.created_at ASC \
+             LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)",
+            extra_conditions
+        );
+
+        store.execute_query(QueryTarget::Knowledge, &sql, all_params)
+    }
+
     fn eval_condition(ast: &AstNode) -> Result<OperatorResult> {
         match ast {
             AstNode::Operator { operator, operands, metadata } => {
@@ -169,6 +268,15 @@ fn build_key_match_condition(target: QueryTarget, keys: &[String]) -> (String, V
     let placeholders: Vec<&str> = keys.iter().map(|_| "?").collect();
     let in_clause = placeholders.join(", ");
     (format!("{pk_column} IN ({in_clause})"), params)
+}
+
+/// Qualify knowledge column references for LEFT JOIN context.
+/// Replaces bare `content` in json_extract_string calls and `created_at`
+/// in CAST expressions with `knowledge.` prefixed versions.
+fn alias_knowledge_columns(fragment: &str) -> String {
+    fragment
+        .replace("json_extract_string(content,", "json_extract_string(knowledge.content,")
+        .replace("CAST(created_at", "CAST(knowledge.created_at")
 }
 
 /// Convert an AST node back to a JSON value (for $quote).
@@ -390,5 +498,86 @@ mod tests {
         );
         assert_eq!(sql, "triple IN (?, ?)");
         assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn eval_not_summaried_basic() {
+        let mut row = serde_json::Map::new();
+        row.insert("name".to_string(), json!("msg-s1-001"));
+        row.insert("content".to_string(), json!(r#"{"tags":["message","user"]}"#));
+        row.insert("created_at".to_string(), json!("2026-01-01 00:00:00"));
+
+        let mock = MockStorage::new(vec![row]);
+        let result = Evaluator::execute(
+            &json!(["$not-summaried", "message"]),
+            &mock,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["name"], json!("msg-s1-001"));
+    }
+
+    #[test]
+    fn eval_not_summaried_with_condition() {
+        let mut row = serde_json::Map::new();
+        row.insert("name".to_string(), json!("msg-s1-001"));
+        row.insert("content".to_string(), json!(r#"{"tags":["message","user"]}"#));
+        row.insert("created_at".to_string(), json!("2026-01-01 00:00:00"));
+
+        let mock = MockStorage::new(vec![row]);
+        let result = Evaluator::execute(
+            &json!(["$not-summaried", "message", ["$contains", "scopes", "my-project"]]),
+            &mock,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn eval_not_summaried_empty_operands() {
+        let mock = MockStorage::new(vec![]);
+        let result = Evaluator::execute(
+            &json!(["$not-summaried"]),
+            &mock,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expects at least a tag"));
+    }
+
+    #[test]
+    fn eval_not_summaried_bad_tag() {
+        let mock = MockStorage::new(vec![]);
+        let result = Evaluator::execute(
+            &json!(["$not-summaried", 123]),
+            &mock,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a tag string"));
+    }
+
+    #[test]
+    fn alias_knowledge_columns_replaces_content() {
+        let input = "json_extract_string(content, '$.tags') LIKE ?";
+        let result = alias_knowledge_columns(input);
+        assert_eq!(result, "json_extract_string(knowledge.content, '$.tags') LIKE ?");
+    }
+
+    #[test]
+    fn alias_knowledge_columns_replaces_created_at() {
+        let input = "CAST(created_at AS VARCHAR) LIKE ?";
+        let result = alias_knowledge_columns(input);
+        assert_eq!(result, "CAST(knowledge.created_at AS VARCHAR) LIKE ?");
+    }
+
+    #[test]
+    fn alias_knowledge_columns_preserves_name() {
+        let input = "name = ?";
+        let result = alias_knowledge_columns(input);
+        assert_eq!(result, "name = ?");
+    }
+
+    #[test]
+    fn alias_knowledge_columns_handles_combined() {
+        let input = "json_extract_string(content, '$.scopes') LIKE ? AND name = ?";
+        let result = alias_knowledge_columns(input);
+        assert_eq!(result, "json_extract_string(knowledge.content, '$.scopes') LIKE ? AND name = ?");
     }
 }
