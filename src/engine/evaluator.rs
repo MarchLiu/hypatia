@@ -201,7 +201,7 @@ impl Evaluator {
         let sql = format!(
             "SELECT knowledge.name, knowledge.content, CAST(knowledge.created_at AS VARCHAR) AS created_at \
              FROM knowledge \
-             LEFT JOIN statement ON knowledge.name = statement.object AND statement.predicate = 'summarizes' \
+             LEFT JOIN statement ON knowledge.name = statement.object AND statement.predicate = 'summary' \
              WHERE statement.subject IS NULL \
              AND json_extract_string(knowledge.content, '$.tags') LIKE ?{} \
              ORDER BY knowledge.created_at ASC \

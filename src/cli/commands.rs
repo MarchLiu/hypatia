@@ -163,6 +163,15 @@ enum Commands {
     /// Manage embedding models
     #[command(subcommand)]
     Model(ModelCommands),
+    /// Get unsummarized messages for the current session
+    SessionCurrent {
+        /// Filter by scope (project/user key)
+        #[arg(long)]
+        scope: Option<String>,
+        /// Shelf to query
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
     /// Enter interactive REPL mode
     Repl,
 }
@@ -433,6 +442,30 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                     println!("  archive://{}", f);
                 }
                 println!("  ({} files)", files.len());
+            }
+        }
+        Commands::SessionCurrent { scope, shelf } => {
+            let mut conditions = vec![
+                serde_json::json!(["$contains", "scopes", scope.as_deref().unwrap_or("")]),
+            ];
+            if let Some(ref s) = scope {
+                if !s.is_empty() {
+                    conditions = vec![
+                        serde_json::json!(["$contains", "scopes", s]),
+                    ];
+                }
+            }
+            let jse = serde_json::json!(["$not-summaried", "message", conditions.into_iter().next().unwrap()]);
+            let result = lab.query(&shelf, &jse)?;
+            if result.rows.is_empty() {
+                println!("No unsummarized messages.");
+            } else {
+                for row in &result.rows {
+                    let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let created = row.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("  {name}  {created}");
+                }
+                println!("  ({} unsummarized messages)", result.rows.len());
             }
         }
         Commands::Model(cmd) => execute_model_command(cmd)?,

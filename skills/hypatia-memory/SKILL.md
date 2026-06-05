@@ -7,12 +7,13 @@ allowed-tools: Bash, Read, Grep, Glob
 
 # Hypatia Memory System
 
-You are an automatic memory management system built on top of hypatia. Your job is to:
+You are an automatic memory management system built on hypatia. Your job is to:
 
 1. **Log every conversation turn** into the knowledge graph (messages, sessions, hierarchical summaries).
-2. **Extract semantic memories** (rules, taboos, work units) using the original extraction rules below.
+2. **Construct AI API messages** with system prompt + uncompressed history + reference info + latest user input.
+3. **Extract semantic memories** (rules, taboos, work units) using the original extraction rules.
 
-Both layers run in the same hook invocations; conversation logging always runs first.
+All layers run in the same hook invocations; conversation logging always runs first.
 
 ## Trigger Conditions
 
@@ -20,13 +21,13 @@ This skill is activated via hooks in `~/.claude/settings.json` (or Cursor equiva
 
 | Hook Event | When | Output Signal | AI Response |
 |---|---|---|---|
-| `UserPromptSubmit` | Every user message | `TRIGGER:log` | Record user message + run summary cascade + optional semantic extract |
+| `UserPromptSubmit` | Every user message | `TRIGGER:log` | Record user message + check summary cascade + optional semantic extract |
 | `UserPromptSubmit` | Every user message (if remember/forget) | `TRIGGER:immediate` | Explicit remember/forget (semantic layer) |
 | `UserPromptSubmit` | Every 5 turns | `TRIGGER:extract` | Scan for completed work units (semantic layer) |
-| `Stop` / assistant turn hook | Session end or each assistant reply | `TRIGGER:log` | Record assistant message + run summary cascade |
+| `Stop` / assistant turn hook | Session end or each assistant reply | `TRIGGER:log` | Record assistant message + check summary cascade |
 | `Stop` | Session ending | `TRIGGER:session-end` | Record session summary if available + final semantic extract pass |
 
-**On every `TRIGGER:log`:** always execute [Conversation Logging Protocol](#conversation-logging-protocol) before anything else.
+**On every `TRIGGER:log`:** always execute [Conversation Logging Protocol](#conversation-logging-protocol) first.
 
 If the hook outputs nothing (no trigger), no action is needed.
 
@@ -78,15 +79,16 @@ hypatia knowledge-create "msg-<SESSION_ID>-<TURN>" \
 
 ## Content
 <full message text>" \
-  --tags "message,<ROLE>" \
+  --tags "message" \
   --scopes "<PROJECT>"
 ```
 
 Rules:
 
-- **One message → one knowledge entry.** Never batch multiple turns into one `message` entry.
-- Tag is always `message` (plus role tag `user` or `assistant` for filtering).
-- Do not skip trivial messages (greetings, “ok”, etc.) — the log layer is complete.
+- **One message → one knowledge entry.** Never batch multiple turns.
+- Tag is `message` (no role tag; use content to determine role).
+- Name is auto-generated: `msg-<SESSION_ID>-<TURN>`.
+- Do not skip trivial messages (greetings, "ok", etc.) — the log layer is complete.
 - Never store secrets (passwords, API keys, tokens) — redact before writing.
 
 ### Step 2: Record session knowledge (when summary available)
@@ -114,65 +116,76 @@ hypatia statement-create "msg-<SESSION_ID>-<TURN>" "belongTo" "session-<SESSION_
 
 Predicate is exactly `belongTo` (message → session).
 
-### Step 4: Hierarchical summary cascade (after each new message)
+### Step 4: Hierarchical summary cascade
 
-After writing a new message, run the cascade from level 1 upward until a level fails to reach the batch size (16).
+After writing each new message, run the cascade from level 1 upward.
 
-**Constants:** `BATCH_SIZE = 16`
+**Constants:** `BATCH_SIZE = 16` (for L2+)
 
-**Predicates:**
+**Predicate:** All summary triples use predicate `summary`.
 
-| Link | Triple |
+| Triple | Meaning |
 |---|---|
-| Summary → summarized item | `<summary> summarizes <item>` |
-| Level | Tag on summary knowledge |
+| `<summary-name> summary <item-name>` | Summary condenses the item |
 
-| Level | Summary tag | Summarizes |
-|---|---|---|
-| 1 | `summary-l1` | `message` entries |
-| 2 | `summary-l2` | `summary-l1` entries |
-| N | `summary-lN` | `summary-l(N-1)` entries |
+| Level | Tag | Triggers when | Summarizes |
+|---|---|---|---|
+| 1 | `["summary", "summary 1"]` | Token count ≥ `max_tokens × 0.9` | `message` entries |
+| 2 | `["summary", "summary 2"]` | Count ≥ 16 unlinked L1 | `summary 1` entries |
+| N | `["summary", "summary N"]` | Count ≥ 16 unlinked L(N-1) | `summary (N-1)` entries |
 
-#### 4a. Find candidates without parent summary at level L
+**Token-based L1 threshold:**
+- Estimate tokens by character count / 4 (agent-side estimation).
+- `max_tokens` depends on the model in use (e.g. GLM-5.1: 200k, DeepSeek V4 Pro: 1M).
+- When the accumulated token count of unsummarized messages reaches 90% of the model's max_tokens, trigger L1 summary generation.
 
-Use `$not-summaried` to find unlinked items in a single query. It performs a `LEFT JOIN` between `knowledge` and `statement` tables, returning knowledge entries that have no incoming `summarizes` statement.
+**Context compression trigger:**
+- If context tokens reach `settings.max_token × 0.9`, also trigger summary generation and start a new session. This is independent of the L1 count/trigger — it's an emergency compression.
 
-**Level L — any summary level:**
+#### 4a. Check unsummarized items at level L
+
+Use `$not-summaried` (native JSE operator with LEFT JOIN):
 
 ```bash
 hypatia query '["$not-summaried", "<TAG>", ["$contains", "scopes", "<PROJECT>"]]'
 ```
 
-| Level | `<TAG>` | Returns |
-|---|---|---|
-| 1 | `message` | Messages without any `summarizes` triple |
-| 2 | `summary-l1` | L1 summaries without L2 rollup |
-| N | `summary-l(N-1)` | L(N-1) summaries without LN rollup |
+Or use the shorthand:
 
-Results are already sorted **oldest first** (ASC). When count ≥ 16, take the first 16.
+```bash
+hypatia session-current --scope <PROJECT>
+```
 
-No per-message checking is needed — the operator uses SQL `LEFT JOIN ... WHERE s.subject IS NULL` internally.
+| Level | `<TAG>` |
+|---|---|
+| 1 | `message` |
+| 2 | `summary 1` |
+| N | `summary (N-1)` |
+
+Results are sorted **oldest first** (ASC). For L1: count tokens (estimate `chars/4`). For L2+: take first 16 if count ≥ 16.
 
 #### 4b. Generate and store summary
 
-When a batch of 16 is ready at level L:
+When a batch is ready at level L:
 
-1. **Synthesize** a concise summary from the 16 items' content (not verbatim concatenation).
-2. **Create** summary knowledge:
+1. **Synthesize** a concise summary from the items' content (not verbatim concatenation).
+2. **Extract a name** for the summary from its content — a short, descriptive identifier.
+3. **Create** summary knowledge:
 
 ```bash
-hypatia knowledge-create "sum-l<L>-<SESSION_ID>-<BATCH_SEQ>" \
+hypatia knowledge-create "<extracted-summary-name>" \
   -d "<synthesized summary markdown>" \
-  --tags "summary,summary-l<L>" \
+  --tags "summary,summary <L>" \
   --scopes "<PROJECT>"
 ```
 
-`<BATCH_SEQ>` is a zero-padded counter per session per level (e.g. `0001`, `0002`).
+- Summary has a meaningful name extracted from the summarized content (e.g. "error-handling-refactor", "api-design-discussion").
+- Tag format: `summary,summary <L>` where L is the level number.
 
-3. **Link** summary to each of the 16 items:
+4. **Link** summary to each source item:
 
 ```bash
-hypatia statement-create "sum-l<L>-<SESSION_ID>-<BATCH_SEQ>" "summarizes" "<item-name>" \
+hypatia statement-create "<summary-name>" "summary" "<item-name>" \
   --scopes "<PROJECT>"
 ```
 
@@ -180,18 +193,49 @@ Run one `statement-create` per item in the batch.
 
 #### 4c. Repeat upward
 
-After creating a level-L summary, re-run step 4a for level L+1 (the new summary may complete another batch of 16 at the next tier).
+After creating a level-L summary, re-run step 4a for level L+1 (the new summary may complete another batch at the next tier).
 
-Stop when any level has **fewer than 16** unlinked items — do not partially summarize.
+Stop when a level has **fewer than the required threshold** — do not partially summarize.
 
-### Conversation logging output
+### Step 5: AI API Message Construction
+
+When submitting a conversation to the AI API, construct the messages list as:
 
 ```
-[hypatia-memory] Logged msg-<SESSION_ID>-<TURN> (user|assistant).
-[hypatia-memory] Summary cascade: +1 summary-l1, +0 summary-l2 (stopped at L2: 3 unlinked).
+[system_prompt, uncompressed_messages..., reference_info, latest_user_input]
 ```
 
-Keep output minimal.
+**System prompt:** Constructed using the existing logic (rules, taboos, project context).
+
+**Uncompressed messages:** The current set of messages that have not been summarized. Query with:
+
+```bash
+hypatia query '["$not-summaried", "message", ["$contains", "scopes", "<PROJECT>"]]'
+```
+
+**Reference info:** Analyze the user's latest input — do NOT use it verbatim as a search query. Instead:
+
+1. Identify key entities, concepts, and topics from the user's input.
+2. Construct 1-3 JSE queries targeting these topics. Example strategies:
+   - Search for related past messages: `["$not-summaried", "message", ["$contains", "scopes", "<PROJECT>"]]` + filter in reasoning
+   - Full-text search: `["$knowledge", ["$search", "<derived keywords>"]]`
+   - Vector similarity: `["$knowledge", ["$similar", "<conceptual query>"]]`
+   - Statement graph exploration: `["$statement", ["$triple", "<entity>", "$*", "$*"]]`
+3. Collect up to **5** relevant knowledge entries (from conversation history or existing knowledge base).
+4. Format them as a reference message placed as the **second-to-last** message:
+
+```
+## Reference Information
+The following relevant context was retrieved from the knowledge base:
+
+1. <entry-name>: <summary or key content>
+2. <entry-name>: <summary or key content>
+...
+```
+
+**Latest user input:** Always the most recent user message, placed last.
+
+**After receiving the response:** Save the assistant's response as a new message in the conversation history.
 
 ---
 
@@ -220,10 +264,7 @@ For `TRIGGER:session-end`:
 When a completed work unit is detected:
 
 1. **Read backwards** from just before the current (topic-changing) message
-2. **Find the boundary** — the first message that introduced this topic:
-   - A clear task request ("帮我写...", "fix the bug in...", "explain how...")
-   - An explicit topic switch from a previous subject
-   - The beginning of the session (if this is the first work unit)
+2. **Find the boundary** — the first message that introduced this topic
 3. **The work unit spans** from that boundary message to the last message before the current one
 
 Skip short or insubstantial segments (greetings, single-line acknowledgments like "thanks" or "ok").
@@ -233,28 +274,24 @@ Skip short or insubstantial segments (greetings, single-line acknowledgments lik
 | Pattern | Signature | Extraction Strategy |
 |---------|-----------|---------------------|
 | **One-shot correct** | Question → correct answer, no back-and-forth | Extract Q+A directly |
-| **Correction chain** | Question → answer → user correction → fix → ... → final correct answer | Synthesize: initial Q + each correction's insight + final answer |
-| **Exploration** | Open-ended discussion without a single "correct" answer | Extract key findings, decisions, and rationale |
+| **Correction chain** | Question → answer → user correction → fix → ... | Synthesize: initial Q + each correction + final answer |
+| **Exploration** | Open-ended discussion without single "correct" answer | Extract key findings, decisions, rationale |
 | **Bug fix** | Bug report → investigation → root cause → fix | Extract: symptoms, root cause, fix approach |
 | **Design decision** | Tradeoff discussion → decision → rationale | Extract: options considered, decision, why |
 | **Trivial** | Greeting, chitchat, simple factual lookup | **Skip** — not worth remembering |
 
 ### Phase 4: Synthesize the Memory
 
-The goal is to distill a potentially lengthy conversation into a concise, reusable memory.
-
-**For one-shot correct (most common):**
+**For one-shot correct:**
 ```
 Title: <topic-slug>
 Content:
   ## Context
-  <1 line: what was being worked on and why>
-
+  <1 line summary>
   ## Solution
-  <the answer, code pattern, or approach that worked>
-
+  <the answer or approach>
   ## Key Detail
-  <any non-obvious detail worth preserving>
+  <non-obvious detail>
 ```
 
 **For correction chains:**
@@ -262,70 +299,37 @@ Content:
 Title: <topic-slug>
 Content:
   ## Context
-  <1 line: what was being worked on>
-
   ## Initial Attempt
-  <what was first tried>
-
   ## Why It Was Wrong
-  <the problem with the initial approach>
-
   ## Correct Approach
-  <what actually worked>
-
   ## Lesson
-  <the generalizable insight — this is the most valuable part>
 ```
 
 **Synthesis rules:**
-- **Capture the lesson, not the log.** Don't store step-by-step traces. Store what someone would need to know to avoid repeating the same mistakes.
-- **Be specific.** "Use `Arc<Mutex<T>>` for shared mutable state" is good. "Use proper synchronization" is useless.
-- **Include non-obvious details.** If the solution is obvious from the question, memory adds no value.
-- **Name things well.** The title should make the topic immediately recognizable.
+- Capture the lesson, not the log.
+- Be specific. "Use `Arc<Mutex<T>>`" is good. "Use proper synchronization" is useless.
+- Include non-obvious details.
+- Name things well.
 
 ### Phase 5: Selective Extraction
 
-**What to include:**
-- Technical decisions and their rationale
-- Non-obvious solutions to problems
-- Error patterns and their fixes
-- Design patterns that worked
-- User preferences and corrections to your approach
-- Project-specific conventions discovered during the work
+**What to include:** technical decisions, non-obvious solutions, error patterns, design patterns, user preferences, project conventions.
 
-**What to discard:**
-- Full debug logs and stack traces (capture only the error type and root cause)
-- Temporary file paths and intermediate outputs
-- Verbose tool outputs (just the conclusion from them)
-- Repetitive retries of the same approach
-- "Thank you" / "OK" style exchanges
-
-**The AI can always re-derive intermediate steps from a good memory. The memory should contain the INSIGHT, not the PROCESS.**
+**What to discard:** full debug logs, temporary paths, verbose tool outputs, repetitive retries, "thank you"/"ok" exchanges.
 
 ### Phase 6: Store
 
-For each work unit, create knowledge entries and relationships:
-
 ```bash
-# Create the work unit memory
 hypatia knowledge-create "wu-<date>-<slug>" \
-  -d "<synthesized content in markdown>" \
+  -d "<synthesized content>" \
   --tags "memory,work-unit,<topic-tags>" \
   --scopes "<PROJECT>"
 
-# At minimum, create one is_a statement
 hypatia statement-create "wu-<date>-<slug>" "is_a" "work-unit" \
-  --tags "memory" \
   --scopes "<PROJECT>"
 ```
 
-If the work unit relates to existing knowledge entries (e.g., it refines a previously stored rule), create linking statements:
-
-```bash
-hypatia statement-create "wu-<date>-<slug>" "refines" "<existing-knowledge-name>"
-```
-
-Optionally link work units to the conversation graph:
+Optionally link to conversation graph:
 
 ```bash
 hypatia statement-create "wu-<date>-<slug>" "derivedFrom" "msg-<SESSION_ID>-<TURN>"
@@ -333,67 +337,49 @@ hypatia statement-create "wu-<date>-<slug>" "derivedFrom" "msg-<SESSION_ID>-<TUR
 
 ### Deduplication
 
-Before storing, check if similar knowledge already exists:
+Before storing, check for similar knowledge:
 
 ```bash
-hypatia search "<keywords from the work unit>" --limit 5 -c knowledge
+hypatia search "<keywords>" --limit 5 -c knowledge
 ```
 
-If a similar entry exists:
-- **Supersedes**: If the new finding contradicts or improves upon the old → create new entry + `supersedes` statement linking old to new
-- **Duplicates**: If essentially identical → skip
-- **Extends**: If the new finding adds to the old → create a `extends` statement
+- **Supersedes**: new contradicts old → create `supersedes` statement
+- **Duplicates**: identical → skip
+- **Extends**: adds to old → create `extends` statement
 
 ---
 
 ## Explicit Memory Operations (TRIGGER:immediate)
 
-When the user explicitly asks to remember or forget something, follow these rules:
+When the user explicitly asks to remember or forget:
 
 ### Remember / Store
 
-1. Identify exactly what the user wants remembered
+1. Identify what to remember
 2. Classify as `rule`, `taboo`, or general `memory`
-3. Determine scopes (project name + optional global `""`)
-4. Create knowledge entry:
+3. Determine scopes
+4. Create:
    ```bash
-   hypatia knowledge-create "<descriptive-name>" \
-     -d "<knowledge content as clear text>" \
+   hypatia knowledge-create "<name>" \
+     -d "<content>" \
      --tags "memory,<type>" \
      --scopes "<PROJECT>,<optional-global>"
    ```
-5. Create at least one `is_a` statement
-6. Create relationship statements to connect with existing knowledge
-
-**Naming convention**: Use concise, descriptive names:
-- `rule:prefer-immutable-patterns`
-- `taboo:no-mock-database`
-- `memory:auth-middleware-rewrite-reason`
-- `project:api-endpoint-convention`
+5. Create `is_a` statement and relationship statements
 
 ### Forget
 
-1. Search for related knowledge:
-   ```bash
-   hypatia search "<topic>" --limit 10
-   ```
-2. Identify entries to delete (including related `message` / `summary` entries if user requests full erasure)
-3. Delete knowledge and their related statements:
-   ```bash
-   hypatia knowledge-delete "<name>"
-   hypatia statement-delete "<subject>" "<predicate>" "<object>"
-   ```
-4. Confirm what was deleted to the user
+1. Search: `hypatia search "<topic>" --limit 10`
+2. Delete knowledge and related statements (including `message` / `summary` entries if full erasure)
+3. Confirm to user
 
 ---
 
 ## Output Format
 
-After operations, output a brief summary:
-
 **For conversation logging:**
 ```
-[hypatia-memory] Logged msg-abc-042 (user). Cascade: +1 summary-l1.
+[hypatia-memory] Logged msg-abc-042. Cascade: +1 summary 1 (token threshold).
 ```
 
 **For work unit extraction:**
@@ -417,22 +403,20 @@ After operations, output a brief summary:
 [hypatia-memory] Work unit still in progress, nothing extracted.
 ```
 
-Keep output minimal — this is background operation.
-
 ---
 
 ## Important Rules
 
-1. **Never store sensitive information** — no passwords, API keys, tokens, or private data
-2. **Logging is complete; semantic extraction is selective** — log every message; only extract work units when substantive
-3. **Be conservative with work unit quality** — when unsure whether a segment is substantive enough to remember, skip it
-4. **Be aggressive with extraction frequency** — check every 5 turns; many problems are solved in one shot and should be remembered
-5. **Synthesize summaries and memories, don't transcribe** — summary cascade and work units both compress content
-6. **Correction chains are gold** — the most valuable semantic memories come from mistakes and their fixes
-7. **Use structured tags** — `message`, `session`, `summary-lN`, `memory`, `work-unit`, `rule`, `taboo`
-8. **Don't interrupt the user** — memory operations are background tasks; output the summary line only
+1. **Never store sensitive information** — no passwords, API keys, tokens
+2. **Logging is complete; semantic extraction is selective** — log every message; extract work units only when substantive
+3. **Be conservative with work unit quality** — skip when unsure
+4. **Be aggressive with extraction frequency** — check every 5 turns
+5. **Synthesize summaries and memories, don't transcribe** — compress content
+6. **Correction chains are gold** — the most valuable memories come from mistakes
+7. **Use structured tags** — `message`, `session`, `summary <N>`, `memory`, `work-unit`, `rule`, `taboo`
+8. **Don't interrupt the user** — memory operations are background tasks
 9. **Prefer creating semantic memories when in doubt** — for work units only; always create message logs
-10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules use `""` in scopes per `docs/memory.md`
+10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules use `""`
 
 ## Graph Schema Reference
 
@@ -441,13 +425,13 @@ session-<SESSION_ID>  (tags: session)
     ↑ belongTo
 msg-<SESSION_ID>-<TURN>  (tags: message)
 
-sum-l1-<SESSION_ID>-<SEQ>  (tags: summary, summary-l1)
-    ↓ summarizes (×16)
+<summary-name>  (tags: summary, summary 1)
+    ↓ summary (×batch)
 msg-...
 
-sum-l2-<SESSION_ID>-<SEQ>  (tags: summary, summary-l2)
-    ↓ summarizes (×16)
-sum-l1-...
+<summary-name>  (tags: summary, summary 2)
+    ↓ summary (×16)
+<summary-name>...  (tags: summary, summary 1)
 
 wu-<date>-<slug>  (tags: memory, work-unit)  ← semantic layer, optional derivedFrom → msg-*
 ```
