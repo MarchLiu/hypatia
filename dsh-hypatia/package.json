@@ -1,0 +1,36 @@
+{
+  "name": "dsh-hypatia",
+  "version": "0.1.0",
+  "description": "Hypatia AI memory for DSH: bundled hypatia/hypatia-memory skills plus automatic one-shot approval for pure hypatia CLI sandbox escalations — implicit memory, no repeated authorization prompts, every other operation still asks.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "skills",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.1-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "hypatia",
+    "memory",
+    "knowledge-graph"
+  ],
+  "license": "MIT"
+}

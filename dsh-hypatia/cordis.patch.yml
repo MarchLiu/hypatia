@@ -1,0 +1,19 @@
+# dsh-hypatia bundle patch: inserts the plugin row into the profile roster.
+# Applied as a profile bundle layer (the `dsh.bundle.patch` manifest field)
+# over dsh-base; installed with
+# `dsh plugin --profile <name> add dsh-hypatia` (registry) or
+# `dsh plugin --profile <name> add link:/path/to/dsh-hypatia` (local checkout).
+#
+# The row is a bare host plugin by package name: it contributes the bundled
+# hypatia / hypatia-memory skills and the auto-approval answerer. Override
+# config from a later layer (e.g. the profile's own cordis.patch.yml) with:
+#
+#   - id: hypatia
+#     config:
+#       autoApprove: true        # master switch for silent hypatia approvals
+#       binaries: [hypatia]      # trusted CLI basenames
+#       skills: true             # register the bundled skills
+#       skillsDir: /abs/path     # override the packaged skills/ directory
+- insert:
+    - id: hypatia
+      name: dsh-hypatia
