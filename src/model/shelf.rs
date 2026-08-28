@@ -23,8 +23,8 @@ impl ShelfId {
 #[derive(Debug, Clone)]
 pub struct ShelfConfig {
     pub id: ShelfId,
-    pub duckdb_path: PathBuf,
     pub sqlite_path: PathBuf,
+    pub vectors_path: PathBuf,
     pub model_path: PathBuf,
     pub tokenizer_path: PathBuf,
     pub archives_path: PathBuf,
@@ -32,15 +32,15 @@ pub struct ShelfConfig {
 
 impl ShelfConfig {
     pub fn from_shelf_id(id: ShelfId) -> Self {
-        let duckdb_path = id.path.join("data.duckdb");
-        let sqlite_path = id.path.join("index.sqlite");
+        let sqlite_path = id.path.join("hypatia.sqlite");
+        let vectors_path = id.path.join("vectors");
         let model_path = id.path.join("embedding_model.onnx");
         let tokenizer_path = id.path.join("tokenizer.json");
         let archives_path = id.path.join("archives");
         Self {
             id,
-            duckdb_path,
             sqlite_path,
+            vectors_path,
             model_path,
             tokenizer_path,
             archives_path,
@@ -53,6 +53,20 @@ impl ShelfConfig {
             None => ShelfId::new(path.to_path_buf()),
         };
         Self::from_shelf_id(id)
+    }
+
+    /// Legacy (pre-refactor) storage files, used by the migration tool.
+    pub fn legacy_duckdb_path(&self) -> PathBuf {
+        self.id.path.join("data.duckdb")
+    }
+
+    pub fn legacy_index_path(&self) -> PathBuf {
+        self.id.path.join("index.sqlite")
+    }
+
+    /// True when this shelf still uses the legacy duckdb+sqlite layout.
+    pub fn needs_migration(&self) -> bool {
+        self.legacy_duckdb_path().exists() && !self.sqlite_path.exists()
     }
 }
 
@@ -75,9 +89,22 @@ mod tests {
     #[test]
     fn shelf_config_paths() {
         let config = ShelfConfig::from_path(Path::new("/tmp/test-shelf"), None);
-        assert_eq!(config.duckdb_path, PathBuf::from("/tmp/test-shelf/data.duckdb"));
-        assert_eq!(config.sqlite_path, PathBuf::from("/tmp/test-shelf/index.sqlite"));
+        assert_eq!(config.sqlite_path, PathBuf::from("/tmp/test-shelf/hypatia.sqlite"));
+        assert_eq!(config.vectors_path, PathBuf::from("/tmp/test-shelf/vectors"));
         assert_eq!(config.id.name, "test-shelf");
         assert_eq!(config.archives_path, PathBuf::from("/tmp/test-shelf/archives"));
+    }
+
+    #[test]
+    fn needs_migration_detects_legacy_layout() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = ShelfConfig::from_path(dir.path(), None);
+        assert!(!config.needs_migration());
+
+        std::fs::write(config.legacy_duckdb_path(), b"fake").unwrap();
+        assert!(config.needs_migration());
+
+        std::fs::write(&config.sqlite_path, b"fake").unwrap();
+        assert!(!config.needs_migration());
     }
 }

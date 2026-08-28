@@ -1,9 +1,9 @@
-pub mod duckdb_store;
+pub mod migrate;
 pub mod shelf_manager;
 pub mod shelf_registry;
 pub mod sqlite_store;
 
-pub use duckdb_store::DuckDbStore;
+pub use migrate::open_or_migrate;
 pub use shelf_manager::{OpenShelf, ShelfManager};
 pub use shelf_registry::ShelfRegistry;
 pub use sqlite_store::{sanitize_fts_query, FtsDoc, SqliteStore};
@@ -12,8 +12,8 @@ use crate::error::Result;
 use crate::model::{QueryResult, QueryTarget, SearchOpts};
 
 /// Abstract storage interface for testability.
-/// OpenShelf implements this trait by delegating to DuckDB/SQLite stores.
-/// Note: No Send+Sync bounds because DuckDB/SQLite connections use RefCell internally.
+/// OpenShelf implements this trait by delegating to the unified SQLite store.
+/// Note: No Send+Sync bounds because the connection uses RefCell internally.
 pub trait Storage {
     fn execute_query(
         &self,
@@ -33,13 +33,13 @@ pub trait Storage {
         target: QueryTarget,
     ) -> Result<QueryResult>;
 
-    /// Execute a k-hop forward graph traversal starting from `subject`,
-    /// following edges with the given predicate (or any predicate if None),
+    /// Execute a k-hop forward graph traversal starting from `head`,
+    /// following edges with the given relation (or any relation if None),
     /// up to `depth` hops. Returns matching statement triples.
     fn execute_khop(
         &self,
-        subject: &str,
-        predicate: Option<&str>,
+        head: &str,
+        relation: Option<&str>,
         depth: i64,
     ) -> Result<QueryResult>;
 }

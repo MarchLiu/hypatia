@@ -5,6 +5,14 @@ pub enum HypatiaError {
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
 
+    /// Direct conversion so `?` works on rusqlite errors without map_err
+    /// (From is not transitive through StorageError).
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
+    #[error("DuckDB error: {0}")]
+    DuckDb(#[from] duckdb::Error),
+
     #[error("JSE parse error: {0}")]
     Parse(String),
 

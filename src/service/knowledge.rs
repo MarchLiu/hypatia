@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::model::{Content, Knowledge};
-use crate::storage::{FtsDoc, OpenShelf};
+use crate::storage::OpenShelf;
 
 pub struct KnowledgeService<'a> {
     shelf: &'a mut OpenShelf,
@@ -11,32 +11,17 @@ impl<'a> KnowledgeService<'a> {
         Self { shelf }
     }
 
-    fn build_fts_doc(content: &Content, name: &str) -> FtsDoc {
-        let fields = content.fts_fields(name);
-        FtsDoc {
-            content: content.to_json_string(),
-            fts_key: fields.key,
-            fts_data: fields.data,
-            fts_tags: fields.tags,
-            fts_synonyms: fields.synonyms,
-        }
-    }
-
     pub fn create(&mut self, name: &str, content: Content) -> Result<Knowledge> {
-        // Insert into DuckDB
-        self.shelf.duckdb.insert_knowledge(name, &content)?;
+        // Source row + FTS doc are written in one store transaction.
+        self.shelf.store.insert_knowledge(name, &content)?;
 
-        // Insert into SQLite FTS
-        let doc = Self::build_fts_doc(&content, name);
-        self.shelf.sqlite.upsert_doc("knowledge", name, &doc)?;
-
-        // Generate embedding and store vector in DuckDB (best-effort: skip if model unavailable)
+        // Generate embedding and store the BLOB (best-effort: skip if model unavailable)
         if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
-            self.shelf.duckdb.upsert_knowledge_embedding(name, &vector)?;
+            self.shelf.store.upsert_knowledge_embedding(name, &vector)?;
         }
 
         // Read back to get the generated timestamp
-        let knowledge = self.shelf.duckdb.get_knowledge(name)?.ok_or_else(|| {
+        let knowledge = self.shelf.store.get_knowledge(name)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
                 kind: "knowledge".to_string(),
                 key: name.to_string(),
@@ -46,21 +31,17 @@ impl<'a> KnowledgeService<'a> {
     }
 
     pub fn get(&self, name: &str) -> Result<Option<Knowledge>> {
-        self.shelf.duckdb.get_knowledge(name)
+        self.shelf.store.get_knowledge(name)
     }
 
     pub fn update(&mut self, name: &str, content: Content) -> Result<Knowledge> {
-        self.shelf.duckdb.update_knowledge(name, &content)?;
-
-        // Update FTS and vector
-        let doc = Self::build_fts_doc(&content, name);
-        self.shelf.sqlite.upsert_doc("knowledge", name, &doc)?;
+        self.shelf.store.update_knowledge(name, &content)?;
 
         if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
-            self.shelf.duckdb.upsert_knowledge_embedding(name, &vector)?;
+            self.shelf.store.upsert_knowledge_embedding(name, &vector)?;
         }
 
-        let knowledge = self.shelf.duckdb.get_knowledge(name)?.ok_or_else(|| {
+        let knowledge = self.shelf.store.get_knowledge(name)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
                 kind: "knowledge".to_string(),
                 key: name.to_string(),
@@ -70,8 +51,6 @@ impl<'a> KnowledgeService<'a> {
     }
 
     pub fn delete(&mut self, name: &str) -> Result<()> {
-        self.shelf.duckdb.delete_knowledge(name)?;
-        self.shelf.sqlite.delete_doc("knowledge", name)?;
-        Ok(())
+        self.shelf.store.delete_knowledge(name)
     }
 }

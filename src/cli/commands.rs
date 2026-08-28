@@ -72,21 +72,21 @@ enum Commands {
     },
     /// Delete a statement (triple)
     StatementDelete {
-        subject: String,
-        predicate: String,
-        object: String,
+        head: String,
+        relation: String,
+        tail: String,
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
     /// Create a statement (triple)
     StatementCreate {
-        subject: String,
-        predicate: String,
-        object: String,
+        head: String,
+        relation: String,
+        tail: String,
         /// Content data
         #[arg(short, long, default_value = "")]
         data: String,
-        /// Synonyms as JSON: {"subject":["Bob"],"predicate":["leads"],"object":["DB"]}
+        /// Synonyms as JSON: {"head":["Bob"],"relation":["leads"],"tail":["DB"]}
         #[arg(long)]
         synonyms: Option<String>,
         /// Scopes (comma-separated, e.g. "project-a," for global)
@@ -294,13 +294,13 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             lab.delete_knowledge(&shelf, &name)?;
             println!("Deleted knowledge: {name}");
         }
-        Commands::StatementDelete { subject, predicate, object, shelf } => {
-            let key = StatementKey::new(&subject, &predicate, &object);
+        Commands::StatementDelete { head, relation, tail, shelf } => {
+            let key = StatementKey::new(&head, &relation, &tail);
             lab.delete_statement(&shelf, &key)?;
-            println!("Deleted statement: ({}, {}, {})", subject, predicate, object);
+            println!("Deleted statement: ({}, {}, {})", head, relation, tail);
         }
-        Commands::StatementCreate { subject, predicate, object, data, synonyms, scopes, shelf } => {
-            let key = StatementKey::new(&subject, &predicate, &object);
+        Commands::StatementCreate { head, relation, tail, data, synonyms, scopes, shelf } => {
+            let key = StatementKey::new(&head, &relation, &tail);
             let syn = match synonyms {
                 Some(ref json_str) => {
                     let map: std::collections::HashMap<String, Vec<String>> =
@@ -326,7 +326,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             };
             let content = Content::new(&data).with_synonyms(syn).with_scopes(scopes_vec);
             let s = lab.create_statement(&shelf, &key, content, None, None)?;
-            println!("Created statement: ({}, {}, {})", s.key.subject, s.key.predicate, s.key.object);
+            println!("Created statement: ({}, {}, {})", s.key.head, s.key.relation, s.key.tail);
         }
         Commands::Search { query, catalog, limit, offset, shelf } => {
             let opts = SearchOpts {

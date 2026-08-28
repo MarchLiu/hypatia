@@ -4,23 +4,23 @@ use super::Content;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StatementKey {
-    pub subject: String,
-    pub predicate: String,
-    pub object: String,
+    pub head: String,
+    pub relation: String,
+    pub tail: String,
 }
 
 impl StatementKey {
-    pub fn new(subject: impl Into<String>, predicate: impl Into<String>, object: impl Into<String>) -> Self {
+    pub fn new(head: impl Into<String>, relation: impl Into<String>, tail: impl Into<String>) -> Self {
         Self {
-            subject: subject.into(),
-            predicate: predicate.into(),
-            object: object.into(),
+            head: head.into(),
+            relation: relation.into(),
+            tail: tail.into(),
         }
     }
 
     /// Format as CSV row for FTS key / triple column (handles commas and quotes).
     pub fn to_csv_key(&self) -> String {
-        let fields = [&self.subject, &self.predicate, &self.object];
+        let fields = [&self.head, &self.relation, &self.tail];
         fields
             .iter()
             .map(|f| csv_escape(f))
@@ -33,9 +33,9 @@ impl StatementKey {
         let fields = csv_split(csv);
         if fields.len() == 3 {
             Some(Self {
-                subject: fields[0].clone(),
-                predicate: fields[1].clone(),
-                object: fields[2].clone(),
+                head: fields[0].clone(),
+                relation: fields[1].clone(),
+                tail: fields[2].clone(),
             })
         } else {
             None
@@ -77,6 +77,8 @@ pub fn csv_split(s: &str) -> Vec<String> {
                 } else {
                     in_quotes = false;
                 }
+            } else if ch == '"' {
+                in_quotes = true;
             } else {
                 current.push(ch);
             }
@@ -128,9 +130,9 @@ mod tests {
         let key = StatementKey::new("Alice", "knows", "Bob");
         let csv = key.to_csv_key();
         let parsed = StatementKey::from_csv(&csv).unwrap();
-        assert_eq!(parsed.subject, "Alice");
-        assert_eq!(parsed.predicate, "knows");
-        assert_eq!(parsed.object, "Bob");
+        assert_eq!(parsed.head, "Alice");
+        assert_eq!(parsed.relation, "knows");
+        assert_eq!(parsed.tail, "Bob");
     }
 
     #[test]
@@ -138,7 +140,7 @@ mod tests {
         let key = StatementKey::new("Alice, Jr.", "knows", "Bob");
         let csv = key.to_csv_key();
         let parsed = StatementKey::from_csv(&csv).unwrap();
-        assert_eq!(parsed.subject, "Alice, Jr.");
+        assert_eq!(parsed.head, "Alice, Jr.");
     }
 
     #[test]

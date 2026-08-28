@@ -199,13 +199,13 @@ impl Evaluator {
         };
 
         let sql = format!(
-            "SELECT knowledge.name, knowledge.content, CAST(knowledge.created_at AS VARCHAR) AS created_at \
+            "SELECT knowledge.name, knowledge.content, knowledge.created_at \
              FROM knowledge \
-             LEFT JOIN statement ON knowledge.name = statement.object AND statement.predicate = 'summary' \
-             WHERE statement.subject IS NULL \
-             AND json_extract_string(knowledge.content, '$.tags') LIKE ?{} \
+             LEFT JOIN statement ON knowledge.name = statement.tail AND statement.relation = 'summary' \
+             WHERE statement.head IS NULL \
+             AND json_extract(knowledge.content, '$.tags') LIKE ?{} \
              ORDER BY knowledge.created_at ASC \
-             LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)",
+             LIMIT ? OFFSET ?",
             extra_conditions
         );
 
@@ -271,12 +271,20 @@ fn build_key_match_condition(target: QueryTarget, keys: &[String]) -> (String, V
 }
 
 /// Qualify knowledge column references for LEFT JOIN context.
-/// Replaces bare `content` in json_extract_string calls and `created_at`
-/// in CAST expressions with `knowledge.` prefixed versions.
+/// Prefixes bare `content`/`created_at`/`tr_start`/`tr_end` (columns that
+/// exist on both sides of the join) with `knowledge.`.
 fn alias_knowledge_columns(fragment: &str) -> String {
-    fragment
-        .replace("json_extract_string(content,", "json_extract_string(knowledge.content,")
-        .replace("CAST(created_at", "CAST(knowledge.created_at")
+    let mut out = fragment
+        .replace("json_extract(content,", "json_extract(knowledge.content,");
+    for col in ["created_at", "tr_start", "tr_end"] {
+        out = out.replace(col, &format!("knowledge.{col}"));
+        // Guard against double-prefixing already-qualified references.
+        out = out.replace(
+            &format!("knowledge.knowledge.{col}"),
+            &format!("knowledge.{col}"),
+        );
+    }
+    out
 }
 
 /// Convert an AST node back to a JSON value (for $quote).
@@ -555,16 +563,26 @@ mod tests {
 
     #[test]
     fn alias_knowledge_columns_replaces_content() {
-        let input = "json_extract_string(content, '$.tags') LIKE ?";
+        let input = "json_extract(content, '$.tags') LIKE ?";
         let result = alias_knowledge_columns(input);
-        assert_eq!(result, "json_extract_string(knowledge.content, '$.tags') LIKE ?");
+        assert_eq!(result, "json_extract(knowledge.content, '$.tags') LIKE ?");
     }
 
     #[test]
     fn alias_knowledge_columns_replaces_created_at() {
-        let input = "CAST(created_at AS VARCHAR) LIKE ?";
+        let input = "created_at > ?";
         let result = alias_knowledge_columns(input);
-        assert_eq!(result, "CAST(knowledge.created_at AS VARCHAR) LIKE ?");
+        assert_eq!(result, "knowledge.created_at > ?");
+    }
+
+    #[test]
+    fn alias_knowledge_columns_qualifies_temporal_columns() {
+        let input = "tr_start IS NULL AND tr_end IS NOT NULL AND created_at = ?";
+        let result = alias_knowledge_columns(input);
+        assert_eq!(
+            result,
+            "knowledge.tr_start IS NULL AND knowledge.tr_end IS NOT NULL AND knowledge.created_at = ?"
+        );
     }
 
     #[test]
@@ -576,8 +594,8 @@ mod tests {
 
     #[test]
     fn alias_knowledge_columns_handles_combined() {
-        let input = "json_extract_string(content, '$.scopes') LIKE ? AND name = ?";
+        let input = "json_extract(content, '$.scopes') LIKE ? AND name = ?";
         let result = alias_knowledge_columns(input);
-        assert_eq!(result, "json_extract_string(knowledge.content, '$.scopes') LIKE ? AND name = ?");
+        assert_eq!(result, "json_extract(knowledge.content, '$.scopes') LIKE ? AND name = ?");
     }
 }

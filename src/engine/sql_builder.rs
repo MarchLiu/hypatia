@@ -1,6 +1,6 @@
 use crate::model::QueryTarget;
 
-/// Builds parameterized SQL queries from collected conditions.
+/// Builds parameterized SQL queries from collected conditions (SQLite dialect).
 pub struct SqlBuilder {
     target: QueryTarget,
     conditions: Vec<String>,
@@ -34,18 +34,13 @@ impl SqlBuilder {
     }
 
     /// Build the final SQL and parameter list.
-    /// Uses CAST for timestamp columns so they're read as strings.
+    /// Timestamps are TEXT columns in SQLite; no CAST needed.
     pub fn build(mut self) -> (String, Vec<serde_json::Value>) {
         let table = self.target.table_name();
         let select = match self.target {
-            QueryTarget::Knowledge => {
-                "SELECT name, content, CAST(created_at AS VARCHAR) AS created_at"
-            }
+            QueryTarget::Knowledge => "SELECT name, content, created_at",
             QueryTarget::Statement => {
-                "SELECT triple, subject, predicate, object, content, \
-                 CAST(created_at AS VARCHAR) AS created_at, \
-                 CAST(tr_start AS VARCHAR) AS tr_start, \
-                 CAST(tr_end AS VARCHAR) AS tr_end"
+                "SELECT triple, head, relation, tail, content, created_at, tr_start, tr_end"
             }
         };
 
@@ -59,13 +54,13 @@ impl SqlBuilder {
 
         sql.push_str(" ORDER BY created_at DESC");
 
-        // Append limit/offset as string parameters
-        let limit_idx = self.params.len();
+        // Bound parameters are typed by the store (numbers -> INTEGER), so
+        // plain LIMIT/OFFSET placeholders suffice.
         self.params.push(serde_json::Value::Number(self.limit.into()));
-        let offset_idx = self.params.len();
-        self.params.push(serde_json::Value::Number(self.offset.into()));
+        self.params
+            .push(serde_json::Value::Number(self.offset.into()));
 
-        sql.push_str(&format!(" LIMIT CAST(?{} AS INTEGER) OFFSET CAST(?{} AS INTEGER)", limit_idx + 1, offset_idx + 1));
+        sql.push_str(" LIMIT ? OFFSET ?");
 
         (sql, self.params)
     }
@@ -83,18 +78,19 @@ mod tests {
         assert!(sql.contains("FROM knowledge"));
         assert!(sql.contains("WHERE name = ?"));
         assert!(sql.contains("ORDER BY created_at DESC"));
+        assert!(sql.ends_with("LIMIT ? OFFSET ?"));
         assert_eq!(params.len(), 3); // 1 condition + limit + offset
     }
 
     #[test]
-    fn build_statement_query_with_limit() {
+    fn build_statement_query_hrt_columns() {
         let mut builder = SqlBuilder::new(QueryTarget::Statement);
         builder.set_limit(10);
         builder.set_offset(20);
         let (sql, params) = builder.build();
+        assert!(sql.contains("SELECT triple, head, relation, tail, content, created_at, tr_start, tr_end"));
         assert!(sql.contains("FROM statement"));
-        assert!(sql.contains("LIMIT"));
-        assert!(sql.contains("OFFSET"));
+        assert!(sql.contains("LIMIT ? OFFSET ?"));
         assert_eq!(params[0], serde_json::json!(10));
         assert_eq!(params[1], serde_json::json!(20));
     }

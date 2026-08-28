@@ -580,6 +580,10 @@ fn resolve_legacy_paths(toml: &EmbeddingToml, shelf_dir: &Path) -> (PathBuf, Pat
 mod tests {
     use super::*;
 
+    /// Serialize tests that touch the real ~/.hypatia/models directory:
+    /// their cleanups remove_dir_all shared parents and race each other.
+    static MODELS_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn find_onnx_file_prefers_embedding_model() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -646,6 +650,7 @@ mod tests {
 
     #[test]
     fn from_shelf_dir_with_model_field() {
+        let _guard = MODELS_DIR_LOCK.lock().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         // Use a unique name to avoid collision with parallel tests
         let test_id = std::thread::current().id();
@@ -715,6 +720,7 @@ dimensions = 512
 
     #[test]
     fn register_model_creates_symlink() {
+        let _guard = MODELS_DIR_LOCK.lock().unwrap();
         let source = tempfile::TempDir::new().unwrap();
         std::fs::write(source.path().join("model.onnx"), b"fake").unwrap();
         std::fs::write(source.path().join("tokenizer.json"), b"{}").unwrap();

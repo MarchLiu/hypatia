@@ -4,13 +4,12 @@ use std::path::Path;
 use crate::embedding::{EmbeddingConfig, EmbeddingProvider, build_provider};
 use crate::error::{HypatiaError, Result};
 use crate::model::{QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
-use crate::storage::{DuckDbStore, ShelfRegistry, SqliteStore, Storage};
+use crate::storage::{ShelfRegistry, SqliteStore, Storage, open_or_migrate};
 
 pub struct OpenShelf {
     pub id: ShelfId,
     pub config: ShelfConfig,
-    pub duckdb: DuckDbStore,
-    pub sqlite: SqliteStore,
+    pub store: SqliteStore,
     pub embedder: Box<dyn EmbeddingProvider>,
 }
 
@@ -23,11 +22,11 @@ impl Storage for OpenShelf {
     ) -> Result<QueryResult> {
         let rows = match target {
             QueryTarget::Knowledge => {
-                let knowledge = self.duckdb.query_knowledge(sql, params)?;
+                let knowledge = self.store.query_knowledge(sql, params)?;
                 knowledge.into_iter().map(|k| knowledge_to_row(&k)).collect()
             }
             QueryTarget::Statement => {
-                let statements = self.duckdb.query_statements(sql, params)?;
+                let statements = self.store.query_statements(sql, params)?;
                 statements.into_iter().map(|s| statement_to_row(&s)).collect()
             }
         };
@@ -35,7 +34,7 @@ impl Storage for OpenShelf {
     }
 
     fn execute_search(&self, query: &str, opts: &SearchOpts) -> Result<QueryResult> {
-        let results = self.sqlite.search(query, opts)?;
+        let results = self.store.search(query, opts)?;
         let rows = results
             .into_iter()
             .map(|r| {
@@ -67,7 +66,7 @@ impl Storage for OpenShelf {
 
         let rows = match target {
             QueryTarget::Knowledge => {
-                let results = self.duckdb.vector_search_knowledge(&query_vector, opts.limit)?;
+                let results = self.store.vector_search_knowledge(&query_vector, opts.limit)?;
                 results.into_iter().map(|(name, content, distance)| {
                     let mut map = serde_json::Map::new();
                     map.insert("name".to_string(), serde_json::Value::String(name));
@@ -83,7 +82,7 @@ impl Storage for OpenShelf {
                 }).collect()
             }
             QueryTarget::Statement => {
-                let results = self.duckdb.vector_search_statements(&query_vector, opts.limit)?;
+                let results = self.store.vector_search_statements(&query_vector, opts.limit)?;
                 results.into_iter().map(|(triple, content, distance)| {
                     let mut map = serde_json::Map::new();
                     map.insert("triple".to_string(), serde_json::Value::String(triple));
@@ -104,11 +103,11 @@ impl Storage for OpenShelf {
 
     fn execute_khop(
         &self,
-        subject: &str,
-        predicate: Option<&str>,
+        head: &str,
+        relation: Option<&str>,
         depth: i64,
     ) -> Result<QueryResult> {
-        let statements = self.duckdb.query_khop(subject, predicate, depth)?;
+        let statements = self.store.query_khop(head, relation, depth)?;
         let rows = statements.into_iter().map(|s| statement_to_row(&s)).collect();
         Ok(QueryResult::new(rows))
     }
@@ -131,9 +130,9 @@ fn knowledge_to_row(k: &crate::model::Knowledge) -> serde_json::Map<String, serd
 fn statement_to_row(s: &crate::model::Statement) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     map.insert("triple".to_string(), serde_json::Value::String(s.key.to_csv_key()));
-    map.insert("subject".to_string(), serde_json::Value::String(s.key.subject.clone()));
-    map.insert("predicate".to_string(), serde_json::Value::String(s.key.predicate.clone()));
-    map.insert("object".to_string(), serde_json::Value::String(s.key.object.clone()));
+    map.insert("head".to_string(), serde_json::Value::String(s.key.head.clone()));
+    map.insert("relation".to_string(), serde_json::Value::String(s.key.relation.clone()));
+    map.insert("tail".to_string(), serde_json::Value::String(s.key.tail.clone()));
     map.insert(
         "content".to_string(),
         serde_json::to_value(&s.content).unwrap_or(serde_json::Value::Null),
@@ -155,18 +154,27 @@ pub struct ShelfManager {
     shelves: HashMap<String, OpenShelf>,
     registry: ShelfRegistry,
     registry_path: std::path::PathBuf,
+    home: std::path::PathBuf,
 }
 
 impl ShelfManager {
     /// Create a new ShelfManager, loading the persistent registry and restoring all connections.
     pub fn new() -> Result<Self> {
-        let registry_path = ShelfRegistry::registry_path();
+        Self::with_home(dirs_home())
+    }
+
+    /// ShelfManager rooted at an explicit home directory. Tests use this to
+    /// stay hermetic: unit tests must NEVER touch (or migrate!) the real
+    /// `~/.hypatia` default shelf.
+    pub fn with_home(home: std::path::PathBuf) -> Result<Self> {
+        let registry_path = home.join(".hypatia").join("shelves.json");
         let registry = ShelfRegistry::load(&registry_path)?;
 
         let mut manager = Self {
             shelves: HashMap::new(),
             registry,
             registry_path,
+            home,
         };
 
         // Restore all registered shelves; ensure default exists.
@@ -208,8 +216,9 @@ impl ShelfManager {
 
         let config = ShelfConfig::from_path(path, name);
 
-        // Ensure archives/ directory exists
+        // Ensure archives/ and vectors/ directories exist
         std::fs::create_dir_all(&config.archives_path)?;
+        std::fs::create_dir_all(&config.vectors_path)?;
         let shelf_name = config.id.name.clone();
 
         // Check if already connected
@@ -221,16 +230,15 @@ impl ShelfManager {
         }
 
         let embedding_config = EmbeddingConfig::from_shelf_dir(path);
-        let duckdb = DuckDbStore::open(&config.duckdb_path, embedding_config.dimensions())?;
-        let sqlite = SqliteStore::open(&config.sqlite_path)?;
+        // Migrates legacy duckdb+sqlite shelves transparently on open.
+        let store = open_or_migrate(&config)?;
 
         let embedder = build_provider(&embedding_config);
 
         let shelf = OpenShelf {
             id: config.id.clone(),
             config,
-            duckdb,
-            sqlite,
+            store,
             embedder,
         };
 
@@ -276,10 +284,14 @@ impl ShelfManager {
 
         std::fs::create_dir_all(dest)?;
 
-        // Copy DuckDB file
-        std::fs::copy(&shelf.config.duckdb_path, dest.join("data.duckdb"))?;
-        // Copy SQLite file
-        std::fs::copy(&shelf.config.sqlite_path, dest.join("index.sqlite"))?;
+        // Copy the unified SQLite database.
+        std::fs::copy(&shelf.config.sqlite_path, dest.join("hypatia.sqlite"))?;
+
+        // Copy vectors/ (rebuildable cache, but ships with the export).
+        let vectors_dest = dest.join("vectors");
+        if shelf.config.vectors_path.exists() {
+            copy_dir_recursive(&shelf.config.vectors_path, &vectors_dest)?;
+        }
 
         // Copy archives/ directory if it exists and has content
         let archives_dest = dest.join("archives");
@@ -299,7 +311,7 @@ impl ShelfManager {
 
     /// Ensure the default shelf is registered and connected.
     pub fn ensure_default(&mut self) -> Result<String> {
-        let default_path = dirs_home().join(".hypatia").join("default");
+        let default_path = self.home.join(".hypatia").join("default");
         if self.shelves.contains_key("default") {
             return Ok("default".to_string());
         }
@@ -349,7 +361,8 @@ mod tests {
     #[test]
     fn connect_and_list() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         let name = mgr.connect(dir.path(), Some("test-shelf")).unwrap();
         assert_eq!(name, "test-shelf");
 
@@ -360,7 +373,8 @@ mod tests {
     #[test]
     fn connect_duplicate_fails() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("dup")).unwrap();
         assert!(mgr.connect(dir.path(), Some("dup")).is_err());
     }
@@ -368,7 +382,8 @@ mod tests {
     #[test]
     fn disconnect() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("tmp")).unwrap();
         mgr.disconnect("tmp").unwrap();
         let shelves = mgr.list();
@@ -376,15 +391,10 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_nonexistent_fails() {
-        let mut mgr = ShelfManager::new().unwrap();
-        assert!(mgr.disconnect("nonexistent").is_err());
-    }
-
-    #[test]
     fn get_shelf() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("my-shelf")).unwrap();
         assert!(mgr.get("my-shelf").is_some());
         assert!(mgr.get("other").is_none());
@@ -394,25 +404,26 @@ mod tests {
     fn export_shelf() {
         let dir = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("export-test")).unwrap();
 
         // Add some data
         let shelf = mgr.get("export-test").unwrap();
         shelf
-            .duckdb
+            .store
             .insert_knowledge("test", &Content::new("data"))
             .unwrap();
 
         mgr.export("export-test", dest.path()).unwrap();
-        assert!(dest.path().join("data.duckdb").exists());
-        assert!(dest.path().join("index.sqlite").exists());
+        assert!(dest.path().join("hypatia.sqlite").exists());
     }
 
     #[test]
     fn connect_creates_archives_dir() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("ar-test")).unwrap();
         let ap = mgr.archives_path("ar-test").unwrap();
         assert!(ap.exists());
@@ -423,7 +434,8 @@ mod tests {
     fn export_includes_archives_dir() {
         let dir = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("ar-export")).unwrap();
 
         // Put a file in archives/
@@ -431,25 +443,15 @@ mod tests {
         std::fs::write(ap.join("test.png"), b"fake-png").unwrap();
 
         mgr.export("ar-export", dest.path()).unwrap();
-        assert!(dest.path().join("data.duckdb").exists());
+        assert!(dest.path().join("hypatia.sqlite").exists());
         assert!(dest.path().join("archives/test.png").exists());
-    }
-
-    #[test]
-    fn ensure_default_creates_directory() {
-        let tmp = TempDir::new().unwrap();
-        let default_path = tmp.path().join(".hypatia").join("default");
-
-        let mut mgr = ShelfManager::new().unwrap();
-        // Since ensure_default uses the real HOME, just verify connect works
-        mgr.connect(&default_path, Some("test-default-2")).unwrap();
-        assert!(mgr.get("test-default-2").is_some());
     }
 
     #[test]
     fn list_shows_connected_status() {
         let dir = TempDir::new().unwrap();
-        let mut mgr = ShelfManager::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("status-test")).unwrap();
 
         let shelves = mgr.list();

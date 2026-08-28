@@ -49,7 +49,10 @@ fn run_benchmark() {
     // Setup shelf in temp directory
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let shelf_path = tmp_dir.path().join("bench_shelf");
-    let mut mgr = ShelfManager::new().expect("create shelf manager");
+    // Hermetic home: never touch (or migrate!) the real ~/.hypatia shelf.
+    let home = tempfile::tempdir().expect("create temp home");
+    let mut mgr = ShelfManager::with_home(home.path().to_path_buf())
+        .expect("create shelf manager");
     let shelf_name = mgr.connect(&shelf_path, Some("bench")).expect("connect shelf");
 
     // ── Phase 1: Ingest ────────────────────────────────────────────
@@ -205,7 +208,7 @@ fn run_benchmark() {
         r#"["$statement", ["$triple", "Alice", "$*", "$*"]]"#,
         r#"["$statement", ["$triple", "$*", "$*", "Bob"]]"#,
         // Statement: $like
-        r#"["$statement", ["$like", "subject", "Alice%"]]"#,
+        r#"["$statement", ["$like", "head", "Alice%"]]"#,
         // Statement: $content
         r#"["$statement", ["$content", {"format": "markdown"}]]"#,
     ];

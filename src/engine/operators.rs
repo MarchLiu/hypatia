@@ -145,7 +145,7 @@ pub fn evaluate_operator(
                 other => other.to_string(),
             };
             Ok(OperatorResult::SqlCondition {
-                fragment: format!("json_extract_string(content, '$.{field}') LIKE ?"),
+                fragment: format!("json_extract(content, '$.{field}') LIKE ?"),
                 params: vec![serde_json::Value::String(format!("%{search_str}%"))],
             })
         }
@@ -194,7 +194,7 @@ pub fn evaluate_operator(
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                fragments.push(format!("json_extract_string(content, '$.{key}') = ?"));
+                fragments.push(format!("json_extract(content, '$.{key}') = ?"));
                 params.push(serde_json::Value::String(str_val));
             }
             Ok(OperatorResult::SqlCondition {
@@ -334,7 +334,7 @@ pub fn evaluate_operator(
             }
 
             // Partial match: generate conditions on individual columns
-            let columns = ["subject", "predicate", "object"];
+            let columns = ["head", "relation", "tail"];
             let mut fragments = Vec::new();
             let mut params = Vec::new();
             for (i, pattern) in patterns.iter().enumerate() {
@@ -408,27 +408,17 @@ fn expect_literal(node: &AstNode) -> Result<serde_json::Value> {
 fn resolve_field(field: &str) -> String {
     let field = field.trim_start_matches('$');
     match field {
-        "subject" | "predicate" | "object" | "triple" | "name" | "created_at" | "tr_start" | "tr_end" => {
+        "head" | "relation" | "tail" | "triple" | "name" | "created_at" | "tr_start" | "tr_end" => {
             field.to_string()
         }
         // Assume it's a JSON content field
-        _ => format!("json_extract_string(content, '$.{field}')"),
+        _ => format!("json_extract(content, '$.{field}')"),
     }
 }
 
-/// Resolve a field name for LIKE operations (requires VARCHAR).
-/// Timestamp columns are CAST to VARCHAR since DuckDB's LIKE doesn't accept TIMESTAMP.
+/// Resolve a field name for LIKE operations. All columns are TEXT in SQLite.
 fn resolve_field_like(field: &str) -> String {
-    let field = field.trim_start_matches('$');
-    match field {
-        "created_at" | "tr_start" | "tr_end" => {
-            format!("CAST({field} AS VARCHAR)")
-        }
-        "subject" | "predicate" | "object" | "triple" | "name" => {
-            field.to_string()
-        }
-        _ => format!("json_extract_string(content, '$.{field}')"),
-    }
+    resolve_field(field)
 }
 
 /// Convert an AST node back to a JSON value (for $quote).
@@ -541,7 +531,7 @@ mod tests {
         ).unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
-                assert!(fragment.contains("json_extract_string"));
+                assert!(fragment.contains("json_extract"));
                 assert!(fragment.contains("LIKE"));
                 assert_eq!(params[0], json!("%rust%"));
             }
@@ -605,7 +595,7 @@ mod tests {
         ).unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
-                assert!(fragment.contains("json_extract_string"));
+                assert!(fragment.contains("json_extract"));
                 assert!(fragment.contains("LIKE"));
                 assert_eq!(params[0], json!("%language%"));
             }
@@ -625,7 +615,7 @@ mod tests {
         ).unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
-                assert!(fragment.contains("json_extract_string(content, '$.format') = ?"));
+                assert!(fragment.contains("json_extract(content, '$.format') = ?"));
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0], json!("json"));
             }

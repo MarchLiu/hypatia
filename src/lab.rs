@@ -65,7 +65,7 @@ impl Lab {
         let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
-        shelf_ref.duckdb.get_knowledge(name)
+        shelf_ref.store.get_knowledge(name)
     }
 
     pub fn update_knowledge(&mut self, shelf: &str, name: &str, content: Content) -> Result<Knowledge> {
@@ -105,7 +105,7 @@ impl Lab {
         let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
-        shelf_ref.duckdb.get_statement(key)
+        shelf_ref.store.get_statement(key)
     }
 
     pub fn delete_statement(&mut self, shelf: &str, key: &StatementKey) -> Result<()> {
@@ -252,8 +252,8 @@ impl Lab {
         let mut stats = BackfillStats { created: 0, skipped: 0, errors: 0 };
 
         // Backfill knowledge entries
-        let knowledge_missing = shelf_ref.duckdb.knowledge_without_embeddings()?;
-        stats.skipped += shelf_ref.duckdb.knowledge_with_embeddings()?.len();
+        let knowledge_missing = shelf_ref.store.knowledge_without_embeddings()?;
+        stats.skipped += shelf_ref.store.knowledge_with_embeddings()?.len();
 
         for (name, content_json) in knowledge_missing {
             let content = match Content::from_json_str(&content_json) {
@@ -264,7 +264,7 @@ impl Lab {
             let text = content.embedding_text(&name);
             match shelf_ref.embedder.embed(&text) {
                 Ok(vector) => {
-                    match shelf_ref.duckdb.upsert_knowledge_embedding(&name, &vector) {
+                    match shelf_ref.store.upsert_knowledge_embedding(&name, &vector) {
                         Ok(_) => stats.created += 1,
                         Err(_) => stats.errors += 1,
                     }
@@ -274,7 +274,7 @@ impl Lab {
         }
 
         // Backfill statement entries
-        let stmt_missing = shelf_ref.duckdb.statements_without_embeddings()?;
+        let stmt_missing = shelf_ref.store.statements_without_embeddings()?;
 
         for (triple, content_json) in stmt_missing {
             let content = match Content::from_json_str(&content_json) {
@@ -285,7 +285,7 @@ impl Lab {
             let text = content.embedding_text(&triple);
             match shelf_ref.embedder.embed(&text) {
                 Ok(vector) => {
-                    match shelf_ref.duckdb.upsert_statement_embedding(&triple, &vector) {
+                    match shelf_ref.store.upsert_statement_embedding(&triple, &vector) {
                         Ok(_) => stats.created += 1,
                         Err(_) => stats.errors += 1,
                     }

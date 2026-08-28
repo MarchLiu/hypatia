@@ -259,7 +259,10 @@ fn run_locomo_benchmark() {
         println!("  Embedding model: NOT FOUND (vector search disabled)");
     }
 
-    let mut mgr = ShelfManager::new().expect("create shelf manager");
+    // Hermetic home: never touch (or migrate!) the real ~/.hypatia shelf.
+    let home = tempfile::tempdir().expect("create temp home");
+    let mut mgr = ShelfManager::with_home(home.path().to_path_buf())
+        .expect("create shelf manager");
     let shelf_name = mgr
         .connect(&shelf_path, Some("locomo"))
         .expect("connect shelf");
