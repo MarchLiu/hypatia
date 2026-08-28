@@ -331,6 +331,7 @@ Content:
 - Be specific. "Use `Arc<Mutex<T>>`" is good. "Use proper synchronization" is useless.
 - Include non-obvious details.
 - Name things well.
+- **Normalize relative temporal expressions to absolute dates/times.** Use the message timestamp as the reference point: "明天" → `2026-08-29`, "下周一" → `2026-08-31`, "三小时后" → the concrete clock time. Never store "明天/下周/稍后" verbatim — the memory will be read at a different time than it was written.
 
 ### Phase 5: Selective Extraction
 
@@ -377,9 +378,10 @@ When the user explicitly asks to remember or forget:
 ### Remember / Store
 
 1. Identify what to remember
-2. Classify as `rule`, `taboo`, or general `memory`
-3. Determine scopes
-4. Create:
+2. **If the content contains relative temporal expressions (明天, 下周, 三小时后, tonight, …), rewrite them to absolute dates/times** using the current timestamp as the reference point before storing. Example: "明天提醒我备份数据" → "2026年8月29日提醒我备份数据".
+3. Classify as `rule`, `taboo`, or general `memory`
+4. Determine scopes
+5. Create:
    ```bash
    hypatia knowledge-create "<name>" \
      -d "<content>" \
@@ -438,6 +440,7 @@ When the user explicitly asks to remember or forget:
 8. **Don't interrupt the user** — memory operations are background tasks
 9. **Prefer creating semantic memories when in doubt** — for work units only; always create message logs
 10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules use `""`
+11. **Absolute dates, always** — relative temporal expressions ("明天", "下周一", "3 hours later") must be rewritten to absolute dates/times at extraction time, using the message timestamp as reference. A memory stored as "明天" is meaningless when recalled days later.
 
 ## Graph Schema Reference
 

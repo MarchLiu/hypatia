@@ -538,3 +538,4 @@ hypatia query '["$knowledge", ["$eq", "name", "Alice'\''s project"]]'
 - Content (`-d`) is stored as a string in the content JSON's `data` field.
 - Tags (`-t`) are comma-separated strings.
 - **Always create statements alongside knowledge entries** to maintain graph connectivity. Every knowledge entry should have at least one corresponding `is_a` statement.
+- **Normalize relative temporal expressions to absolute dates/times before storing.** When content contains "明天", "下周一", "三小时后", "tonight", etc., rewrite them using the current date/time as the reference point. Example: "明天提醒我备份数据" → store "2026年8月29日提醒我备份数据". A relative date is meaningless when the memory is recalled later.
