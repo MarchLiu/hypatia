@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::embedding::{EmbeddingConfig, EmbeddingProvider, build_provider};
 use crate::error::{HypatiaError, Result};
 use crate::model::{QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
+use crate::storage::vector_index::VectorFileIndex;
 use crate::storage::{ShelfRegistry, SqliteStore, Storage, open_or_migrate};
 
 pub struct OpenShelf {
@@ -11,6 +12,32 @@ pub struct OpenShelf {
     pub config: ShelfConfig,
     pub store: SqliteStore,
     pub embedder: Box<dyn EmbeddingProvider>,
+    /// ANN indexes per catalog (`vectors/<catalog>.usearch`). Rebuildable
+    /// cache — see plan §4; `None` when the catalog has no embeddings.
+    pub vectors: VectorIndexes,
+}
+
+/// Per-catalog ANN index handles.
+pub struct VectorIndexes {
+    pub dims: usize,
+    pub knowledge: Option<VectorFileIndex>,
+    pub statement: Option<VectorFileIndex>,
+}
+
+impl VectorIndexes {
+    pub fn get(&self, catalog: &str) -> Option<&VectorFileIndex> {
+        match catalog {
+            "statement" => self.statement.as_ref(),
+            _ => self.knowledge.as_ref(),
+        }
+    }
+
+    pub fn get_mut(&mut self, catalog: &str) -> Option<&mut VectorFileIndex> {
+        match catalog {
+            "statement" => self.statement.as_mut(),
+            _ => self.knowledge.as_mut(),
+        }
+    }
 }
 
 impl Storage for OpenShelf {
@@ -63,7 +90,50 @@ impl Storage for OpenShelf {
         target: QueryTarget,
     ) -> Result<QueryResult> {
         let query_vector = self.embedder.embed(query_text)?;
+        let catalog = match target {
+            QueryTarget::Knowledge => "knowledge",
+            QueryTarget::Statement => "statement",
+        };
 
+        // ANN path (usearch cache) — preferred when an index is available.
+        if let Some(idx) = self.vectors.get(catalog) {
+            if let Ok(hits) = idx.search(&query_vector, opts.limit as usize) {
+                if !hits.is_empty() {
+                    let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+                    let dist: HashMap<i64, f64> =
+                        hits.iter().map(|(id, d)| (*id, *d)).collect();
+                    let rows_raw = self.store.rows_by_doc_ids(catalog, &ids)?;
+                    let by_id: std::collections::HashMap<i64, (String, String)> = rows_raw
+                        .into_iter()
+                        .map(|(id, k, c)| (id, (k.clone(), c)))
+                        .collect();
+                    let key_field = match target {
+                        QueryTarget::Knowledge => "name",
+                        QueryTarget::Statement => "triple",
+                    };
+                    let mut rows: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+                    for (id, distance) in &hits {
+                        let Some((key, content)) = by_id.get(id) else { continue };
+                        let mut map = serde_json::Map::new();
+                        map.insert(key_field.to_string(), serde_json::Value::String(key.clone()));
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+                            map.insert("content".to_string(), parsed);
+                        }
+                        map.insert(
+                            "distance".to_string(),
+                            serde_json::Value::Number(
+                                serde_json::Number::from_f64(*distance)
+                                    .unwrap_or(serde_json::Number::from(0)),
+                            ),
+                        );
+                        rows.push(map);
+                    }
+                    return Ok(QueryResult::new(rows));
+                }
+            }
+        }
+
+        // Fallback: Rust brute-force kNN over embedding BLOBs.
         let rows = match target {
             QueryTarget::Knowledge => {
                 let results = self.store.vector_search_knowledge(&query_vector, opts.limit)?;
@@ -110,6 +180,93 @@ impl Storage for OpenShelf {
         let statements = self.store.query_khop(head, relation, depth)?;
         let rows = statements.into_iter().map(|s| statement_to_row(&s)).collect();
         Ok(QueryResult::new(rows))
+    }
+}
+
+impl OpenShelf {
+    fn open_vector_indexes(&mut self, dims: usize) -> Result<()> {
+        for catalog in ["knowledge", "statement"] {
+            let path = self.config.vectors_path.join(format!("{catalog}.usearch"));
+            let idx = Self::open_vector_index(&self.store, &path, catalog, dims)?;
+            match catalog {
+                "statement" => self.vectors.statement = idx,
+                _ => self.vectors.knowledge = idx,
+            }
+        }
+        Ok(())
+    }
+
+    fn open_vector_index(
+        store: &SqliteStore,
+        path: &Path,
+        catalog: &str,
+        dims: usize,
+    ) -> Result<Option<VectorFileIndex>> {
+        let pairs = store.embedding_pairs(catalog)?;
+        let items: Vec<(i64, Vec<f32>)> = pairs
+            .into_iter()
+            .map(|(id, blob)| (id, crate::storage::sqlite_store::blob_to_vector(&blob)))
+            .filter(|(_, v)| v.len() == dims)
+            .collect();
+        if items.is_empty() {
+            return Ok(None);
+        }
+        if VectorFileIndex::exists(path) {
+            if let Ok(idx) = VectorFileIndex::load(path, dims) {
+                // Reconcile against the authoritative BLOB rows.
+                if idx.size() == items.len() {
+                    return Ok(Some(idx));
+                }
+            }
+        }
+        VectorFileIndex::build(path, dims, &items).map(Some)
+    }
+
+    /// Push one embedding into the ANN index (doc_id resolved from docs).
+    pub fn vector_upsert(&mut self, catalog: &str, key: &str, vector: &[f32]) -> Result<()> {
+        let Some(idx) = self.vectors.get_mut(catalog) else {
+            return Ok(());
+        };
+        if let Some(doc_id) = self.store.doc_id_by_key(catalog, key)? {
+            idx.upsert(doc_id, vector)?;
+        }
+        Ok(())
+    }
+
+    /// Remove one vector from the ANN index.
+    pub fn vector_remove(&mut self, catalog: &str, key: &str) -> Result<()> {
+        let Some(idx) = self.vectors.get_mut(catalog) else {
+            return Ok(());
+        };
+        if let Some(doc_id) = self.store.doc_id_by_key(catalog, key)? {
+            idx.remove(doc_id)?;
+        }
+        Ok(())
+    }
+
+    /// Persist dirty ANN snapshots (atomic rename).
+    pub fn save_vector_indexes(&mut self) -> Result<()> {
+        for idx in [&mut self.vectors.knowledge, &mut self.vectors.statement] {
+            if let Some(idx) = idx {
+                idx.save()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild both ANN indexes from the authoritative embedding BLOBs and save.
+    pub fn rebuild_vector_indexes(&mut self) -> Result<()> {
+        let dims = self.vectors.dims;
+        self.open_vector_indexes(dims)?;
+        self.save_vector_indexes()
+    }
+}
+
+impl Drop for OpenShelf {
+    fn drop(&mut self) {
+        // Best-effort snapshot on process exit; a lost snapshot is repaired
+        // by the count-reconcile on next open.
+        let _ = self.save_vector_indexes();
     }
 }
 
@@ -235,12 +392,18 @@ impl ShelfManager {
 
         let embedder = build_provider(&embedding_config);
 
-        let shelf = OpenShelf {
+        let mut shelf = OpenShelf {
             id: config.id.clone(),
-            config,
+            config: config.clone(),
             store,
             embedder,
+            vectors: VectorIndexes {
+                dims: embedding_config.dimensions(),
+                knowledge: None,
+                statement: None,
+            },
         };
+        shelf.open_vector_indexes(embedding_config.dimensions())?;
 
         self.shelves.insert(shelf_name.clone(), shelf);
         Ok(shelf_name)

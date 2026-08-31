@@ -3,12 +3,14 @@ pub mod migrate;
 pub mod shelf_manager;
 pub mod shelf_registry;
 pub mod sqlite_store;
+pub mod vector_index;
 
 pub use json_index::json_contains;
 pub use migrate::open_or_migrate;
 pub use shelf_manager::{OpenShelf, ShelfManager};
 pub use shelf_registry::ShelfRegistry;
 pub use sqlite_store::{sanitize_fts_query, FtsDoc, SqliteStore};
+pub use vector_index::VectorFileIndex;
 
 use crate::error::Result;
 use crate::model::{QueryResult, QueryTarget, SearchOpts};

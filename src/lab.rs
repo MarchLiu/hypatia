@@ -294,6 +294,9 @@ impl Lab {
             }
         }
 
+        // Rebuild ANN snapshots from the authoritative BLOBs and persist.
+        shelf_ref.rebuild_vector_indexes()?;
+
         Ok(stats)
     }
 }

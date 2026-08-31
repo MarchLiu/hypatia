@@ -18,6 +18,7 @@ impl<'a> KnowledgeService<'a> {
         // Generate embedding and store the BLOB (best-effort: skip if model unavailable)
         if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
             self.shelf.store.upsert_knowledge_embedding(name, &vector)?;
+            self.shelf.vector_upsert("knowledge", name, &vector)?;
         }
 
         // Read back to get the generated timestamp
@@ -39,6 +40,7 @@ impl<'a> KnowledgeService<'a> {
 
         if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
             self.shelf.store.upsert_knowledge_embedding(name, &vector)?;
+            self.shelf.vector_upsert("knowledge", name, &vector)?;
         }
 
         let knowledge = self.shelf.store.get_knowledge(name)?.ok_or_else(|| {
@@ -51,6 +53,8 @@ impl<'a> KnowledgeService<'a> {
     }
 
     pub fn delete(&mut self, name: &str) -> Result<()> {
+        // Drop the ANN vector BEFORE the doc row disappears (doc_id lookup).
+        self.shelf.vector_remove("knowledge", name)?;
         self.shelf.store.delete_knowledge(name)
     }
 }

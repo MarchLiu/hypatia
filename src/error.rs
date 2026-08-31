@@ -10,6 +10,7 @@ pub enum HypatiaError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
+
     #[error("DuckDB error: {0}")]
     DuckDb(#[from] duckdb::Error),
 
@@ -51,6 +52,9 @@ pub enum StorageError {
 
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    #[error("vector index error: {0}")]
+    Vector(String),
 
     #[error("connection not open for shelf: {0}")]
     NotConnected(String),

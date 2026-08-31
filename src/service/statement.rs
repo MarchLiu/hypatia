@@ -27,6 +27,7 @@ impl<'a> StatementService<'a> {
         // Generate embedding and store the BLOB (best-effort)
         if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(&csv_key))? {
             self.shelf.store.upsert_statement_embedding(&csv_key, &vector)?;
+            self.shelf.vector_upsert("statement", &csv_key, &vector)?;
         }
 
         let statement = self.shelf.store.get_statement(key)?.ok_or_else(|| {
@@ -54,6 +55,7 @@ impl<'a> StatementService<'a> {
 
         if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(&csv_key))? {
             self.shelf.store.upsert_statement_embedding(&csv_key, &vector)?;
+            self.shelf.vector_upsert("statement", &csv_key, &vector)?;
         }
 
         let statement = self.shelf.store.get_statement(key)?.ok_or_else(|| {
@@ -66,6 +68,8 @@ impl<'a> StatementService<'a> {
     }
 
     pub fn delete(&mut self, key: &StatementKey) -> Result<()> {
+        // Drop the ANN vector BEFORE the doc row disappears (doc_id lookup).
+        self.shelf.vector_remove("statement", &key.to_csv_key())?;
         self.shelf.store.delete_statement(key)
     }
 }

@@ -702,6 +702,97 @@ impl SqliteStore {
         )
     }
 
+    // ── Vector index plumbing (doc_id ↔ embedding pairs) ─────────────
+
+    /// Number of rows carrying an embedding for one catalog.
+    pub fn embedding_row_count(&self, catalog: &str) -> Result<usize> {
+        let sql = match catalog {
+            "statement" => "SELECT COUNT(*) FROM statement WHERE embedding IS NOT NULL",
+            _ => "SELECT COUNT(*) FROM knowledge WHERE embedding IS NOT NULL",
+        };
+        let n: i64 = self.conn.query_row(sql, [], |r| r.get(0)).map_err(StorageError::from)?;
+        Ok(n as usize)
+    }
+
+    /// (doc_id, embedding BLOB) pairs for one catalog — authoritative data
+    /// for rebuilding an external vector index.
+    pub fn embedding_pairs(&self, catalog: &str) -> Result<Vec<(i64, Vec<u8>)>> {
+        let sql = match catalog {
+            "statement" => {
+                "SELECT d.id, s.embedding FROM docs d                  JOIN statement s ON s.triple = d.key                  WHERE d.catalog = 'statement' AND s.embedding IS NOT NULL"
+            }
+            _ => {
+                "SELECT d.id, k.embedding FROM docs d                  JOIN knowledge k ON k.name = d.key                  WHERE d.catalog = 'knowledge' AND k.embedding IS NOT NULL"
+            }
+        };
+        let mut stmt = self.conn.prepare(sql).map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            .map_err(StorageError::from)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(StorageError::from)?);
+        }
+        Ok(out)
+    }
+
+    /// doc_id for a catalog key (name / triple CSV).
+    pub fn doc_id_by_key(&self, catalog: &str, key: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM docs WHERE catalog = ?1 AND key = ?2",
+                params![catalog, key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Fetch (doc_id, key, content) rows by doc_id (for $similar results).
+    pub fn rows_by_doc_ids(
+        &self,
+        catalog: &str,
+        ids: &[i64],
+    ) -> Result<Vec<(i64, String, String)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let (sql, params): (String, Vec<rusqlite::types::Value>) = match catalog {
+            "statement" => (
+                format!(
+                    "SELECT d.id, s.triple, s.content FROM statement s \
+                     JOIN docs d ON d.catalog='statement' AND d.key = s.triple \
+                     WHERE d.id IN ({placeholders})"
+                ),
+                ids.iter().map(|i| json_to_sql(&serde_json::Value::from(*i))).collect(),
+            ),
+            _ => (
+                format!(
+                    "SELECT d.id, k.name, k.content FROM knowledge k \
+                     JOIN docs d ON d.catalog='knowledge' AND d.key = k.name \
+                     WHERE d.id IN ({placeholders})"
+                ),
+                ids.iter().map(|i| json_to_sql(&serde_json::Value::from(*i))).collect(),
+            ),
+        };
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(StorageError::from)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(StorageError::from)?);
+        }
+        Ok(out)
+    }
+
     // ── Vector search: Rust brute-force kNN over embedding BLOBs ─────
 
     pub fn vector_search_knowledge(
