@@ -14,7 +14,9 @@
  *      - `approval/request` fires later, inside the same call's execution,
  *        when the bash tool asks to escalate the sandbox (hypatia writes to
  *        `~/.hypatia/`, outside any session workspace). A remembered callId
- *        is answered `allowed-once`; everything else falls through to the
+ *        is answered `allowed-once` (the handler is PREPENDED to the
+ *        approval/request waterfall so it outranks the host's UI publisher);
+ *        everything else falls through to the
  *        human answerer unchanged — all non-hypatia operations keep the
  *        normal interactive approval prompt.
  *
@@ -127,12 +129,18 @@ function applyAutoApprove(ctx, config) {
     pending.delete(exec.callId)
   })
 
+  // PREPEND: the waterfall runs outermost-first and a handler that skips
+  // next() vetoes the rest — the host's api-proxy publishes the approval to
+  // the UI and blocks on the human without calling next(), so a plain
+  // registration would append AFTER it and the auto-approve could never run.
+  // Prepending puts this answerer ahead of the UI publisher. Non-hypatia
+  // calls fall through via next() unchanged.
   ctx.on('approval/request', (req, next) => {
     if (req.callId !== undefined && pending.delete(req.callId)) {
       return 'allowed-once'
     }
     return next()
-  })
+  }, { prepend: true })
 }
 
 /* ------------------------------------------------------------------------ */

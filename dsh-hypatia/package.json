@@ -1,6 +1,6 @@
 {
   "name": "dsh-hypatia",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Hypatia AI memory for DSH: bundled hypatia/hypatia-memory skills plus automatic one-shot approval for pure hypatia CLI sandbox escalations — implicit memory, no repeated authorization prompts, every other operation still asks.",
   "type": "module",
   "main": "src/index.js",
