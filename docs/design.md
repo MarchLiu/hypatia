@@ -14,9 +14,9 @@ Hypatia 的知识由两大类组成，
 
 Hypatia 的知识通过 shelves 分组，提供一个默认的 shelves，允许用户导入、导出和引用不同的 shelves。
 
-一个 Shelves 是一个目录，每个目录包含 `data.duckdb`（knowledge 表和 statement 表，含向量列）、`index.sqlite`（全文检索索引）、可选的 `shelf.toml`（嵌入模型配置）和嵌入模型文件。
+一个 Shelves 是一个目录，每个目录包含 `hypatia.sqlite`（唯一源真相：knowledge/statement 表 + docs 锚点 + json_index 倒排 + FTS5 + 向量 BLOB 列）、`vectors/`（usearch ANN 快照，可重建缓存）、可选的 `shelf.toml`（嵌入模型配置）和嵌入模型文件。0.2 起不再使用 duckdb。
 
-Hypatia 面向局部环境，因此数据管理也遵循简单原则，例如 knowledge 直接保存 name 作为主键，statement 中直接保存三元组的可读性形式 `subject, predicate, object` 作为主键。content 是一个 json 对象，默认总会包含：
+Hypatia 面向局部环境，因此数据管理也遵循简单原则，例如 knowledge 直接保存 name 作为主键，statement 中直接保存三元组的可读性形式 `head, relation, tail` 作为主键。content 是一个 json 对象，默认总会包含：
 
 ```json
 {
@@ -29,7 +29,7 @@ Hypatia 面向局部环境，因此数据管理也遵循简单原则，例如 kn
 - format 可以是 markdown、json等，data保存对应格式的内容
 - tags 是字符串列表，可以为空
 - knowledge 保存时，向 sqlite 的 fts 库中插入/更新一条记录，其 key 对应 knowledge 的 name，catalog 是 knowledge，content 是 knowledge 的 content 字典加上 name 和 日期
-- statement 保存时，向 sqlite 的 fts 库中插入/更新一条记录，其key 对应 statement 的三元组可读形式 `subject, predicate, object`，注意这里没有左右括号，这是因为它们不对搜索提供有意义的信息
+- statement 保存时，向 sqlite 的 fts 库中插入/更新一条记录，其key 对应 statement 的三元组可读形式 `head, relation, tail`，注意这里没有左右括号，这是因为它们不对搜索提供有意义的信息
 - 三元组中的信息可能本身就包含,或"等字符，因此fts表中保存三元组时，key需要按照csv的规范处理成一行三列的文本
 - 知识经常是需要包含其定义的，而 statement 有更多的可能并没有真正的内容，这是一个预留机制
 
@@ -46,15 +46,15 @@ create table knowledge (
 
 ```sql
 create table statement (
-    subject text,
-    predicate text,
-    object text,
+    head text,
+    relation text,
+    tail text,
     content json,
     embedding float[N],   -- N 由嵌入模型维度决定
     created_at timestamp default now(),
     tr_start timestamp,
     tr_end timestamp,
-    primary key(subject, predicate, object)
+    primary key(head, relation, tail)
 );
 ```
 
@@ -72,25 +72,12 @@ pooling = "mean"             # "mean" / "cls" / "last_token"
 
 默认使用 BAAI/bge-m3 (568M params, 1024d, mean pooling)。也支持 EmbeddingGemma-300M、gte 系列、Jina v5 等模型，以及 OpenAI 兼容的远程 API。
 
-### FTI
+### 全文索引与 JSON 倒排
 
-Hypatia 通过 sqlite 表管理 Full Text Index信息，对应的表是
-
-```sql
-CREATE TABLE docs_meta (
-    id INTEGER PRIMARY KEY,
-    catalog TEXT,
-    key TEXT,
-    content TEXT
-);
-create index idx_docs_catalog on docs_meta(catalog);
-
-CREATE VIRTUAL TABLE docs_fts USING fts5(
-    content,
-    content='docs_meta',
-    content_rowid='id'
-);
-```
+全文检索沿用 SQLite FTS5（jieba 预分词 + porter），锚定统一文档表 `docs(id, catalog, key)`；
+JSON 字段查询走路径树倒排 `json_index(doc_id, path, kind, value, array_index)`，
+支持 $has（成员）、$content（键值）、$json-contains（@> 结构包含，倒排召回 + json_contains UDF recheck）；
+向量检索由外置 usearch 快照承担（可从 embedding BLOB 列重建），详见 docs/sqlite-refactor-plan.md。
 
 ## 命令行
 
@@ -127,10 +114,10 @@ Hypatia 的 JSE 指令包含：
 
 - $knowledge 表示对 knowledge 表的查询
 - $statement 表示 对 statement 表的查询
-- $and 会转化成 Duckdb SQL where 条件中的 and
+- $and 会转化成 SQLite where 条件中的 and
 - $or 会转化成 SQL where 条件中的 or
 - $not 会转化成 SQL where 条件中的 not
-- $search 会转化成 SQLite FTS 数据中的查询，它始终在 $knowledge 或 $statement 内部使用，与 $and、$or 等指令一致，不单独传入 opts 参数，而是遵循外部的 opts 参数。$search 的产物是对应的子查询，这些子查询限制 knowledge 的 name 或 statement 的 subject、predicate、object 匹配从 FTS 搜索到的 key
+- $search 会转化成 SQLite FTS 数据中的查询，它始终在 $knowledge 或 $statement 内部使用，与 $and、$or 等指令一致，不单独传入 opts 参数，而是遵循外部的 opts 参数。$search 的产物是对应的子查询，这些子查询限制 knowledge 的 name 或 statement 的 head、relation、tail 匹配从 FTS 搜索到的 key
 - $similar 语义向量搜索，将查询文本编码为向量后通过 DuckDB cosine distance 检索最相似的条目
 - $eq 对应等于
 - $ne 对应不等于
@@ -138,11 +125,12 @@ Hypatia 的 JSE 指令包含：
 - $lte 对应 小于等于
 - $gt 对应大于
 - $lt 对应小于
-- $contains 对应对 duckdb 数据表 content 字段的 contains 查询
+- $contains 对应 content 字段的查询；对数组字段（tags/scopes）自动路由为 json_index 上的精确成员匹配；新算子 $has 显式表达成员语义；$json-contains 实现结构包含（@>）
 - $like 对应 SQL LIKE 模式匹配
 - $content 对应 content JSON 字段的键值匹配
 - $triple 对三元组的位置匹配，支持通配符 $*
 - $k-hop 图遍历查询，基于 statement triples 做 k 跳递归 CTE，探索实体间的关系路径
+- $has 数组/标量成员精确匹配（倒排索引）；$json-contains 结构包含（倒排召回 + json_contains UDF recheck）
 - $quote 用于封装对查询的延迟解释，对应 LISP 语言的 quote 形式
 - 以上针对 duckdb 数据集的查询也包含可选的 opts 字典，其中包含
   - catalog

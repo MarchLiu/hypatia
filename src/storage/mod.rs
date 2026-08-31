@@ -1,5 +1,25 @@
 pub mod json_index;
+#[cfg(feature = "legacy-migration")]
 pub mod migrate;
+#[cfg(not(feature = "legacy-migration"))]
+pub mod migrate {
+    //! Stub: legacy duckdb→sqlite migration requires the
+    //! `legacy-migration` feature (cargo build --features legacy-migration).
+    use crate::error::{HypatiaError, Result};
+    use crate::model::shelf::ShelfConfig;
+    use crate::storage::sqlite_store::SqliteStore;
+
+    pub fn open_or_migrate(config: &ShelfConfig) -> Result<SqliteStore> {
+        if config.needs_migration() {
+            return Err(HypatiaError::Config(format!(
+                "shelf '{}' uses the legacy duckdb layout; rebuild with \
+                 --features legacy-migration (or run hypatia 0.2.x) to migrate",
+                config.id.name
+            )));
+        }
+        SqliteStore::open(&config.sqlite_path)
+    }
+}
 pub mod shelf_manager;
 pub mod shelf_registry;
 pub mod sqlite_store;

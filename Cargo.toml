@@ -1,11 +1,11 @@
 [package]
 name = "hypatia"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-duckdb = { version = "1", features = ["bundled"] }
+duckdb = { version = "1", features = ["bundled"], optional = true }
 rusqlite = { version = "0.39", features = ["bundled", "functions"] }
 usearch = "2"
 serde = { version = "1", features = ["derive"] }
@@ -20,6 +20,12 @@ ndarray = "0.17"
 toml = "0.8"
 ureq = { version = "3", features = ["json"] }
 jieba-rs = "0.8"
+
+[features]
+default = []
+# Read-side support for pre-0.2 duckdb shelves (data.duckdb). Enable only
+# when a legacy shelf still needs migrating; pulls the heavy duckdb build.
+legacy-migration = ["dep:duckdb"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -11,9 +11,6 @@ pub enum HypatiaError {
     Sqlite(#[from] rusqlite::Error),
 
 
-    #[error("DuckDB error: {0}")]
-    DuckDb(#[from] duckdb::Error),
-
     #[error("JSE parse error: {0}")]
     Parse(String),
 
@@ -47,6 +44,7 @@ pub enum HypatiaError {
 
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[cfg(feature = "legacy-migration")]
     #[error("DuckDB error: {0}")]
     DuckDb(#[from] duckdb::Error),
 

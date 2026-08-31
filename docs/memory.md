@@ -11,7 +11,7 @@ Agent memory in Hypatia has two layers (see `skills/hypatia-memory/SKILL.md`):
    - **Level 1:** When accumulated token count reaches `max_tokens × 0.9` (estimated as `chars/4`; depon model: GLM-5.1=200k, DeepSeek V4 Pro=1M).
    - **Level 2+:** When 16 unlinked items accumulate at the previous level.
    - **Emergency:** When context tokens reach `settings.max_token × 0.9` → force compression + new session.
-5. Summaries use predicate `summary` (not `summarizes`). Tags: `["summary", "summary 1"]`, `["summary", "summary 2"]`, etc.
+5. Summaries use relation `summary` (not `summarizes`). Tags: `["summary", "summary 1"]`, `["summary", "summary 2"]`, etc.
 6. Summaries have meaningful names extracted from their content.
 7. Batch order is **FIFO** (oldest unlinked items first).
 
