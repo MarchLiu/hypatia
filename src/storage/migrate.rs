@@ -22,19 +22,40 @@ pub fn open_or_migrate(config: &ShelfConfig) -> Result<SqliteStore> {
 
 /// Migrate a legacy shelf to the unified layout. Idempotent: skips when no
 /// legacy files are present or the new DB already exists.
+///
+/// Crash safety: the new DB is built at `hypatia.sqlite.migrating` and only
+/// atomically renamed into place on success — an interrupted migration (kill,
+/// crash, reboot) leaves `needs_migration()` true and the next attempt starts
+/// over cleanly instead of exposing a partial database.
 pub fn migrate_shelf(config: &ShelfConfig) -> Result<()> {
     if !config.needs_migration() {
         return Ok(());
     }
 
-    let result = run_migration(config);
+    let tmp_path = suffix_path(&config.sqlite_path, ".migrating");
+
+    // Stale tmp from a previous interrupted run: start over.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(suffix_path(&tmp_path, suffix));
+    }
+
+    let result = run_migration(config, &tmp_path);
     if let Err(e) = result {
         // Remove partial output so a retry starts clean.
         for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(suffix_path(&config.sqlite_path, suffix));
+            let _ = std::fs::remove_file(suffix_path(&tmp_path, suffix));
         }
         return Err(e);
     }
+
+    // Connection closed (WAL checkpointed): promote atomically.
+    for suffix in ["-wal", "-shm"] {
+        let from = suffix_path(&tmp_path, suffix);
+        if from.exists() {
+            std::fs::rename(&from, suffix_path(&config.sqlite_path, suffix))?;
+        }
+    }
+    std::fs::rename(&tmp_path, &config.sqlite_path)?;
 
     // Back up legacy files.
     rename_to_bak(&config.legacy_duckdb_path())?;
@@ -42,7 +63,7 @@ pub fn migrate_shelf(config: &ShelfConfig) -> Result<()> {
     Ok(())
 }
 
-fn run_migration(config: &ShelfConfig) -> Result<()> {
+fn run_migration(config: &ShelfConfig, target: &Path) -> Result<()> {
     let config_duckdb = duckdb::Config::default()
         .access_mode(duckdb::AccessMode::ReadOnly)
         .map_err(crate::error::StorageError::from)?;
@@ -52,7 +73,7 @@ fn run_migration(config: &ShelfConfig) -> Result<()> {
     )
     .map_err(crate::error::StorageError::from)?;
 
-    let store = SqliteStore::open(&config.sqlite_path)?;
+    let store = SqliteStore::open(target)?;
     let conn = store.conn();
 
     let tx = conn.unchecked_transaction().map_err(crate::error::StorageError::from)?;
@@ -281,6 +302,27 @@ mod tests {
 
         // Re-running is a no-op
         migrate_shelf(&config).unwrap();
+    }
+
+    #[test]
+    fn stale_partial_migration_is_cleaned_and_retried() {
+        let dir = TempDir::new().unwrap();
+        let config = ShelfConfig::from_path(dir.path(), Some("stale-test"));
+        seed_legacy(&config.legacy_duckdb_path());
+
+        // Simulate an interrupted run: partial output + leftover wal.
+        std::fs::write(config.sqlite_path.with_extension("sqlite.migrating"), b"junk").unwrap();
+        std::fs::write(
+            config.sqlite_path.with_extension("sqlite.migrating-wal"),
+            b"junk",
+        )
+        .unwrap();
+
+        migrate_shelf(&config).unwrap();
+
+        let store = SqliteStore::open(&config.sqlite_path).unwrap();
+        assert!(store.get_knowledge("rust").unwrap().is_some());
+        assert!(!config.sqlite_path.with_extension("sqlite.migrating").exists());
     }
 
     #[test]
