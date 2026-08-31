@@ -4,7 +4,7 @@
 
 ## 一个错配的选择
 
-我为 hypatia 选择 duckdb，是出于对它 OLAP 能力的欣赏：列存、向量化执行、SIMD，以及 PG 风格的查询语法。对于"读得多、写得少、批量分析"的场景，这些是巨大的回报。
+我为 hypatia 选择 duckdb，是出于对它 OLAP 能力的欣赏：列存、向量化执行、SIMD，以及 PG 风格的查询语法。对于"读得多、写得少、批量分析"的场景，这些是巨大的回报。我需要使用我熟悉的PG风格的，递归查询语法，实现图信息查询。
 
 但 hypatia 的真实负载不是 OLAP。它是一个记忆系统：每一轮对话都在追加 message，每次总结都在改写 knowledge 和 statement，多个 Agent 在同一台机器上频繁地小批量读写同一个书架。这是典型的 OLTP 形态——大量点查、高频小事务、并发访问。DuckDB 在这个象限里恰恰是弱项：单进程单写者、缺乏成熟的并发控制，它的列存和向量化执行对"按主键取一行、按标签过滤十行"毫无用武之地。
 
@@ -25,6 +25,27 @@ DuckDB 对此几乎没有答案：单写者模型，且跨进程共享一个库�
 第一个版本的指令实现，是我基于对 PostgreSQL 和 DuckDB 的知识积累手工执行的。我知道 PG 的 jsonb `@>` 应该是什么语义，于是用 `json_extract_string(content, '$.tags') LIKE '%value%'` 在 duckdb 里近似它——语义上是子串误匹配，性能上是无索引全表扫。这些妥协在当年是合理的起步，但它们也让实现与语义长期纠缠在一起。
 
 指令集稳定的意义在于：**语义（契约）与实现（方言）第一次可以被分开对待**。契约不变，实现可以整体迁移。把二十个算子的语义逐条翻译给 AI——`@>` 等价于 jq 的 `contains()`、`?|` 是任一成员存在、GIN 是"倒排召回 + recheck"两段式——AI 就能把这套手工设计在 SQLite 上重新实现为路径树倒排 `json_index`、`$has` 成员算子、以及一个对齐 PG `@>` 语义的 `json_contains` UDF。迁移工具则保证旧数据无损地跨过 SPO→HRT 的改名与双库到单库的合并。这次重构验证了一个工作模式：**人守住语义契约，AI 完成方言翻译**。
+
+## JSON 倒排索引的实现方案
+
+把 jsonb 的包含语义搬进 SQLite，关键在于换一个视角：不要把 JSON 当作一段等待解析的文本，而把它当作一棵可以倒排的树。PostgreSQL 的 GIN 正是这么做的——把文档拆成"键路径 → 值"的 posting，查询时先按路径召回候选，再用原始 JSON 做精确校验。我在 SQLite 里复刻了这个模型，建一张路径树倒排表：
+
+```sql
+CREATE TABLE json_index (
+    doc_id      INTEGER NOT NULL,   -- 统一文档锚点
+    path        TEXT NOT NULL,      -- 'tags' | 'scopes' | 'data.mime_type' | …
+    kind        TEXT NOT NULL,      -- string / number / array / object …
+    value       TEXT,               -- 标量的规范字符串
+    array_index INTEGER,            -- 数组元素下标
+    PRIMARY KEY (doc_id, path, array_index, value)
+) WITHOUT ROWID;
+```
+
+写入时遍历 content：顶层字段各自成路径，数组的每个元素携带下标入表（`tags` 下的 `"rust"` 就是一行），`format` 这类标量即路径即值，标量统一以规范字符串入表——查询侧用同一转换，精确命中才有依据。三处刻意的设计：其一，`data` 自由文本不入倒排，它属于 FTS 与 JSON1 的子串世界；其二，`format` 为 json 时把 data 字符串再解析一层，子键以 `data.mime_type` 这样的路径入表——这是当初设计 jsonb 式访问能力时许下的承诺，归档条目的元数据从此可以精确命中；其三，嵌套超过一层的容器整块存为不透明叶子（kind 加原始 JSON），不递归展开，避免路径爆炸。维护是写入事务的一部分：替换文档时先清旧 posting 再插新行；对迁移而来的旧库，打开时发现倒排为空而数据非空，会自动重建一遍。
+
+查询侧按算子分派。`$has` 与 `$content` 翻译成 `(path, value)` 的相关 EXISTS，纯索引命中；`$eq` 同理，`$ne` 保留 JSON1；`$gt`/`$lt` 这类范围比较走 `CAST(json_extract(...) AS REAL)` 的数值化路径——顺手修复了旧实现里 `"9" > "18"` 的字符串比较错误；`$not-summaried` 的标签过滤也从 LIKE 子串升级为精确成员。真正的新能力是 `$json-contains`——结构包含分两段走：先从右侧 JSON 提取叶子路径做倒排召回，再由一个 Rust 实现的 `json_contains` UDF 对候选做精确校验。这便是 GIN 的"召回 + recheck"两段式，语义基准取自 jq 的 `contains()`，仅在字符串语义上向 PG 对齐（要求全等而非子串）。
+
+调试中还收获了一个 SQLite 查询规划器的怪癖：召回与 recheck 同为 WHERE 的合取时，若 UDF 子句在前，相关 EXISTS 会被错误求值返回空集——把召回放在前面就恢复正常。这一插曲连同两段式本身，都写进了回归测试。
 
 ## 相似检索：等待官方，拥抱文件系统
 
