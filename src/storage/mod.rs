@@ -1,8 +1,10 @@
+pub mod json_index;
 pub mod migrate;
 pub mod shelf_manager;
 pub mod shelf_registry;
 pub mod sqlite_store;
 
+pub use json_index::json_contains;
 pub use migrate::open_or_migrate;
 pub use shelf_manager::{OpenShelf, ShelfManager};
 pub use shelf_registry::ShelfRegistry;

@@ -13,6 +13,7 @@ use chrono::NaiveDateTime;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{HypatiaError, Result, StorageError};
+use crate::storage::json_index::{json_contains_str, rebuild_all, replace_postings_in};
 use crate::model::{Content, Knowledge, SearchOpts, Statement, StatementKey};
 
 const SCHEMA_VERSION: &str = "2";
@@ -234,7 +235,51 @@ impl SqliteStore {
         let conn = Connection::open(path).map_err(StorageError::from)?;
         let store = Self { conn };
         store.init_schema()?;
+        store.register_udfs()?;
+        store.ensure_json_index_populated()?;
         Ok(store)
+    }
+
+    /// Register SQL UDFs (per-connection).
+    fn register_udfs(&self) -> Result<()> {
+        use rusqlite::functions::FunctionFlags;
+        self.conn
+            .create_scalar_function(
+                "json_contains",
+                2,
+                FunctionFlags::SQLITE_UTF8,
+                |ctx| {
+                    let lhs: Option<String> = ctx.get(0)?;
+                    let rhs: Option<String> = ctx.get(1)?;
+                    match (lhs, rhs) {
+                        (Some(l), Some(r)) => Ok(json_contains_str(&l, &r)),
+                        _ => Ok(false),
+                    }
+                },
+            )
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    /// Populates json_index for shelves migrated before P2 (one-time, idempotent).
+    fn ensure_json_index_populated(&self) -> Result<()> {
+        let needs: bool = self
+            .conn
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM json_index)                  AND (EXISTS(SELECT 1 FROM knowledge) OR EXISTS(SELECT 1 FROM statement))",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::from)?;
+        if needs {
+            self.rebuild_json_index()?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild the whole json_index from source-table content.
+    pub fn rebuild_json_index(&self) -> Result<usize> {
+        rebuild_all(&self.conn)
     }
 
     /// Access the underlying connection (used by the migration tool).
@@ -278,7 +323,7 @@ impl SqliteStore {
         catalog: &str,
         key: &str,
         doc: &FtsDoc,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT id FROM docs WHERE catalog = ?1 AND key = ?2",
@@ -299,7 +344,19 @@ impl SqliteStore {
                 params![catalog, key, doc.fts_key, doc.fts_data, doc.fts_tags, doc.fts_synonyms],
             )?;
         }
-        Ok(())
+        let id: i64 = tx
+            .query_row(
+                "SELECT id FROM docs WHERE catalog = ?1 AND key = ?2",
+                params![catalog, key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                HypatiaError::Storage(StorageError::NotConnected(format!(
+                    "docs row missing after upsert: {catalog}/{key}"
+                )))
+            })?;
+        Ok(id)
     }
 
     // ── Knowledge CRUD ───────────────────────────────────────────────
@@ -312,7 +369,8 @@ impl SqliteStore {
             params![name, json],
         )
         .map_err(StorageError::from)?;
-        self.docs_upsert_in(&tx, "knowledge", name, &fts_doc_for(content, name))?;
+        let doc_id = self.docs_upsert_in(&tx, "knowledge", name, &fts_doc_for(content, name))?;
+        replace_postings_in(&tx, doc_id, &json)?;
         tx.commit()?;
         Ok(())
     }
@@ -344,7 +402,8 @@ impl SqliteStore {
                 key: name.to_string(),
             });
         }
-        self.docs_upsert_in(&tx, "knowledge", name, &fts_doc_for(content, name))?;
+        let doc_id = self.docs_upsert_in(&tx, "knowledge", name, &fts_doc_for(content, name))?;
+        replace_postings_in(&tx, doc_id, &json)?;
         tx.commit()?;
         Ok(())
     }
@@ -406,7 +465,8 @@ impl SqliteStore {
             params![triple, key.head, key.relation, key.tail, json, tr_start_str, tr_end_str],
         )
         .map_err(StorageError::from)?;
-        self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
+        let doc_id = self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
+        replace_postings_in(&tx, doc_id, &json)?;
         tx.commit()?;
         Ok(())
     }
@@ -449,7 +509,8 @@ impl SqliteStore {
                 key: triple,
             });
         }
-        self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
+        let doc_id = self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
+        replace_postings_in(&tx, doc_id, &json)?;
         tx.commit()?;
         Ok(())
     }
@@ -465,6 +526,17 @@ impl SqliteStore {
                 kind: "statement".to_string(),
                 key: triple,
             });
+        }
+        let doc_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM docs WHERE catalog = 'statement' AND key = ?1",
+                params![triple],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = doc_id {
+            tx.execute("DELETE FROM json_index WHERE doc_id = ?1", params![id])
+                .map_err(StorageError::from)?;
         }
         tx.execute(
             "DELETE FROM docs WHERE catalog = 'statement' AND key = ?1",
@@ -1120,6 +1192,62 @@ mod tests {
         let (_dir, store) = setup();
         let results = store.query_khop("NonExistent", Some("knows"), 3).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn json_contains_query_e2e() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteStore::open(dir.path().join("db.sqlite").as_path()).unwrap();
+        store
+            .insert_knowledge(
+                "plan",
+                &Content::new("data").with_tags(vec!["hypatia".into(), "refactor".into()]),
+            )
+            .unwrap();
+        store
+            .insert_knowledge("other", &Content::new("x").with_tags(vec!["misc".into()]))
+            .unwrap();
+
+        use crate::engine::ast::AstNode;
+        use crate::model::QueryTarget;
+        use crate::engine::operators::{evaluate_operator, OpContext};
+        let ctx = OpContext::for_target(QueryTarget::Knowledge);
+        let mut map = serde_json::Map::new();
+        map.insert("tags".to_string(), serde_json::json!(["refactor"]));
+        let result = evaluate_operator(
+            "$json-contains",
+            &[AstNode::Object(map)],
+            &serde_json::Map::new(),
+            &ctx,
+            &|_| unreachable!(),
+        )
+        .unwrap();
+        let (fragment, params) = match result {
+            crate::engine::operators::OperatorResult::SqlCondition { fragment, params } => {
+                (fragment, params)
+            }
+            other => panic!("expected SqlCondition, got {other:?}"),
+        };
+        let sql = format!(
+            "SELECT name, content, created_at FROM knowledge WHERE {fragment}"
+        );
+        let rows = store.query_knowledge(&sql, params).unwrap();
+        let names: Vec<String> = rows.into_iter().map(|k| k.name).collect();
+        assert_eq!(names, vec!["plan".to_string()], "fragment: {fragment}");
+
+        // Split: recall only
+        let recall_only = "SELECT name, content, created_at FROM knowledge WHERE EXISTS (SELECT 1 FROM docs d              JOIN json_index j ON j.doc_id = d.id WHERE d.catalog = 'knowledge'              AND d.key = knowledge.name AND j.path = 'tags' AND j.value = 'refactor')";
+        let rows = store.query_knowledge(recall_only, vec![]).unwrap();
+        assert_eq!(rows.len(), 1, "recall failed");
+
+        // Split: recheck only
+        let recheck_only =
+            "SELECT name, content, created_at FROM knowledge WHERE name = 'plan' AND json_contains(content, ?)";
+        let rows = store
+            .query_knowledge(recheck_only, vec![serde_json::json!({"tags": ["refactor"]})])
+            .unwrap();
+        let recheck_names: Vec<String> = rows.into_iter().map(|k| k.name).collect();
+        assert_eq!(recheck_names, vec!["plan".to_string()], "recheck failed");
     }
 
     #[test]

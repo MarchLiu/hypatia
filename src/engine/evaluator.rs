@@ -2,7 +2,7 @@ use crate::error::{HypatiaError, Result};
 use crate::model::{QueryOpts, QueryResult, QueryTarget, SearchOpts};
 use crate::storage::Storage;
 use super::ast::AstNode;
-use super::operators::OperatorResult;
+use super::operators::{OpContext, OperatorResult};
 use super::parser::Parser;
 use super::sql_builder::SqlBuilder;
 
@@ -46,10 +46,11 @@ impl Evaluator {
         let mut builder = SqlBuilder::new(target);
         builder.set_limit(opts.limit);
         builder.set_offset(opts.offset);
+        let ctx = OpContext::for_target(target);
 
         // Evaluate conditions from operands
         for operand in operands {
-            let result = Self::eval_condition(operand)?;
+            let result = Self::eval_condition(operand, &ctx)?;
             match result {
                 OperatorResult::SqlCondition { fragment, params } => {
                     builder.add_condition(fragment, params);
@@ -137,12 +138,13 @@ impl Evaluator {
         };
 
         let opts = extract_query_opts(metadata);
+        let ctx = OpContext::for_target(QueryTarget::Knowledge);
 
         let mut conditions = Vec::new();
         let mut cond_params = Vec::new();
 
         for operand in &operands[1..] {
-            let result = Self::eval_condition(operand)?;
+            let result = Self::eval_condition(operand, &ctx)?;
             match result {
                 OperatorResult::SqlCondition { fragment, params } => {
                     let aliased = alias_knowledge_columns(&fragment);
@@ -186,8 +188,13 @@ impl Evaluator {
             }
         }
 
-        let tag_pattern = format!("%{}%", tag);
-        let mut all_params: Vec<Value> = vec![Value::String(tag_pattern)];
+        // Exact tag membership over json_index (replaces LIKE substring).
+        let tag_filter = format!(
+            "EXISTS (SELECT 1 FROM docs d JOIN json_index j ON j.doc_id = d.id \
+             WHERE d.catalog = 'knowledge' AND d.key = knowledge.name \
+             AND j.path = 'tags' AND j.value = ?)"
+        );
+        let mut all_params: Vec<Value> = vec![Value::String(tag)];
         all_params.extend(cond_params);
         all_params.push(Value::Number(opts.limit.into()));
         all_params.push(Value::Number(opts.offset.into()));
@@ -203,7 +210,7 @@ impl Evaluator {
              FROM knowledge \
              LEFT JOIN statement ON knowledge.name = statement.tail AND statement.relation = 'summary' \
              WHERE statement.head IS NULL \
-             AND json_extract(knowledge.content, '$.tags') LIKE ?{} \
+             AND {tag_filter}{} \
              ORDER BY knowledge.created_at ASC \
              LIMIT ? OFFSET ?",
             extra_conditions
@@ -212,14 +219,15 @@ impl Evaluator {
         store.execute_query(QueryTarget::Knowledge, &sql, all_params)
     }
 
-    fn eval_condition(ast: &AstNode) -> Result<OperatorResult> {
+    fn eval_condition(ast: &AstNode, ctx: &OpContext) -> Result<OperatorResult> {
         match ast {
             AstNode::Operator { operator, operands, metadata } => {
                 super::operators::evaluate_operator(
                     operator,
                     operands,
                     metadata,
-                    &|node| Self::eval_condition(node),
+                    ctx,
+                    &|node| Self::eval_condition(node, ctx),
                 )
             }
             AstNode::Quote(inner) => {

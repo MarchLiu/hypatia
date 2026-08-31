@@ -27,12 +27,76 @@ pub enum OperatorResult {
     Value(serde_json::Value),
 }
 
+/// Query-target context: which table (catalog) and primary-key column the
+/// generated json_index fragments must correlate against.
+#[derive(Debug, Clone, Copy)]
+pub struct OpContext {
+    pub catalog: &'static str,
+    pub table: &'static str,
+    pub pk: &'static str,
+}
+
+impl OpContext {
+    pub fn for_target(target: crate::model::QueryTarget) -> Self {
+        match target {
+            crate::model::QueryTarget::Knowledge => Self {
+                catalog: "knowledge",
+                table: "knowledge",
+                pk: "name",
+            },
+            crate::model::QueryTarget::Statement => Self {
+                catalog: "statement",
+                table: "statement",
+                pk: "triple",
+            },
+        }
+    }
+}
+
+/// Fields stored as arrays in Content: `$contains` on them routes to exact
+/// membership over json_index (transitional auto-routing, see plan §3.2).
+const ARRAY_FIELDS: &[&str] = &["tags", "scopes", "figures", "synonyms"];
+
+/// Correlated membership predicate: the document's json_index has (path, token).
+fn membership_fragment(ctx: &OpContext, path: &str, token: &str) -> (String, Vec<serde_json::Value>) {
+    (
+        format!(
+            "EXISTS (SELECT 1 FROM docs d JOIN json_index j ON j.doc_id = d.id \
+             WHERE d.catalog = '{}' AND d.key = {}.{} AND j.path = ? AND j.value = ?)",
+            ctx.catalog, ctx.table, ctx.pk
+        ),
+        vec![
+            serde_json::Value::String(path.to_string()),
+            serde_json::Value::String(token.to_string()),
+        ],
+    )
+}
+
+/// Depth-first first-scalar-leaf of a JSON value, for @> recall narrowing.
+fn first_leaf(v: &serde_json::Value, path: &str) -> Option<(String, String)> {
+    match v {
+        serde_json::Value::Object(m) => m
+            .iter()
+            .find_map(|(k, rv)| {
+                let child = if path.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{path}.{k}")
+                };
+                first_leaf(rv, &child)
+            }),
+        serde_json::Value::Array(e) => e.iter().find_map(|rv| first_leaf(rv, path)),
+        other => crate::storage::json_index::scalar_token(other).map(|t| (path.to_string(), t)),
+    }
+}
+
 /// Evaluate an operator AST node against its operands.
 /// Returns the SQL contribution of this operator.
 pub fn evaluate_operator(
     operator: &str,
     operands: &[AstNode],
     _metadata: &serde_json::Map<String, serde_json::Value>,
+    ctx: &OpContext,
     eval_fn: &dyn Fn(&AstNode) -> Result<OperatorResult>,
 ) -> Result<OperatorResult> {
     match operator {
@@ -144,9 +208,74 @@ pub fn evaluate_operator(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
+            // Transitional auto-routing (plan §3.2): array fields are exact
+            // membership over json_index, not substring.
+            if ARRAY_FIELDS.contains(&field.as_str()) {
+                let (fragment, params) = membership_fragment(ctx, &field, &search_str);
+                return Ok(OperatorResult::SqlCondition { fragment, params });
+            }
             Ok(OperatorResult::SqlCondition {
                 fragment: format!("json_extract(content, '$.{field}') LIKE ?"),
                 params: vec![serde_json::Value::String(format!("%{search_str}%"))],
+            })
+        }
+        "$has" => {
+            // Exact membership (PG `?` / `?|`): ["$has", field, value].
+            // Array value = any-of.
+            if operands.len() != 2 {
+                return Err(HypatiaError::Eval(
+                    "$has expects exactly two arguments (field, value)".to_string(),
+                ));
+            }
+            let field = expect_symbol(&operands[0])?;
+            let value = expect_literal(&operands[1])?;
+            let values: Vec<serde_json::Value> = match &value {
+                serde_json::Value::Array(e) => e.clone(),
+                other => vec![other.clone()],
+            };
+            let mut fragments = Vec::new();
+            let mut params = Vec::new();
+            for v in &values {
+                let token = crate::storage::json_index::scalar_token(v).ok_or_else(|| {
+                    HypatiaError::Eval("$has value must be a scalar or array of scalars".to_string())
+                })?;
+                let (f, mut p) = membership_fragment(ctx, &field, &token);
+                params.append(&mut p);
+                fragments.push(f);
+            }
+            Ok(OperatorResult::SqlCondition {
+                fragment: format!("({})", fragments.join(" OR ")),
+                params,
+            })
+        }
+        "$json-contains" => {
+            // Structural containment (PG `@>`): json_index recall + UDF recheck.
+            if operands.len() != 1 {
+                return Err(HypatiaError::Eval(
+                    "$json-contains expects exactly one argument (a JSON value)".to_string(),
+                ));
+            }
+            let rhs = expect_literal(&operands[0])?;
+            let rhs_text = rhs.to_string();
+            // NOTE: the indexed recall MUST precede the recheck UDF in the
+            // conjunction — SQLite's planner mis-evaluates the correlated
+            // EXISTS when the user-function conjunct comes first.
+            let mut params = Vec::new();
+            let mut recall = "1=1".to_string();
+            if let Some((path, token)) = first_leaf(&rhs, "") {
+                recall = format!(
+                    "EXISTS (SELECT 1 FROM docs d JOIN json_index j ON j.doc_id = d.id \
+                     WHERE d.catalog = ? AND d.key = {}.{} AND j.path = ? AND j.value = ?)",
+                    ctx.table, ctx.pk
+                );
+                params.push(serde_json::Value::String(ctx.catalog.to_string()));
+                params.push(serde_json::Value::String(path));
+                params.push(serde_json::Value::String(token));
+            }
+            params.push(serde_json::Value::String(rhs_text));
+            Ok(OperatorResult::SqlCondition {
+                fragment: format!("{recall} AND json_contains(content, ?)"),
+                params,
             })
         }
         "$like" => {
@@ -194,8 +323,11 @@ pub fn evaluate_operator(
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                fragments.push(format!("json_extract(content, '$.{key}') = ?"));
-                params.push(serde_json::Value::String(str_val));
+                let token = crate::storage::json_index::scalar_token(val)
+                    .unwrap_or(str_val);
+                let (f, mut p) = membership_fragment(ctx, key, &token);
+                fragments.push(f);
+                params.append(&mut p);
             }
             Ok(OperatorResult::SqlCondition {
                 fragment: fragments.join(" AND "),
@@ -369,7 +501,23 @@ fn comparison_op(
         // Two-argument form: ["$eq", "field", "value"]
         let field = expect_symbol(&operands[0])?;
         let value = expect_literal(&operands[1])?;
-        let sql_field = resolve_field(&field);
+        let (sql_field, is_json) = resolve_field_checked(&field);
+        // Ordering on JSON scalars compares numerically (plan decision #3):
+        // json_extract returns JSON numbers already, but CAST makes intent
+        // explicit; a numeric bound param keeps the comparison typed.
+        let sql_field = if is_json && matches!(op, ">" | "<" | ">=" | "<=") {
+            format!("CAST({sql_field} AS REAL)")
+        } else {
+            sql_field
+        };
+        let value = if is_json && matches!(op, ">" | "<" | ">=" | "<=") && value.is_number() {
+            serde_json::Value::Number(
+                serde_json::Number::from_f64(value.as_f64().unwrap_or(0.0))
+                    .unwrap_or(serde_json::Number::from(0)),
+            )
+        } else {
+            value
+        };
         Ok(OperatorResult::SqlCondition {
             fragment: format!("{sql_field} {op} ?"),
             params: vec![value],
@@ -405,15 +553,20 @@ fn expect_literal(node: &AstNode) -> Result<serde_json::Value> {
 }
 
 /// Resolve a field name to its SQL column reference.
-fn resolve_field(field: &str) -> String {
+/// Returns (fragment, is_json_field).
+fn resolve_field_checked(field: &str) -> (String, bool) {
     let field = field.trim_start_matches('$');
     match field {
         "head" | "relation" | "tail" | "triple" | "name" | "created_at" | "tr_start" | "tr_end" => {
-            field.to_string()
+            (field.to_string(), false)
         }
         // Assume it's a JSON content field
-        _ => format!("json_extract(content, '$.{field}')"),
+        _ => (format!("json_extract(content, '$.{field}')"), true),
     }
+}
+
+fn resolve_field(field: &str) -> String {
+    resolve_field_checked(field).0
 }
 
 /// Resolve a field name for LIKE operations. All columns are TEXT in SQLite.
@@ -449,7 +602,12 @@ fn ast_to_value(node: &AstNode) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::QueryTarget;
     use serde_json::json;
+
+    fn kctx() -> OpContext {
+        OpContext::for_target(QueryTarget::Knowledge)
+    }
 
     #[test]
     fn eq_operator() {
@@ -457,6 +615,7 @@ mod tests {
             "$eq",
             &[AstNode::Symbol("$name".to_string()), AstNode::Literal(json!("Alice"))],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
@@ -485,10 +644,11 @@ mod tests {
                 },
             ],
             &serde_json::Map::new(),
+            &kctx(),
             &|node: &AstNode| {
                 match node {
                     AstNode::Operator { operator, operands, .. } => {
-                        evaluate_operator(operator, operands, &serde_json::Map::new(), &|_| {
+                        evaluate_operator(operator, operands, &serde_json::Map::new(), &kctx(), &|_| {
                             Err(HypatiaError::Eval("no deeper nesting".to_string()))
                         })
                     }
@@ -511,6 +671,7 @@ mod tests {
             "$search",
             &[AstNode::Literal(json!("hello world"))],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
@@ -527,6 +688,7 @@ mod tests {
             "$contains",
             &[AstNode::Symbol("$tags".to_string()), AstNode::Literal(json!("rust"))],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
@@ -549,10 +711,11 @@ mod tests {
                 metadata: serde_json::Map::new(),
             }],
             &serde_json::Map::new(),
+            &kctx(),
             &|node: &AstNode| {
                 match node {
                     AstNode::Operator { operator, operands, .. } => {
-                        evaluate_operator(operator, operands, &serde_json::Map::new(), &|_| {
+                        evaluate_operator(operator, operands, &serde_json::Map::new(), &kctx(), &|_| {
                             Err(HypatiaError::Eval("no deeper".to_string()))
                         })
                     }
@@ -574,6 +737,7 @@ mod tests {
             "$like",
             &[AstNode::Symbol("$name".to_string()), AstNode::Literal(json!("rust%"))],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
@@ -591,6 +755,7 @@ mod tests {
             "$like",
             &[AstNode::Symbol("$data".to_string()), AstNode::Literal(json!("%language%"))],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
@@ -611,13 +776,16 @@ mod tests {
             "$content",
             &[AstNode::Object(map)],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
-                assert!(fragment.contains("json_extract(content, '$.format') = ?"));
-                assert_eq!(params.len(), 1);
-                assert_eq!(params[0], json!("json"));
+                assert!(fragment.contains("EXISTS (SELECT 1 FROM docs d JOIN json_index j"));
+                assert!(fragment.contains("knowledge.name"));
+                assert_eq!(params.len(), 2); // path + value
+                assert_eq!(params[0], json!("format"));
+                assert_eq!(params[1], json!("json"));
             }
             _ => panic!("expected SqlCondition"),
         }
@@ -632,12 +800,13 @@ mod tests {
             "$content",
             &[AstNode::Object(map)],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert!(fragment.contains(" AND "));
-                assert_eq!(params.len(), 2);
+                assert_eq!(params.len(), 4); // 2 keys × (path + value)
             }
             _ => panic!("expected SqlCondition"),
         }
@@ -649,6 +818,7 @@ mod tests {
             "$content",
             &[AstNode::Object(serde_json::Map::new())],
             &serde_json::Map::new(),
+            &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {

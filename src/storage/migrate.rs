@@ -160,6 +160,9 @@ fn run_migration(config: &ShelfConfig, target: &Path) -> Result<()> {
         .map_err(crate::error::StorageError::from)?;
 
     tx.commit().map_err(crate::error::StorageError::from)?;
+
+    // Populate the path-tree index for all migrated documents.
+    store.rebuild_json_index()?;
     Ok(())
 }
 
