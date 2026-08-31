@@ -106,7 +106,7 @@ hypatia knowledge-delete <name>
 
 ## Statement Creation — Proactive Graph Building
 
-Statements are RDF-style triples: `(subject, predicate, object)`. They form the edges of the knowledge graph.
+Statements are RDF-style triples: `(head, relation, tail)`. They form the edges of the knowledge graph.
 
 ### Key Principle: Always Enrich with Relationships
 
@@ -115,12 +115,12 @@ When the user asks to store or remember information, **always create statements 
 **Pattern**: After creating a knowledge entry, identify entities mentioned in the content and create `$triple` relationships between them. At minimum, create one `is_a` statement for every new knowledge entry.
 
 ```
-hypatia statement-create <subject> <predicate> <object> -d "<data>"
+hypatia statement-create <head> <relation> <tail> -d "<data>"
 ```
 
 ### Triple Extraction Patterns
 
-| User says | subject | predicate | object |
+| User says | head | relation | tail |
 |---|---|---|---|
 | "record that Alice knows Bob" | Alice | knows | Bob |
 | "X is a Y" / "X is an Y" | X | is_a | Y |
@@ -132,7 +132,7 @@ hypatia statement-create <subject> <predicate> <object> -d "<data>"
 | "X contains Y" | X | contains | Y |
 | "X created Y" | X | created_by | Y (reversed) |
 
-Normalize predicates to `snake_case`. Common predicates: `is_a`, `knows`, `related_to`, `works_for`, `belongs_to`, `depends_on`, `uses`, `contains`, `created_by`.
+Normalize relations to `snake_case`. Common relations: `is_a`, `knows`, `related_to`, `works_for`, `belongs_to`, `depends_on`, `uses`, `contains`, `created_by`.
 
 ### Proactive Creation Examples
 
@@ -164,7 +164,7 @@ hypatia statement-create "Alice" "works_for" "Backend team"
 When creating knowledge entries, automatically extract and create statements for:
 1. **Category**: `"X" is_a "<category>"` — every entity has a type
 2. **Dependencies**: if the content mentions tools, frameworks, or systems X depends on → `X depends_on Y`
-3. **Relationships**: if the content mentions other entities → link them with appropriate predicates
+3. **Relationships**: if the content mentions other entities → link them with appropriate relations
 4. **Containment**: if X is part of Y → `X belongs_to Y`
 
 ## Thinking Aloud Protocol
@@ -202,20 +202,20 @@ User asks: *"查找与 Alice 相关的所有知识，以及她的关系网络"*
 
 > `hypatia query '["$statement", ["$triple", "Alice", "$*", "$*"]]'`
 
-为什么用这个查询：用 $triple 对 subject 位精确匹配 "Alice"，wildcard predicate 和 object，
+为什么用这个查询：用 $triple 对 head 位精确匹配 "Alice"，wildcard relation 和 tail，
 这样可以拿到 Alice 作为主语的所有关系（knows, is_a, works_for 等），$triple 走索引，比 $search 更快更精确。
-预期结果：返回所有 Alice 作为 subject 的 statement triples。
+预期结果：返回所有 Alice 作为 head 的 statement triples。
 ```
 
 (执行... 得到结果)
 
 ```
-**Step 3: 查找指向 Alice 的关系（Alice 作为 object）**
+**Step 3: 查找指向 Alice 的关系（Alice 作为 tail）**
 
 > `hypatia query '["$statement", ["$triple", "$*", "$*", "Alice"]]'`
 
-为什么用这个查询：上一步只查了 Alice 作为 subject 的关系，但其他人可能指向 Alice（如 "Bob knows Alice"），
-需要查 object 位 = Alice 的三元组才能得到完整的关系网络。
+为什么用这个查询：上一步只查了 Alice 作为 head 的关系，但其他人可能指向 Alice（如 "Bob knows Alice"），
+需要查 tail 位 = Alice 的三元组才能得到完整的关系网络。
 预期结果：返回所有以 Alice 为宾语的 statement triples。
 ```
 
@@ -380,7 +380,7 @@ No conditions means "return all":
 | `$or` | Logical OR | `["$or", cond1, cond2, ...]` |
 | `$not` | Logical NOT | `["$not", condition]` |
 | `$triple` | Triple position match | `["$triple", "Alice", "$*", "Bob"]` |
-| `$k-hop` | K-hop graph traversal (statement only) | `["$k-hop", "subject", "predicate", depth]` |
+| `$k-hop` | K-hop graph traversal (statement only) | `["$k-hop", "head", "relation", depth]` |
 
 ### Critical Syntax Rules
 
@@ -394,14 +394,14 @@ No conditions means "return all":
 
 4. **Available fields for knowledge**: `name`, `created_at`, plus any content JSON field via `$contains`.
 
-5. **Available fields for statement**: `triple` (CSV-formatted subject,predicate,object), `subject`, `predicate`, `object`, `created_at`, `tr_start`, `tr_end`, plus content JSON fields via `$contains`. For position-based triple matching, prefer `$triple` over `$contains`.
+5. **Available fields for statement**: `triple` (CSV-formatted head,relation,tail), `head`, `relation`, `tail`, `created_at`, `tr_start`, `tr_end`, plus content JSON fields via `$contains`. For position-based triple matching, prefer `$triple` over `$contains`.
 
 ### `$triple` Operator
 
-The `$triple` operator provides position-based matching on statement triples. Each argument corresponds to subject, predicate, or object. Use `"$*"` as a wildcard to match any value.
+The `$triple` operator provides position-based matching on statement triples. Each argument corresponds to head, relation, or tail. Use `"$*"` as a wildcard to match any value.
 
 ```
-["$triple", <subject_pattern>, <predicate_pattern>, <object_pattern>]
+["$triple", <head_pattern>, <relation_pattern>, <tail_pattern>]
 ```
 
 | Pattern | Meaning |
@@ -411,15 +411,15 @@ The `$triple` operator provides position-based matching on statement triples. Ea
 
 **Behavior**:
 - All 3 specified (no wildcards): uses `triple = ?` (primary key lookup, fastest)
-- Partial match: generates conditions on individual columns (`subject = ? AND object = ?`, etc.)
+- Partial match: generates conditions on individual columns (`head = ? AND tail = ?`, etc.)
 - At least one non-wildcard required — all wildcards is an error
 - Arguments must be exactly 3
 
 | User says | JSE | Command |
 |---|---|---|
-| "find all relationships where Alice is the subject" | `["$statement", ["$triple", "Alice", "$*", "$*"]]` | `hypatia query '["$statement", ["$triple", "Alice", "$*", "$*"]]'` |
+| "find all relationships where Alice is the head" | `["$statement", ["$triple", "Alice", "$*", "$*"]]` | `hypatia query '["$statement", ["$triple", "Alice", "$*", "$*"]]'` |
 | "find all knows relationships" | `["$statement", ["$triple", "$*", "knows", "$*"]]` | `hypatia query '["$statement", ["$triple", "$*", "knows", "$*"]]'` |
-| "find everything related to Bob as object" | `["$statement", ["$triple", "$*", "$*", "Bob"]]` | `hypatia query '["$statement", ["$triple", "$*", "$*", "Bob"]]'` |
+| "find everything related to Bob as tail" | `["$statement", ["$triple", "$*", "$*", "Bob"]]` | `hypatia query '["$statement", ["$triple", "$*", "$*", "Bob"]]'` |
 | "find the exact Alice knows Bob triple" | `["$statement", ["$triple", "Alice", "knows", "Bob"]]` | `hypatia query '["$statement", ["$triple", "Alice", "knows", "Bob"]]'` |
 | "Alice's relationships with Bob, combined with date filter" | `["$statement", ["$and", ["$triple", "Alice", "$*", "Bob"], ["$gt", "created_at", "2025-01-01"]]]` | `hypatia query '["$statement", ["$and", ["$triple", "Alice", "$*", "Bob"], ["$gt", "created_at", "2025-01-01"]]]'` |
 
@@ -435,7 +435,7 @@ SQL LIKE pattern matching with user-defined wildcards (`%` = any chars, `_` = si
 |---|---|---|
 | "find entries whose name starts with Rust" | `["$knowledge", ["$like", "name", "Rust%"]]` | `hypatia query '["$knowledge", ["$like", "name", "Rust%"]]'` |
 | "find entries created in January 2025" | `["$knowledge", ["$like", "created_at", "2025-01-%"]]` | `hypatia query '["$knowledge", ["$like", "created_at", "2025-01-%"]]'` |
-| "find statements with subject matching pattern" | `["$statement", ["$like", "subject", "Alice%"]]` | `hypatia query '["$statement", ["$like", "subject", "Alice%"]]'` |
+| "find statements with head matching pattern" | `["$statement", ["$like", "head", "Alice%"]]` | `hypatia query '["$statement", ["$like", "head", "Alice%"]]'` |
 
 ### `$content` Operator
 
@@ -456,11 +456,11 @@ Match key-value pairs inside the `content` JSON column. Checks exact string equa
 K-hop graph traversal on statement triples using recursive CTE. Explores entity neighborhoods and relationship paths.
 
 ```
-["$k-hop", "subject", "predicate", depth]
+["$k-hop", "head", "relation", depth]
 ```
 
-- `"subject"` — starting entity (required)
-- `"predicate"` — filter by predicate, or use `"$*"` for any
+- `"head"` — starting entity (required)
+- `"relation"` — filter by relation, or use `"$*"` for any
 - `depth` — number of hops (positive integer)
 
 | User says | JSE | Command |
@@ -526,7 +526,7 @@ hypatia query '["$knowledge", ["$eq", "name", "Alice'\''s project"]]'
 ## Output Format
 
 - **Knowledge entries**: `{"name": "...", "content": {"format": "...", "data": "...", "tags": [...]}, "created_at": "..."}`
-- **Statements**: `{"triple": "subject,predicate,object", "subject": "...", "predicate": "...", "object": "...", "content": {...}, "created_at": "...", "tr_start": "...", "tr_end": "..."}`
+- **Statements**: `{"triple": "head,relation,tail", "head": "...", "relation": "...", "tail": "...", "content": {...}, "created_at": "...", "tr_start": "...", "tr_end": "..."}`
 - **Search results**: `{"id": N, "catalog": "...", "key": "...", "content": "...", "rank": N.N}`
 - **Empty results**: prints "No results found."
 

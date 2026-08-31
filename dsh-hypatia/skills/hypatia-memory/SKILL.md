@@ -143,7 +143,7 @@ After writing each new message, run the cascade from level 1 upward.
 
 **Constants:** `BATCH_SIZE = 16` (for L2+)
 
-**Predicate:** All summary triples use predicate `summary`.
+**Relation:** All summary triples use relation `summary`.
 
 | Triple | Meaning |
 |---|---|
