@@ -381,6 +381,8 @@ No conditions means "return all":
 | `$not` | Logical NOT | `["$not", condition]` |
 | `$triple` | Triple position match | `["$triple", "Alice", "$*", "Bob"]` |
 | `$k-hop` | K-hop graph traversal (statement only) | `["$k-hop", "head", "relation", depth]` |
+| `$has` | Exact membership in a JSON field (arrays: element; scalars: equality; array value = any-of) — indexed | `["$has", "tags", "rust"]` |
+| `$json-contains` | Structural containment (PG `@>`) — indexed recall + exact recheck | `["$json-contains", {"tags": ["rust"]}]` |
 
 ### Critical Syntax Rules
 
@@ -394,7 +396,9 @@ No conditions means "return all":
 
 4. **Available fields for knowledge**: `name`, `created_at`, plus any content JSON field via `$contains`.
 
-5. **Available fields for statement**: `triple` (CSV-formatted head,relation,tail), `head`, `relation`, `tail`, `created_at`, `tr_start`, `tr_end`, plus content JSON fields via `$contains`. For position-based triple matching, prefer `$triple` over `$contains`.
+5. **Available fields for statement**: `triple` (CSV-formatted head,relation,tail), `head`, `relation`, `tail`, `created_at`, `tr_start`, `tr_end`, plus content JSON fields via `$has`/`$contains`. For position-based triple matching, prefer `$triple` over `$contains`.
+
+6. **New in 0.3**: `$has` is the exact-membership operator (indexed; use it for tags/scopes lookups). `$contains` on array fields (`tags`/`scopes`/`figures`) routes to exact membership too; on other fields it stays substring. `$json-contains` matches whole-document containment (PG `@>`), e.g. `["$json-contains", {"tags": ["rust"]}]`.
 
 ### `$triple` Operator
 
