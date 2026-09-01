@@ -1,0 +1,208 @@
+{
+  "compiled_at": "2026-04-22T06:53:48.952Z",
+  "claims_hash": "0295ad4",
+  "compiler_version": "0.2.0",
+  "status": "ready",
+  "errors": [],
+  "warnings": [
+    {
+      "code": "W_CONSTRAINT_ONLY",
+      "message": "Topic \"done-criteria\" is constraint-dominated (1/1 claims are constraints/feedback) — stated-level evidence is expected",
+      "claims": [
+        "d003"
+      ]
+    },
+    {
+      "code": "W_TYPE_MONOCULTURE",
+      "message": "Topic \"done-criteria\" has only 1 claim type(s): constraint. Missing: factual, estimate, risk, recommendation, feedback",
+      "claims": [
+        "d003"
+      ]
+    },
+    {
+      "code": "W_CONSTRAINT_ONLY",
+      "message": "Topic \"sprint-scope\" is constraint-dominated (2/2 claims are constraints/feedback) — stated-level evidence is expected",
+      "claims": [
+        "d001",
+        "d002"
+      ]
+    },
+    {
+      "code": "W_TYPE_MONOCULTURE",
+      "message": "Topic \"sprint-scope\" has only 1 claim type(s): constraint. Missing: factual, estimate, risk, recommendation, feedback",
+      "claims": [
+        "d001",
+        "d002"
+      ]
+    }
+  ],
+  "resolved_claims": [
+    {
+      "id": "d001",
+      "type": "constraint",
+      "topic": "sprint-scope",
+      "content": "Rust codebase",
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "define",
+      "source": {
+        "origin": "stakeholder",
+        "artifact": null,
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": []
+    },
+    {
+      "id": "d002",
+      "type": "constraint",
+      "topic": "sprint-scope",
+      "content": "CLI tool for knowledge management",
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "define",
+      "source": {
+        "origin": "stakeholder",
+        "artifact": null,
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": []
+    },
+    {
+      "id": "d003",
+      "type": "constraint",
+      "topic": "done-criteria",
+      "content": "Done looks like: A comprehensive architecture overview with component descriptions, data flow diagrams, and design rationale",
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "define",
+      "source": {
+        "origin": "stakeholder",
+        "artifact": null,
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "done-criteria"
+      ]
+    }
+  ],
+  "conflict_graph": {
+    "resolved": [],
+    "unresolved": []
+  },
+  "coverage": {
+    "done-criteria": {
+      "claims": 1,
+      "max_evidence": "stated",
+      "status": "weak",
+      "types": [
+        "constraint"
+      ],
+      "claim_ids": [
+        "d003"
+      ],
+      "constraint_count": 1,
+      "source_origins": [
+        "stakeholder"
+      ],
+      "source_count": 1,
+      "type_diversity": 1,
+      "missing_types": [
+        "factual",
+        "estimate",
+        "risk",
+        "recommendation",
+        "feedback"
+      ]
+    },
+    "sprint-scope": {
+      "claims": 2,
+      "max_evidence": "stated",
+      "status": "weak",
+      "types": [
+        "constraint"
+      ],
+      "claim_ids": [
+        "d001",
+        "d002"
+      ],
+      "constraint_count": 2,
+      "source_origins": [
+        "stakeholder"
+      ],
+      "source_count": 1,
+      "type_diversity": 1,
+      "missing_types": [
+        "factual",
+        "estimate",
+        "risk",
+        "recommendation",
+        "feedback"
+      ]
+    }
+  },
+  "corroboration": {
+    "d001": 0,
+    "d002": 0,
+    "d003": 0
+  },
+  "phase_summary": {
+    "define": {
+      "claims": 3,
+      "complete": true
+    },
+    "research": {
+      "claims": 0,
+      "complete": false
+    },
+    "prototype": {
+      "claims": 0,
+      "complete": false
+    },
+    "evaluate": {
+      "claims": 0,
+      "complete": false
+    },
+    "feedback": {
+      "claims": 0,
+      "complete": false
+    }
+  },
+  "sprints": [
+    {
+      "name": "what-is-the-architecture",
+      "path": ".",
+      "status": "active",
+      "phase": "define",
+      "question": "What is the architecture and design of Hypatia? Analyze its module structure, data flow, CLI design, storage patterns, and key design decisions.",
+      "claims_count": 3,
+      "active_claims": 3,
+      "last_git_activity": null,
+      "git_commit_count": 0
+    }
+  ],
+  "sprint_meta": {
+    "question": "What is the architecture and design of Hypatia? Analyze its module structure, data flow, CLI design, storage patterns, and key design decisions.",
+    "audience": [
+      "engineers"
+    ],
+    "initiated": "2026-04-21",
+    "phase": "define",
+    "total_claims": 3,
+    "active_claims": 3,
+    "conflicted_claims": 0,
+    "superseded_claims": 0,
+    "refuted_claims": 0,
+    "connectors": []
+  },
+  "compilation_certificate": {
+    "input_hash": "sha256:0295ad4d528f43f554a365f22272fe6d63af73d7c662cec7b0fded74275d9b32",
+    "compiler_version": "0.2.0",
+    "deterministic": true
+  }
+}

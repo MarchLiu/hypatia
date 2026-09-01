@@ -1,0 +1,37 @@
+{
+  "generated": "2026-04-22T06:53:48.954Z",
+  "generator": "generate-manifest.js",
+  "claims_hash": "0295ad4",
+  "topics": {
+    "sprint-scope": {
+      "claims": [
+        "d001",
+        "d002"
+      ],
+      "files": [],
+      "sprint": "current",
+      "evidence_level": "stated"
+    },
+    "done-criteria": {
+      "claims": [
+        "d003"
+      ],
+      "files": [],
+      "sprint": "current",
+      "evidence_level": "stated"
+    }
+  },
+  "sprints": {
+    "what-is-the-architecture": {
+      "question": "What is the architecture and design of Hypatia? Analyze its module structure, data flow, CLI design, storage patterns, and key design decisions.",
+      "phase": "define",
+      "claims_count": 3,
+      "active_claims": 3,
+      "path": ".",
+      "status": "active",
+      "last_git_activity": null,
+      "git_commit_count": 0
+    }
+  },
+  "files": {}
+}

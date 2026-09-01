@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/bin/bash /Users/mars/.codex/hooks/hypatia_session_start.sh" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/bin/bash /Users/mars/.codex/hooks/hypatia_user_prompt_submit.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/bin/bash /Users/mars/.codex/hooks/hypatia_stop.sh" }
+        ]
+      }
+    ]
+  }
+}
