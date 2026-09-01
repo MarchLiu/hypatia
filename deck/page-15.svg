@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">04 · 滑动窗口</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">15 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">什么是知识点</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="156" width="402" height="230" rx="10" fill="#EEF2F9"/>
+    <circle cx="102" cy="196" r="14" fill="#C7CFDC"/>
+    <text x="102" y="202" font-size="16" fill="#FFFFFF" text-anchor="middle">✕</text>
+    <text x="88" y="248" font-size="18" fill="#3D4C66">"用户说要用 sqlite<tspan x="88" dy="26">换掉 duckdb"</tspan></text>
+    <line x1="88" y1="298" x2="442" y2="298" stroke="#D9E1EF"/>
+    <text x="88" y="330" font-size="15" fill="#7A8AA3">只有在那段对话的语境里才有意义<tspan x="88" dy="22">——那是聊天记录</tspan></text>
+
+    <rect x="494" y="156" width="402" height="230" rx="10" fill="#FFFFFF" stroke="#12B5A5" stroke-width="1.5"/>
+    <circle cx="532" cy="196" r="14" fill="#12B5A5"/>
+    <text x="532" y="202" font-size="16" fill="#FFFFFF" text-anchor="middle">✓</text>
+    <text x="518" y="248" font-size="18" fill="#1B2A41">"存储层评估过 sqlite 单库方案，<tspan x="518" dy="26">因 json contains 查询不可</tspan><tspan x="518" dy="26">行而搁置"</tspan></text>
+    <line x1="518" y1="322" x2="872" y2="322" stroke="#D9E1EF"/>
+    <text x="518" y="354" font-size="15" fill="#7A8AA3">任何时候可检索到并直接使用</text>
+  </g>
+  <rect x="64" y="420" width="832" height="56" rx="10" fill="#EEF2F9"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="480" y="454" font-size="17" fill="#1B2A41" text-anchor="middle">梳理时还要裁决：这条知识是新的，还是对既有知识的修正或否定？</text>
+  </g>
+</svg>

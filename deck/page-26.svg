@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#16294D"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif" text-anchor="middle">
+    <text x="480" y="200" font-size="20" fill="#9FB4D8">对话是给人看的，知识是给机器用的</text>
+    <line x1="400" y1="228" x2="560" y2="228" stroke="#2F3D5C" stroke-width="1"/>
+    <text x="480" y="300" font-size="48" font-weight="700" fill="#FFFFFF">谢谢</text>
+    <text x="480" y="352" font-size="18" fill="#9FB4D8">非线性的记忆 · hypatia</text>
+    <text x="480" y="420" font-size="15" fill="#7A8AA3">github.com/MarchLiu/hypatia</text>
+  </g>
+</svg>

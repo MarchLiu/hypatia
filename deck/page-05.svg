@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#16294D"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif" text-anchor="middle">
+    <text x="480" y="150" font-size="18" fill="#9FB4D8">hypatia 的答案</text>
+    <line x1="400" y1="172" x2="560" y2="172" stroke="#2F3D5C" stroke-width="1"/>
+    <text x="480" y="250" font-size="40" font-weight="700" fill="#FFFFFF">不要试图保存对话本身</text>
+    <text x="480" y="316" font-size="40" font-weight="700" fill="#FFFFFF">要保存对话中被整理出来的知识</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif" text-anchor="middle">
+    <rect x="270" y="390" width="120" height="44" rx="22" fill="none" stroke="#2F6BFF" stroke-width="1.5"/>
+    <text x="330" y="418" font-size="18" fill="#9FB4D8">体积</text>
+    <rect x="420" y="390" width="120" height="44" rx="22" fill="none" stroke="#12B5A5" stroke-width="1.5"/>
+    <text x="480" y="418" font-size="18" fill="#9FB4D8">检索</text>
+    <rect x="570" y="390" width="120" height="44" rx="22" fill="none" stroke="#F2A93B" stroke-width="1.5"/>
+    <text x="630" y="418" font-size="18" fill="#9FB4D8">关联</text>
+  </g>
+</svg>

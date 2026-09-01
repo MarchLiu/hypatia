@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">05 · 三元组与图结构</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">19 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">正文负责"读到时理解"，三元组负责"需要时找到"</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="160" width="402" height="150" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="160" width="402" height="4" fill="#2F6BFF"/>
+    <text x="88" y="200" font-size="20" font-weight="600" fill="#1B2A41">知识点正文</text>
+    <text x="88" y="238" font-size="17" fill="#3D4C66">自含陈述，<tspan x="88" dy="26">脱离对话上下文仍然成立</tspan></text>
+    <rect x="494" y="160" width="402" height="150" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="494" y="160" width="402" height="4" fill="#12B5A5"/>
+    <text x="518" y="200" font-size="20" font-weight="600" fill="#12B5A5">三元组 (主语, 谓语, 宾语)</text>
+    <text x="518" y="238" font-size="17" fill="#3D4C66">写入 RDF 风格的图，<tspan x="518" dy="26">显式化对话里隐含在语气与语序中的关系</tspan></text>
+    <rect x="64" y="350" width="832" height="110" rx="10" fill="#EEF2F9"/>
+    <text x="88" y="388" font-size="17" fill="#1B2A41">从 "sqlite" 出发沿关系走两步，你会撞见三年前某次关于 PG jsonb 的讨论——</text>
+    <text x="88" y="420" font-size="17" fill="#1B2A41">这种相遇在任何全文检索里都不会发生。</text>
+  </g>
+</svg>

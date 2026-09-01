@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#16294D"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="64" y="76" font-size="15" fill="#7A8AA3">02 · SESSION 切分 · 准则</text>
+    <text x="480" y="170" font-size="34" font-weight="700" fill="#FFFFFF" text-anchor="middle">一个 session 应该恰好容纳</text>
+    <text x="480" y="220" font-size="34" font-weight="700" fill="#FFFFFF" text-anchor="middle">一个可以独立陈述的主题</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="160" y="272" width="300" height="64" rx="10" fill="#1D3357" stroke="#2F6BFF"/>
+    <text x="310" y="310" font-size="18" fill="#C9D6EC" text-anchor="middle">小到摘要时不必丢弃异质信息</text>
+    <rect x="500" y="272" width="300" height="64" rx="10" fill="#1D3357" stroke="#12B5A5"/>
+    <text x="650" y="310" font-size="18" fill="#C9D6EC" text-anchor="middle">大到滑动窗口有空间等待话题收敛</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="480" y="410" font-size="16" fill="#9FB4D8" text-anchor="middle">切分不追求一次定终身——低层原文总在，切错的边界在更高层归档时还有机会被重新缝合。</text>
+    <text x="480" y="444" font-size="16" fill="#9FB4D8" text-anchor="middle">识别错误是可修复的，不识别才是不可修复的。</text>
+  </g>
+</svg>

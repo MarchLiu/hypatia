@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">01 · 线性的困境</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">04 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">对话天然是线性的</text>
+  </g>
+
+  <line x1="100" y1="250" x2="880" y2="250" stroke="#D9E1EF" stroke-width="2"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif" text-anchor="middle">
+    <circle cx="140" cy="250" r="10" fill="#2F6BFF"/>
+    <text x="140" y="222" font-size="16" fill="#3D4C66">轮次 1</text>
+    <circle cx="320" cy="250" r="10" fill="#2F6BFF"/>
+    <text x="320" y="222" font-size="16" fill="#3D4C66">轮次 2</text>
+    <circle cx="500" cy="250" r="10" fill="#2F6BFF"/>
+    <text x="500" y="222" font-size="16" fill="#3D4C66">…</text>
+    <circle cx="680" cy="250" r="10" fill="#2F6BFF"/>
+    <text x="680" y="222" font-size="16" fill="#3D4C66">轮次 n</text>
+    <circle cx="860" cy="250" r="12" fill="#FAFBFD" stroke="#F2A93B" stroke-width="3"/>
+    <text x="860" y="222" font-size="16" fill="#F2A93B" font-weight="600">半年后</text>
+  </g>
+
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="316" width="402" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="316" width="402" height="4" fill="#12B5A5"/>
+    <text x="88" y="352" font-size="18" font-weight="600" fill="#12B5A5">Context Length 解决的</text>
+    <text x="88" y="386" font-size="17" fill="#3D4C66">读懂当前这一句——上下文沿时间轴展开</text>
+
+    <rect x="494" y="316" width="402" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="494" y="316" width="402" height="4" fill="#F2A93B"/>
+    <text x="518" y="352" font-size="18" font-weight="600" fill="#C98A20">Context Length 没碰的</text>
+    <text x="518" y="386" font-size="17" fill="#3D4C66">半年后还记得你说过什么——检索、理解、关联</text>
+
+    <rect x="64" y="452" width="832" height="52" rx="10" fill="#EEF2F9"/>
+    <text x="480" y="484" font-size="17" fill="#1B2A41" text-anchor="middle">无限记忆的本质问题从来不是"能装下多少"，而是"装下的东西还能不能被找到、被理解、被关联"。</text>
+  </g>
+</svg>

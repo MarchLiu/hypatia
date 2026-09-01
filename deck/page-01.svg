@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#16294D"/>
+  <g fill="none" opacity="0.85">
+    <circle cx="770" cy="265" r="165" stroke="#2F6BFF" stroke-width="1.5"/>
+    <circle cx="770" cy="265" r="118" stroke="#12B5A5" stroke-width="1.5"/>
+    <circle cx="770" cy="265" r="72" stroke="#F2A93B" stroke-width="1.5"/>
+  </g>
+  <circle cx="770" cy="265" r="4" fill="#F2A93B"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="56" width="26" height="4" fill="#2F6BFF"/>
+    <text x="64" y="90" font-size="16" fill="#7A8AA3">HYPATIA · 记忆机制</text>
+    <text x="64" y="232" font-size="64" font-weight="700" fill="#FFFFFF">非线性的记忆</text>
+    <text x="64" y="294" font-size="24" fill="#9FB4D8">从线性对话流，</text>
+    <text x="64" y="330" font-size="24" fill="#9FB4D8">到可检索、可理解、可关联的知识结构</text>
+    <line x1="64" y1="440" x2="380" y2="440" stroke="#2F3D5C" stroke-width="1"/>
+    <text x="64" y="472" font-size="16" fill="#7A8AA3">hypatia 的对话记忆整理机制 · 50 分钟</text>
+  </g>
+</svg>

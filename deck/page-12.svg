@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">03 · 对数空间的摘要</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">12 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">分层归档，本质上和 B 树的逻辑一样</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="100" y="170" width="280" height="64" rx="10" fill="#16294D"/>
+    <text x="240" y="208" font-size="18" fill="#FFFFFF" text-anchor="middle">L2 主题摘要（最稀疏）</text>
+    <line x1="240" y1="234" x2="240" y2="262" stroke="#7A8AA3" stroke-width="1.5"/>
+    <text x="252" y="254" font-size="14" fill="#7A8AA3">16 : 1</text>
+    <rect x="70" y="262" width="340" height="64" rx="10" fill="#2F6BFF"/>
+    <text x="240" y="300" font-size="18" fill="#FFFFFF" text-anchor="middle">L1 会话摘要</text>
+    <line x1="240" y1="326" x2="240" y2="354" stroke="#7A8AA3" stroke-width="1.5"/>
+    <text x="252" y="346" font-size="14" fill="#7A8AA3">16 : 1</text>
+    <rect x="40" y="354" width="400" height="64" rx="10" fill="#12B5A5"/>
+    <text x="240" y="392" font-size="18" fill="#FFFFFF" text-anchor="middle">L0 原始对话（冷存，不删除）</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="520" y="170" width="376" height="88" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="544" y="202" font-size="17" font-weight="600" fill="#2F6BFF">B 树的逻辑</text>
+    <text x="544" y="228" font-size="15.5" fill="#3D4C66">你不指望根节点存住所有数据，<tspan x="544" dy="22">你指望的是从根出发总能找到数据</tspan></text>
+    <rect x="520" y="274" width="376" height="88" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="544" y="306" font-size="17" font-weight="600" fill="#12B5A5">损失在边缘，而非坍塌</text>
+    <text x="544" y="332" font-size="15.5" fill="#3D4C66">一次性压缩的信息损失不可控；<tspan x="544" dy="22">分层让损失发生在每一层的边缘</tspan></text>
+    <rect x="520" y="378" width="376" height="88" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="544" y="410" font-size="17" font-weight="600" fill="#F2A93B">下钻回溯</text>
+    <text x="544" y="436" font-size="15.5" fill="#3D4C66">从高层摘要逐层向下精确回溯，<tspan x="544" dy="22">每下一层多一次检索</tspan></text>
+  </g>
+</svg>

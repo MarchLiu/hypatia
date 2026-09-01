@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">04 · 滑动窗口 · 提取原则</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">16 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">提取原则（上）</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="156" width="832" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="156" width="6" height="110" fill="#2F6BFF"/>
+    <text x="100" y="196" font-size="20" font-weight="700" fill="#2F6BFF">记录教训，而不是流水账</text>
+    <text x="100" y="234" font-size="17" fill="#3D4C66">梳理是合成，不是转录。"用 Arc&lt;Mutex&lt;T&gt;&gt;" 是合格的知识点，"要使用合适的同步机制" 不是。</text>
+
+    <rect x="64" y="282" width="832" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="282" width="6" height="110" fill="#12B5A5"/>
+    <text x="100" y="322" font-size="20" font-weight="700" fill="#12B5A5">对质量保守，对时机激进</text>
+    <text x="100" y="360" font-size="17" fill="#3D4C66">拿不准宁可跳过——低质知识点是未来的噪声；但每几轮就扫一次窗口，<tspan x="100" dy="24">提取点滑出窗口的回收代价远高于当场判断。</tspan></text>
+
+    <rect x="64" y="408" width="832" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="408" width="6" height="110" fill="#F2A93B"/>
+    <text x="100" y="448" font-size="20" font-weight="700" fill="#C98A20">纠错链是金子</text>
+    <text x="100" y="486" font-size="17" fill="#3D4C66">问题 → 错误答案 → 用户纠正 → 修正：记录了"为什么错"和"正确的路"，最难从文档重新获得。</text>
+  </g>
+</svg>

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">06 · 读取通道</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">23 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">两条不该等待自动机制的通道</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="156" width="402" height="240" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="156" width="402" height="4" fill="#2F6BFF"/>
+    <text x="88" y="198" font-size="21" font-weight="600" fill="#2F6BFF">显式写入</text>
+    <text x="88" y="234" font-size="17" fill="#1B2A41">"把这份集群运维文档写到 hypatia 里"</text>
+    <text x="88" y="270" font-size="15.5" fill="#3D4C66">内容现成、结构清晰，不需要滑动窗口<tspan x="88" dy="24">等待话题收敛，直接拆解为条目和三元组入库。</tspan><tspan x="88" dy="24">读书、读文档、导入规格说明都走这条路。</tspan></text>
+    <text x="88" y="372" font-size="14" fill="#7A8AA3">工作量大、周期长 → 更适合交给长时工作的 Agent</text>
+
+    <rect x="494" y="156" width="402" height="240" rx="10" fill="#FFFFFF" stroke="#12B5A5" stroke-width="1.5"/>
+    <rect x="494" y="156" width="402" height="4" fill="#12B5A5"/>
+    <text x="518" y="198" font-size="21" font-weight="600" fill="#12B5A5">显式读取</text>
+    <text x="518" y="234" font-size="17" fill="#1B2A41">"读一下 hypatia，找关于运维的记忆"</text>
+    <text x="518" y="270" font-size="15.5" fill="#3D4C66">价值不在信息本身，而在于它把检索从<tspan x="518" dy="24">"Agent 的判断"变成"用户的指令"。</tspan></text>
+    <text x="518" y="348" font-size="14" fill="#7A8AA3">opencode 试图直接 ssh 时，一句话提醒即完成手动复位</text>
+  </g>
+  <rect x="64" y="430" width="832" height="56" rx="10" fill="#EEF2F9"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="480" y="464" font-size="17" fill="#1B2A41" text-anchor="middle">成本是一句话，回报是整个知识库的重新在场。</text>
+  </g>
+</svg>

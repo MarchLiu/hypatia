@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">04 · 滑动窗口 · 提取原则</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">17 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">提取原则（下）</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="152" width="832" height="76" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="152" width="6" height="76" fill="#2F6BFF"/>
+    <text x="100" y="184" font-size="19" font-weight="700" fill="#2F6BFF">分类决定模板</text>
+    <text x="100" y="212" font-size="16.5" fill="#3D4C66">一次答对 / 纠错链 / 探索讨论 / bug 修复 / 设计决策各有骨架；寒暄与确认性短句直接跳过。</text>
+
+    <rect x="64" y="240" width="832" height="76" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="240" width="6" height="76" fill="#12B5A5"/>
+    <text x="100" y="272" font-size="19" font-weight="700" fill="#12B5A5">相对时间必须改写为绝对时间</text>
+    <text x="100" y="300" font-size="16.5" fill="#3D4C66">"明天提醒我备份" → "2026-08-29 提醒我备份"——"明天"在入库那一刻就开始失效。</text>
+
+    <rect x="64" y="328" width="832" height="76" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="328" width="6" height="76" fill="#F2A93B"/>
+    <text x="100" y="360" font-size="19" font-weight="700" fill="#C98A20">宁冗勿漏关系，不存敏感</text>
+    <text x="100" y="388" font-size="16.5" fill="#3D4C66">三元组谓词不完美也要挂进图；密码、密钥、token 无论出现多少次，不进入任何一层存储。</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="64" y="470" font-size="17" font-weight="600" fill="#1B2A41">纠错链四段：</text>
+    <rect x="180" y="446" width="150" height="40" rx="8" fill="#EEF2F9"/>
+    <text x="255" y="472" font-size="16" fill="#1B2A41" text-anchor="middle">initial attempt</text>
+    <line x1="330" y1="466" x2="386" y2="466" stroke="#7A8AA3" stroke-width="1.5"/>
+    <rect x="390" y="446" width="120" height="40" rx="8" fill="#EEF2F9"/>
+    <text x="450" y="472" font-size="16" fill="#1B2A41" text-anchor="middle">错因</text>
+    <line x1="510" y1="466" x2="566" y2="466" stroke="#7A8AA3" stroke-width="1.5"/>
+    <rect x="570" y="446" width="130" height="40" rx="8" fill="#EEF2F9"/>
+    <text x="635" y="472" font-size="16" fill="#1B2A41" text-anchor="middle">正确做法</text>
+    <line x1="700" y1="466" x2="756" y2="466" stroke="#7A8AA3" stroke-width="1.5"/>
+    <rect x="760" y="446" width="120" height="40" rx="8" fill="#12B5A5"/>
+    <text x="820" y="472" font-size="16" fill="#FFFFFF" text-anchor="middle">lesson</text>
+  </g>
+</svg>

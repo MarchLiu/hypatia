@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#16294D"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="64" y="76" font-size="15" fill="#7A8AA3">HYPATIA · 非线性的记忆</text>
+    <text x="60" y="240" font-size="130" font-weight="800" fill="#2F6BFF" opacity="0.55">01</text>
+    <text x="64" y="316" font-size="40" font-weight="700" fill="#FFFFFF">线性的困境</text>
+    <text x="64" y="362" font-size="20" fill="#9FB4D8">对话天然是线性的——这正是问题所在</text>
+    <circle cx="64" cy="480" r="5" fill="#2F6BFF"/>
+    <circle cx="88" cy="480" r="5" fill="none" stroke="#3D5578"/>
+    <circle cx="112" cy="480" r="5" fill="none" stroke="#3D5578"/>
+    <circle cx="136" cy="480" r="5" fill="none" stroke="#3D5578"/>
+    <circle cx="160" cy="480" r="5" fill="none" stroke="#3D5578"/>
+    <circle cx="184" cy="480" r="5" fill="none" stroke="#3D5578"/>
+  </g>
+</svg>

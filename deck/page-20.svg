@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#16294D"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif" text-anchor="middle">
+    <text x="480" y="130" font-size="18" fill="#9FB4D8">抽取有噪声，谓词难以完美——但图的价值不在每条边都精确，而在结构本身提供可遍历性。</text>
+    <text x="480" y="230" font-size="30" font-weight="600" fill="#FFFFFF">一条错误的三元组是一个<tspan x="480" dy="46">可被发现、被挑战、被 resolve 的对象；</tspan><tspan x="480" dy="46">一段没有被结构化的对话，</tspan><tspan x="480" dy="46">则连犯错的资格都没有。</tspan></text>
+  </g>
+</svg>

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">04 · 滑动窗口</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">14 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">窗口的意义在于节奏</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif" text-anchor="middle">
+    <rect x="64" y="160" width="280" height="72" rx="10" fill="#EEF2F9"/>
+    <text x="204" y="202" font-size="17" fill="#7A8AA3">已归档的既成事实</text>
+    <rect x="360" y="156" width="280" height="80" rx="10" fill="#FFFFFF" stroke="#2F6BFF" stroke-width="2"/>
+    <text x="500" y="202" font-size="17" font-weight="600" fill="#2F6BFF">待整理的候选</text>
+    <rect x="656" y="160" width="240" height="72" rx="10" fill="none" stroke="#7A8AA3" stroke-dasharray="6 5"/>
+    <text x="776" y="202" font-size="17" fill="#7A8AA3">未来</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="268" width="402" height="118" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="268" width="402" height="4" fill="#F2A93B"/>
+    <text x="88" y="304" font-size="18" font-weight="600" fill="#C98A20">窗口太短</text>
+    <text x="88" y="336" font-size="16" fill="#3D4C66">把过程中的猜测和已被推翻的尝试，<tspan x="88" dy="24">误当成知识写入</tspan></text>
+    <rect x="494" y="268" width="402" height="118" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="494" y="268" width="402" height="4" fill="#F2A93B"/>
+    <text x="518" y="304" font-size="18" font-weight="600" fill="#C98A20">窗口太长</text>
+    <text x="518" y="336" font-size="16" fill="#3D4C66">整理的时机总是姗姗来迟，<tspan x="518" dy="24">提取点滑出窗口后回收代价更高</tspan></text>
+    <rect x="64" y="420" width="832" height="76" rx="10" fill="#EEF2F9"/>
+    <text x="88" y="452" font-size="17" font-weight="600" fill="#1B2A41">实践：窗口覆盖一个完整话题的自然生命周期</text>
+    <text x="88" y="480" font-size="16" fill="#3D4C66">出现收敛迹象（结论被确认、话题被切换），才是梳理的时机。</text>
+  </g>
+</svg>

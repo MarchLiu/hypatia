@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">06 · 读取通道</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">22 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">适配不同 Agent 的机制</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="156" width="261" height="240" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="88" y="192" font-size="18" font-weight="600" fill="#2F6BFF">每轮重构 system prompt</text>
+    <text x="88" y="230" font-size="16" font-weight="600" fill="#1B2A41">确定性注入</text>
+    <text x="88" y="262" font-size="15.5" fill="#3D4C66">任务开始时执行一次<tspan x="88" dy="24">JSE 查询，把相关 shelf</tspan><tspan x="88" dy="24">的高层摘要固定放进</tspan><tspan x="88" dy="24">上下文</tspan></text>
+
+    <rect x="349" y="156" width="261" height="240" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="373" y="192" font-size="18" font-weight="600" fill="#12B5A5">持续上下文、能自主调工具</text>
+    <text x="373" y="214" font-size="14" fill="#7A8AA3">harness / openclaw 这一类</text>
+    <text x="373" y="248" font-size="16" font-weight="600" fill="#1B2A41">技能层检索</text>
+    <text x="373" y="280" font-size="15.5" fill="#3D4C66">需要时自己发起检索，<tspan x="373" dy="24">甚至在任务中途发现</tspan><tspan x="373" dy="24">线索后中途补查</tspan></text>
+
+    <rect x="634" y="156" width="261" height="240" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="658" y="192" font-size="18" font-weight="600" fill="#C98A20">被动响应、几乎无主动权</text>
+    <text x="658" y="230" font-size="16" font-weight="600" fill="#1B2A41">边界触发</text>
+    <text x="658" y="262" font-size="15.5" fill="#3D4C66">退而求其次，在对话的<tspan x="658" dy="24">特定边界（新任务开启、</tspan><tspan x="658" dy="24">用户显式提醒）触发</tspan><tspan x="658" dy="24">外部注入</tspan></text>
+
+    <text x="480" y="450" font-size="16" fill="#3D4C66" text-anchor="middle">hypatia skill 的存在就是为了吸收这些差异——同一套 JSE 查询能力，</text>
+    <text x="480" y="478" font-size="16" fill="#3D4C66" text-anchor="middle">包装成不同 Agent 各自习惯的形态，而不要求 Agent 违背自己的天性。</text>
+  </g>
+</svg>

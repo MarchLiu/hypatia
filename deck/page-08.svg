@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">02 · SESSION 切分</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">08 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">切分靠语义信号，而非物理边界</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="156" width="832" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="156" width="6" height="110" fill="#2F6BFF"/>
+    <text x="100" y="196" font-size="20" font-weight="700" fill="#2F6BFF">最强 · 话题切换</text>
+    <text x="100" y="234" font-size="17" fill="#3D4C66">窗口内的讨论从 sqlite 存储跳到集群运维——无论框架层面是否同一会话，切成两段。</text>
+
+    <rect x="64" y="282" width="832" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="282" width="6" height="110" fill="#12B5A5"/>
+    <text x="100" y="322" font-size="20" font-weight="700" fill="#12B5A5">次强 · 任务边界</text>
+    <text x="100" y="360" font-size="17" fill="#3D4C66">一个明确的交付完成（代码合入、文档写完、问题被解决）= 一段叙事的自然终结。</text>
+
+    <rect x="64" y="408" width="832" height="110" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <rect x="64" y="408" width="6" height="110" fill="#F2A93B"/>
+    <text x="100" y="448" font-size="20" font-weight="700" fill="#C98A20">最弱 · 时间间隔</text>
+    <text x="100" y="486" font-size="17" fill="#3D4C66">中断了一夜之后的继续——即使上下文还连着，也值得检查是否应该切开。</text>
+  </g>
+</svg>

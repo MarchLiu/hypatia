@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">03 · 对数空间的摘要</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">11 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">朴素的目标：log₁₆(n) 的空间代价</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="64" y="300" font-size="72" font-weight="800" fill="#2F6BFF">16 : 1</text>
+    <text x="64" y="340" font-size="17" fill="#7A8AA3">每上升一层，压缩十六倍</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="330" y="196" width="480" height="44" rx="8" fill="#2F6BFF"/>
+    <text x="354" y="224" font-size="17" fill="#FFFFFF">十六份原始对话</text>
+    <rect x="330" y="256" width="300" height="44" rx="8" fill="#12B5A5"/>
+    <text x="354" y="284" font-size="17" fill="#FFFFFF">一份量级相当的摘要</text>
+    <rect x="330" y="316" width="190" height="44" rx="8" fill="#F2A93B"/>
+    <text x="532" y="344" font-size="17" fill="#3D4C66">十六份摘要 → 一份更高层摘要</text>
+  </g>
+  <rect x="64" y="420" width="832" height="56" rx="10" fill="#EEF2F9"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="480" y="454" font-size="17" fill="#1B2A41" text-anchor="middle">每上升一层压缩十六倍；被压缩的是叙事和过程，不是结论。</text>
+  </g>
+</svg>

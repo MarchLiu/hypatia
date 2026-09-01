@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <rect width="960" height="540" fill="#FAFBFD"/>
+  <rect x="64" y="52" width="4" height="22" fill="#2F6BFF"/>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <text x="78" y="69" font-size="15" fill="#7A8AA3">02 · SESSION 切分</text>
+    <text x="896" y="69" font-size="15" fill="#7A8AA3" text-anchor="end">07 / 26</text>
+    <text x="64" y="126" font-size="34" font-weight="700" fill="#1B2A41">拿物理边界直接当 session 定义，会很难看</text>
+  </g>
+  <g font-family="PingFang SC,Noto Sans SC,sans-serif">
+    <rect x="64" y="160" width="402" height="200" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="88" y="200" font-size="17" font-weight="600" fill="#F2A93B">问题一</text>
+    <text x="88" y="240" font-size="19" fill="#1B2A41">一次会话里，换了三个毫不相干的话题</text>
+    <text x="88" y="276" font-size="16" fill="#7A8AA3">框架层面：仍是同一个会话，没有边界信号</text>
+    <text x="88" y="302" font-size="16" fill="#7A8AA3">整理结果：一份混合了三个主题的摘要</text>
+
+    <rect x="494" y="160" width="402" height="200" rx="10" fill="#FFFFFF" stroke="#D9E1EF"/>
+    <text x="518" y="200" font-size="17" font-weight="600" fill="#F2A93B">问题二</text>
+    <text x="518" y="240" font-size="19" fill="#1B2A41">同一个任务，横跨好几次会话的重启</text>
+    <text x="518" y="276" font-size="16" fill="#7A8AA3">框架层面：每个重启都是一次"新会话"</text>
+    <text x="518" y="302" font-size="16" fill="#7A8AA3">整理结果：一段完整叙事被切成碎片</text>
+
+    <rect x="64" y="400" width="832" height="96" rx="10" fill="#EEF2F9"/>
+    <text x="88" y="436" font-size="17" font-weight="600" fill="#1B2A41">物理边界（进程重启、新会话 ID）只是提示，而非定义</text>
+    <text x="88" y="468" font-size="16" fill="#3D4C66">碰到它时检查最近的内容是否已经收敛：收敛了就顺势切分，没收敛建议合并到下一段去处理。</text>
+  </g>
+</svg>
