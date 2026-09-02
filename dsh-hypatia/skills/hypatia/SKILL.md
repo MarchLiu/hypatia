@@ -534,6 +534,30 @@ hypatia query '["$knowledge", ["$eq", "name", "Alice'\''s project"]]'
 - **Search results**: `{"id": N, "catalog": "...", "key": "...", "content": "...", "rank": N.N}`
 - **Empty results**: prints "No results found."
 
+## Sandboxed / Read-Only Direct Access (known workaround)
+
+When running inside a sandboxed harness (e.g. DSH `workspace-write`), the hypatia CLI and plain
+`sqlite3 ~/.hypatia/...` may both fail with SQLite error 14 (`unable to open database file`):
+even read-only SQLite needs to create WAL/journal temp files next to the database, and
+`~/.hypatia` lies outside the writable workspace. **Do not retry the same failing command** —
+go straight to the immutable read-only URI, which needs no journal and no directory writes:
+
+```bash
+sqlite3 "file:$HOME/.hypatia/default/hypatia.sqlite?mode=ro&immutable=1" "SELECT count(*) FROM knowledge;"
+```
+
+- Use only for **reads** (SELECT). Never write through this path — `immutable=1` tells SQLite the
+  file never changes, so writes would corrupt state or be lost.
+- Adjust the shelf path for non-default shelves (`~/.hypatia/<shelf>/<db>.sqlite`).
+- First, locate the actual DB file: `ls ~/.hypatia/*/` (also check `-wal`/`-shm` siblings; if a
+  WAL exists and is non-empty, `immutable=1` may miss recent un-checkpointed rows — in that case
+  prefer requesting wider sandbox permissions for a normal read instead).
+- Schema hints: tables include `knowledge` and `statement`; statement triples are stored in
+  `head` / `relation` / `tail` columns.
+
+This fallback was validated: the same query fails at error 14 without the URI params and returns
+correctly with them.
+
 ## Important Notes
 
 - There is no `statement-get` CLI command. Use JSE queries (`$statement` with conditions) to find statements. `statement-delete` is available for deletion.
