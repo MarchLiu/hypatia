@@ -1,0 +1,70 @@
+{
+  "skill_name": "hypatia-dream",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "在名为 research 的 Hypatia shelf 上做一次知识图谱睡眠整理。不要改动任何数据，只给我报告。这个 shelf 没有 hypatia-dream 水位；其中新增节点 'JSE Query Planner' 明确说明它细化了 'JSE Query Engine'，但目前缺少两者之间的关系。还包含一条 msg-123-4 belongTo session-123。",
+      "expected_output": "Resolve report mode, treat the run as a first pass, inspect the full statement graph and relevant Knowledge bodies, exclude the message/session operational relationship, and report a high-confidence candidate `(JSE Query Planner, refines, JSE Query Engine)` without executing any create, delete, export, or marker command.",
+      "files": [],
+      "expectations": [
+        "Defaults to report mode and schedules no state-changing command or watermark.",
+        "Treats the missing marker as a first pass with a fixed snapshot boundary.",
+        "Proposes (JSE Query Planner, refines, JSE Query Engine) with explicit evidence.",
+        "Excludes the belongTo message/session relationship from semantic consolidation."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "对默认 shelf 运行 hypatia-dream --mode apply。上次成功水位为 2026-03-01 09:00:00。新知识明确规定 'SQLite Storage' 已取代 'DuckDB Storage' 作为唯一结构化存储；图中仍有 `(Hypatia, uses, DuckDB Storage)`，该旧三元组没有时间范围，且 scopes 和 data 为空。请修正关系。",
+      "expected_output": "Use the marker's processed_through value and a fixed snapshot boundary, identify an explicit contradiction rather than a merely related concept, re-query the reviewed triple before mutation, export a backup before deletion, replace the stale triple with `(Hypatia, uses, SQLite Storage)`, verify both removal and creation, create a successful apply marker, and return the required report with exact changes and backup path.",
+      "files": [],
+      "expectations": [
+        "Uses the marker's processed_through value rather than its creation time.",
+        "Re-queries the exact old triple and exports a backup before the destructive delete.",
+        "Replaces exactly (Hypatia, uses, DuckDB Storage) with (Hypatia, uses, SQLite Storage).",
+        "Verifies the mutation and writes a successful apply marker only after verification."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "帮我做梦整理默认知识库，模式 report。新条目 'Database Notes' 和旧条目 'Distributed Systems' 都提到了 consistency，但没有明确的来源、分类、细化、扩展或替代关系；图中还存在一个时间范围不为空的 `(Storage, uses, DuckDB)` 三元组。",
+      "expected_output": "Report no semantic change for the lexical overlap, avoid adding a vague related_to triple, and explain that a time-bounded statement is not eligible for replacement through the current CLI because temporal bounds cannot be preserved.",
+      "files": [],
+      "expectations": [
+        "Does not add a related_to or other semantic triple from lexical overlap alone.",
+        "Does not replace the time-bounded Storage uses DuckDB triple.",
+        "Keeps report mode read-only and leaves the watermark unchanged."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "下班了。请对默认 Hypatia shelf 做个好梦。",
+      "expected_output": "Treat the two closeout signals as an explicit request for apply mode even though --mode is omitted; begin the safe apply workflow rather than returning a report-only plan.",
+      "files": [],
+      "expectations": [
+        "Selects apply mode without asking for confirmation.",
+        "Explains that the closeout wording is the mode signal, then follows the normal preflight, backup, verification, and watermark rules."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "先整理看看默认知识库，看看知识之间的关系；先别修改。",
+      "expected_output": "Treat the preview wording as report mode and make no graph or watermark mutation.",
+      "files": [],
+      "expectations": [
+        "Selects report mode from the preview signals.",
+        "Does not schedule statement mutations or watermark creation."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "本阶段结束了，但先别修改，帮我做个好梦。",
+      "expected_output": "Detect the conflicting apply and report signals, ask the user to choose a mode, and make no state change.",
+      "files": [],
+      "expectations": [
+        "Does not prioritize the closeout signal over the preview signal.",
+        "Requests a mode choice and performs no graph mutation or watermark update."
+      ]
+    }
+  ]
+}
