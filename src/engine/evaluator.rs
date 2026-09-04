@@ -138,7 +138,9 @@ impl Evaluator {
         };
 
         let opts = extract_query_opts(metadata);
-        let ctx = OpContext::for_target(QueryTarget::Knowledge);
+        // The query below joins knowledge with statement, so `content` and
+        // `created_at` are ambiguous. Operators emit them already qualified.
+        let ctx = OpContext::for_target(QueryTarget::Knowledge).qualified();
 
         let mut conditions = Vec::new();
         let mut cond_params = Vec::new();
@@ -147,8 +149,7 @@ impl Evaluator {
             let result = Self::eval_condition(operand, &ctx)?;
             match result {
                 OperatorResult::SqlCondition { fragment, params } => {
-                    let aliased = alias_knowledge_columns(&fragment);
-                    conditions.push(aliased);
+                    conditions.push(fragment);
                     cond_params.extend(params);
                 }
                 OperatorResult::FtsQuery { query } => {
@@ -161,7 +162,7 @@ impl Evaluator {
                         conditions.push("1=0".to_string());
                     } else {
                         let (fragment, params) = build_key_match_condition(QueryTarget::Knowledge, &keys);
-                        conditions.push(alias_knowledge_columns(&fragment));
+                        conditions.push(fragment);
                         cond_params.extend(params);
                     }
                 }
@@ -175,7 +176,7 @@ impl Evaluator {
                         conditions.push("1=0".to_string());
                     } else {
                         let (fragment, params) = build_key_match_condition(QueryTarget::Knowledge, &keys);
-                        conditions.push(alias_knowledge_columns(&fragment));
+                        conditions.push(fragment);
                         cond_params.extend(params);
                     }
                 }
@@ -276,23 +277,6 @@ fn build_key_match_condition(target: QueryTarget, keys: &[String]) -> (String, V
     let placeholders: Vec<&str> = keys.iter().map(|_| "?").collect();
     let in_clause = placeholders.join(", ");
     (format!("{pk_column} IN ({in_clause})"), params)
-}
-
-/// Qualify knowledge column references for LEFT JOIN context.
-/// Prefixes bare `content`/`created_at`/`tr_start`/`tr_end` (columns that
-/// exist on both sides of the join) with `knowledge.`.
-fn alias_knowledge_columns(fragment: &str) -> String {
-    let mut out = fragment
-        .replace("json_extract(content,", "json_extract(knowledge.content,");
-    for col in ["created_at", "tr_start", "tr_end"] {
-        out = out.replace(col, &format!("knowledge.{col}"));
-        // Guard against double-prefixing already-qualified references.
-        out = out.replace(
-            &format!("knowledge.knowledge.{col}"),
-            &format!("knowledge.{col}"),
-        );
-    }
-    out
 }
 
 /// Convert an AST node back to a JSON value (for $quote).
@@ -569,41 +553,102 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("must be a tag string"));
     }
 
-    #[test]
-    fn alias_knowledge_columns_replaces_content() {
-        let input = "json_extract(content, '$.tags') LIKE ?";
-        let result = alias_knowledge_columns(input);
-        assert_eq!(result, "json_extract(knowledge.content, '$.tags') LIKE ?");
+    /// Build the SQL fragment an operator emits under a qualifying context,
+    /// the way `$not-summaried` splices it into its join.
+    fn qualified_fragment(jse: serde_json::Value) -> (String, Vec<serde_json::Value>) {
+        let ast = crate::engine::parser::Parser::parse(&jse).expect("parse");
+        let ctx = OpContext::for_target(QueryTarget::Knowledge).qualified();
+        match Evaluator::eval_condition(&ast, &ctx).expect("eval") {
+            OperatorResult::SqlCondition { fragment, params } => (fragment, params),
+            other => panic!("expected SqlCondition, got {other:?}"),
+        }
     }
 
     #[test]
-    fn alias_knowledge_columns_replaces_created_at() {
-        let input = "created_at > ?";
-        let result = alias_knowledge_columns(input);
-        assert_eq!(result, "knowledge.created_at > ?");
+    fn qualified_context_qualifies_content() {
+        let (fragment, params) = qualified_fragment(json!(["$like", "data", "%rust%"]));
+        assert_eq!(fragment, "json_extract(knowledge.content, ?) LIKE ?");
+        assert_eq!(params, vec![json!("$.data"), json!("%rust%")]);
     }
 
     #[test]
-    fn alias_knowledge_columns_qualifies_temporal_columns() {
-        let input = "tr_start IS NULL AND tr_end IS NOT NULL AND created_at = ?";
-        let result = alias_knowledge_columns(input);
+    fn qualified_context_qualifies_created_at() {
+        let (fragment, _) = qualified_fragment(json!(["$gt", "created_at", "2025-01-01"]));
+        assert_eq!(fragment, "knowledge.created_at > ?");
+    }
+
+    #[test]
+    fn qualified_context_qualifies_temporal_columns() {
+        let (fragment, _) = qualified_fragment(json!(["$eq", "tr_start", "2025-01-01"]));
+        assert_eq!(fragment, "knowledge.tr_start = ?");
+        let (fragment, _) = qualified_fragment(json!(["$eq", "tr_end", "2025-01-01"]));
+        assert_eq!(fragment, "knowledge.tr_end = ?");
+    }
+
+    #[test]
+    fn qualified_context_preserves_unambiguous_columns() {
+        let (fragment, _) = qualified_fragment(json!(["$eq", "name", "rust"]));
+        assert_eq!(fragment, "name = ?");
+    }
+
+    #[test]
+    fn qualified_context_handles_combined() {
+        let (fragment, params) = qualified_fragment(json!([
+            "$and",
+            ["$like", "scopes", "%proj%"],
+            ["$eq", "name", "rust"]
+        ]));
         assert_eq!(
-            result,
-            "knowledge.tr_start IS NULL AND knowledge.tr_end IS NOT NULL AND knowledge.created_at = ?"
+            fragment,
+            "(json_extract(knowledge.content, ?) LIKE ? AND name = ?)"
+        );
+        assert_eq!(
+            params,
+            vec![json!("$.scopes"), json!("%proj%"), json!("rust")]
+        );
+    }
+
+    /// Regression: qualification used to be a post-hoc `String::replace` over
+    /// finished SQL, so a Content field whose name contained `created_at`
+    /// (or `tr_start`/`tr_end`) had that substring rewritten inside its own
+    /// JSON path — `'$.doc_created_at'` became `'$.doc_knowledge.created_at'`,
+    /// a valid path that silently matched nothing.
+    #[test]
+    fn qualified_context_does_not_rewrite_column_names_inside_field_paths() {
+        for field in ["doc_created_at", "created_at_utc", "tr_start_ns", "my_tr_end"] {
+            let (fragment, params) = qualified_fragment(json!(["$like", field, "%x%"]));
+            assert_eq!(
+                fragment, "json_extract(knowledge.content, ?) LIKE ?",
+                "field {field}"
+            );
+            assert_eq!(params[0], json!(format!("$.{field}")), "field {field}");
+        }
+    }
+
+    /// Regression: the old textual rewrite only knew the string
+    /// `"json_extract(content,"`, so `$json-contains` — which builds
+    /// `json_contains(content, ?)` — kept a bare `content` and failed with
+    /// "ambiguous column name" inside the `$not-summaried` join.
+    #[test]
+    fn qualified_context_qualifies_json_contains_recheck() {
+        let (fragment, _) = qualified_fragment(json!(["$json-contains", {"tags": ["rust"]}]));
+        assert!(
+            fragment.ends_with("AND json_contains(knowledge.content, ?)"),
+            "unqualified content in: {fragment}"
         );
     }
 
     #[test]
-    fn alias_knowledge_columns_preserves_name() {
-        let input = "name = ?";
-        let result = alias_knowledge_columns(input);
-        assert_eq!(result, "name = ?");
-    }
-
-    #[test]
-    fn alias_knowledge_columns_handles_combined() {
-        let input = "json_extract(content, '$.scopes') LIKE ? AND name = ?";
-        let result = alias_knowledge_columns(input);
-        assert_eq!(result, "json_extract(knowledge.content, '$.scopes') LIKE ? AND name = ?");
+    fn not_summaried_rejects_injected_field_name() {
+        let mock = MockStorage::new(vec![]);
+        let result = Evaluator::execute(
+            &json!(["$not-summaried", "message", ["$eq", "$a') OR 1=1 --", "x"]]),
+            &mock,
+        );
+        let err = result.expect_err("injected field name must be rejected");
+        assert!(
+            err.to_string().contains("invalid field name"),
+            "unexpected error: {err}"
+        );
     }
 }
