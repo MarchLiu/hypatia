@@ -27,13 +27,24 @@ pub enum OperatorResult {
     Value(serde_json::Value),
 }
 
+/// Columns that exist on both `knowledge` and `statement`, so a bare
+/// reference to one is ambiguous inside a join over both tables.
+const AMBIGUOUS_COLUMNS: &[&str] = &["content", "created_at", "tr_start", "tr_end"];
+
 /// Query-target context: which table (catalog) and primary-key column the
 /// generated json_index fragments must correlate against.
+///
+/// `catalog`, `table` and `pk` are the only identifiers interpolated into
+/// generated SQL. They are `&'static str` chosen by a closed match over
+/// `QueryTarget`, so no caller input can reach them.
 #[derive(Debug, Clone, Copy)]
 pub struct OpContext {
     pub catalog: &'static str,
     pub table: &'static str,
     pub pk: &'static str,
+    /// Qualify ambiguous column references with `table.` — set when the
+    /// fragment will be spliced into a join over more than one table.
+    pub qualify_columns: bool,
 }
 
 impl OpContext {
@@ -43,12 +54,31 @@ impl OpContext {
                 catalog: "knowledge",
                 table: "knowledge",
                 pk: "name",
+                qualify_columns: false,
             },
             crate::model::QueryTarget::Statement => Self {
                 catalog: "statement",
                 table: "statement",
                 pk: "triple",
+                qualify_columns: false,
             },
+        }
+    }
+
+    /// Same target, but emitting `table.`-qualified column references for
+    /// splicing into a join (see `$not-summaried`). Qualifying here, at
+    /// construction time, is what keeps the caller from having to rewrite
+    /// finished SQL by textual substitution.
+    pub fn qualified(self) -> Self {
+        Self { qualify_columns: true, ..self }
+    }
+
+    /// Render a column reference, qualifying it when it would be ambiguous.
+    fn column(&self, name: &str) -> String {
+        if self.qualify_columns && AMBIGUOUS_COLUMNS.contains(&name) {
+            format!("{}.{name}", self.table)
+        } else {
+            name.to_string()
         }
     }
 }
@@ -190,12 +220,12 @@ pub fn evaluate_operator(
                 ))),
             }
         }
-        "$eq" => comparison_op("=", operands, eval_fn),
-        "$ne" => comparison_op("!=", operands, eval_fn),
-        "$gt" => comparison_op(">", operands, eval_fn),
-        "$lt" => comparison_op("<", operands, eval_fn),
-        "$gte" => comparison_op(">=", operands, eval_fn),
-        "$lte" => comparison_op("<=", operands, eval_fn),
+        "$eq" => comparison_op("=", operands, ctx, eval_fn),
+        "$ne" => comparison_op("!=", operands, ctx, eval_fn),
+        "$gt" => comparison_op(">", operands, ctx, eval_fn),
+        "$lt" => comparison_op("<", operands, ctx, eval_fn),
+        "$gte" => comparison_op(">=", operands, ctx, eval_fn),
+        "$lte" => comparison_op("<=", operands, ctx, eval_fn),
         "$contains" => {
             if operands.len() != 2 {
                 return Err(HypatiaError::Eval(
@@ -203,6 +233,7 @@ pub fn evaluate_operator(
                 ));
             }
             let field = expect_symbol(&operands[0])?;
+            let field = field.trim_start_matches('$');
             let value = expect_literal(&operands[1])?;
             let search_str = match &value {
                 serde_json::Value::String(s) => s.clone(),
@@ -210,13 +241,17 @@ pub fn evaluate_operator(
             };
             // Transitional auto-routing (plan §3.2): array fields are exact
             // membership over json_index, not substring.
-            if ARRAY_FIELDS.contains(&field.as_str()) {
-                let (fragment, params) = membership_fragment(ctx, &field, &search_str);
+            if ARRAY_FIELDS.contains(&field) {
+                let (fragment, params) = membership_fragment(ctx, field, &search_str);
                 return Ok(OperatorResult::SqlCondition { fragment, params });
             }
+            // $contains always reads a Content field, even when the name also
+            // happens to be a column.
+            let resolved = json_field(ctx, field)?;
             Ok(OperatorResult::SqlCondition {
-                fragment: format!("json_extract(content, '$.{field}') LIKE ?"),
-                params: vec![serde_json::Value::String(format!("%{search_str}%"))],
+                fragment: format!("{} LIKE ?", resolved.fragment),
+                params: resolved
+                    .with_values([serde_json::Value::String(format!("%{search_str}%"))]),
             })
         }
         "$has" => {
@@ -274,7 +309,7 @@ pub fn evaluate_operator(
             }
             params.push(serde_json::Value::String(rhs_text));
             Ok(OperatorResult::SqlCondition {
-                fragment: format!("{recall} AND json_contains(content, ?)"),
+                fragment: format!("{recall} AND json_contains({}, ?)", ctx.column("content")),
                 params,
             })
         }
@@ -290,10 +325,10 @@ pub fn evaluate_operator(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            let sql_field = resolve_field_like(&field);
+            let resolved = resolve_field(ctx, &field)?;
             Ok(OperatorResult::SqlCondition {
-                fragment: format!("{sql_field} LIKE ?"),
-                params: vec![serde_json::Value::String(pattern)],
+                fragment: format!("{} LIKE ?", resolved.fragment),
+                params: resolved.with_values([serde_json::Value::String(pattern)]),
             })
         }
         "$content" => {
@@ -495,22 +530,22 @@ pub fn evaluate_operator(
 fn comparison_op(
     op: &str,
     operands: &[AstNode],
+    ctx: &OpContext,
     eval_fn: &dyn Fn(&AstNode) -> Result<OperatorResult>,
 ) -> Result<OperatorResult> {
     if operands.len() == 2 {
         // Two-argument form: ["$eq", "field", "value"]
         let field = expect_symbol(&operands[0])?;
         let value = expect_literal(&operands[1])?;
-        let (sql_field, is_json) = resolve_field_checked(&field);
+        let mut resolved = resolve_field(ctx, &field)?;
         // Ordering on JSON scalars compares numerically (plan decision #3):
         // json_extract returns JSON numbers already, but CAST makes intent
         // explicit; a numeric bound param keeps the comparison typed.
-        let sql_field = if is_json && matches!(op, ">" | "<" | ">=" | "<=") {
-            format!("CAST({sql_field} AS REAL)")
-        } else {
-            sql_field
-        };
-        let value = if is_json && matches!(op, ">" | "<" | ">=" | "<=") && value.is_number() {
+        let ordering = resolved.is_json && matches!(op, ">" | "<" | ">=" | "<=");
+        if ordering {
+            resolved.fragment = format!("CAST({} AS REAL)", resolved.fragment);
+        }
+        let value = if ordering && value.is_number() {
             serde_json::Value::Number(
                 serde_json::Number::from_f64(value.as_f64().unwrap_or(0.0))
                     .unwrap_or(serde_json::Number::from(0)),
@@ -519,8 +554,8 @@ fn comparison_op(
             value
         };
         Ok(OperatorResult::SqlCondition {
-            fragment: format!("{sql_field} {op} ?"),
-            params: vec![value],
+            fragment: format!("{} {op} ?", resolved.fragment),
+            params: resolved.with_values([value]),
         })
     } else if operands.len() == 1 {
         // Single argument: the operand should already be a condition
@@ -552,26 +587,101 @@ fn expect_literal(node: &AstNode) -> Result<serde_json::Value> {
     }
 }
 
-/// Resolve a field name to its SQL column reference.
-/// Returns (fragment, is_json_field).
-fn resolve_field_checked(field: &str) -> (String, bool) {
-    let field = field.trim_start_matches('$');
-    match field {
-        "head" | "relation" | "tail" | "triple" | "name" | "created_at" | "tr_start" | "tr_end" => {
-            (field.to_string(), false)
-        }
-        // Assume it's a JSON content field
-        _ => (format!("json_extract(content, '$.{field}')"), true),
+/// Field names that address a real table column rather than a Content
+/// JSON path.
+const COLUMN_FIELDS: &[&str] = &[
+    "head", "relation", "tail", "triple", "name", "created_at", "tr_start", "tr_end",
+];
+
+/// A field reference rendered as SQL, plus the bindings its placeholders need.
+#[derive(Debug)]
+struct ResolvedField {
+    /// SQL fragment. May contain `?` placeholders bound by `params`.
+    fragment: String,
+    /// True when the field resolved to a Content JSON path, not a column.
+    is_json: bool,
+    /// Bindings for `fragment`'s placeholders. These must be pushed ahead of
+    /// the operator's own value parameters, because `fragment` is emitted to
+    /// the left of the value's `?`.
+    params: Vec<serde_json::Value>,
+}
+
+impl ResolvedField {
+    /// Combine with the operator's value parameters, keeping placeholder order.
+    fn with_values(self, values: impl IntoIterator<Item = serde_json::Value>) -> Vec<serde_json::Value> {
+        let mut params = self.params;
+        params.extend(values);
+        params
     }
 }
 
-fn resolve_field(field: &str) -> String {
-    resolve_field_checked(field).0
+/// Validate a Content JSON path: `tags`, `meta.author`, `tags[0].name`.
+///
+/// The path is bound as a parameter rather than interpolated, so this check is
+/// defense in depth. It exists so a malformed name fails loudly at the field
+/// instead of producing a JSON path that silently matches nothing.
+fn validate_field_path(field: &str) -> Result<()> {
+    let invalid = || {
+        HypatiaError::Validation(format!(
+            "invalid field name {field:?}: expected a JSON path such as \
+             \"tags\", \"meta.author\" or \"tags[0]\""
+        ))
+    };
+    if field.is_empty() {
+        return Err(invalid());
+    }
+    for segment in field.split('.') {
+        let (name, mut subscripts) = match segment.find('[') {
+            Some(i) => segment.split_at(i),
+            None => (segment, ""),
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            return Err(invalid());
+        }
+        // Trailing array subscripts: `[0]`, `[0][1]`.
+        while !subscripts.is_empty() {
+            let Some(close) = subscripts.find(']') else {
+                return Err(invalid());
+            };
+            let index = &subscripts[1..close];
+            if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            subscripts = &subscripts[close + 1..];
+            if !subscripts.is_empty() && !subscripts.starts_with('[') {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
 }
 
-/// Resolve a field name for LIKE operations. All columns are TEXT in SQLite.
-fn resolve_field_like(field: &str) -> String {
-    resolve_field(field)
+/// Address a Content JSON path, whatever the field is named.
+///
+/// The path is bound as a parameter — SQLite's `json_extract(content, ?)`
+/// takes the path from a binding — so the field name never becomes SQL text.
+fn json_field(ctx: &OpContext, field: &str) -> Result<ResolvedField> {
+    let field = field.trim_start_matches('$');
+    validate_field_path(field)?;
+    Ok(ResolvedField {
+        fragment: format!("json_extract({}, ?)", ctx.column("content")),
+        is_json: true,
+        params: vec![serde_json::Value::String(format!("$.{field}"))],
+    })
+}
+
+/// Resolve a field name to a table column when it names one, and to a Content
+/// JSON path otherwise.
+fn resolve_field(ctx: &OpContext, field: &str) -> Result<ResolvedField> {
+    let name = field.trim_start_matches('$');
+    if COLUMN_FIELDS.contains(&name) {
+        return Ok(ResolvedField {
+            fragment: ctx.column(name),
+            is_json: false,
+            params: Vec::new(),
+        });
+    }
+    json_field(ctx, field)
 }
 
 /// Convert an AST node back to a JSON value (for $quote).
@@ -659,7 +769,9 @@ mod tests {
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert!(fragment.contains("AND"));
-                assert_eq!(params.len(), 2);
+                // `name` is a column (value only); `age` is a JSON field, so it
+                // binds its path ahead of its value.
+                assert_eq!(params, vec![json!("test"), json!("$.age"), json!(18.0)]);
             }
             _ => panic!("expected SqlCondition"),
         }
@@ -682,20 +794,43 @@ mod tests {
         }
     }
 
+    /// `$tags` and `tags` name the same field: the leading `$` marks a symbol,
+    /// it is not part of the name. `$contains` used to keep it, so the symbol
+    /// form built the path `$.$tags` and never matched — and never routed to
+    /// the array-membership branch either.
     #[test]
-    fn contains_operator() {
+    fn contains_operator_array_field() {
+        for field in ["$tags", "tags"] {
+            let result = evaluate_operator(
+                "$contains",
+                &[AstNode::Symbol(field.to_string()), AstNode::Literal(json!("rust"))],
+                &serde_json::Map::new(),
+                &kctx(),
+                &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
+            ).unwrap();
+            match result {
+                OperatorResult::SqlCondition { fragment, params } => {
+                    assert!(fragment.contains("json_index"), "field {field}");
+                    assert_eq!(params, vec![json!("tags"), json!("rust")], "field {field}");
+                }
+                _ => panic!("expected SqlCondition"),
+            }
+        }
+    }
+
+    #[test]
+    fn contains_operator_scalar_field() {
         let result = evaluate_operator(
             "$contains",
-            &[AstNode::Symbol("$tags".to_string()), AstNode::Literal(json!("rust"))],
+            &[AstNode::Symbol("$data".to_string()), AstNode::Literal(json!("rust"))],
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
         ).unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
-                assert!(fragment.contains("json_extract"));
-                assert!(fragment.contains("LIKE"));
-                assert_eq!(params[0], json!("%rust%"));
+                assert_eq!(fragment, "json_extract(content, ?) LIKE ?");
+                assert_eq!(params, vec![json!("$.data"), json!("%rust%")]);
             }
             _ => panic!("expected SqlCondition"),
         }
@@ -760,9 +895,8 @@ mod tests {
         ).unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
-                assert!(fragment.contains("json_extract"));
-                assert!(fragment.contains("LIKE"));
-                assert_eq!(params[0], json!("%language%"));
+                assert_eq!(fragment, "json_extract(content, ?) LIKE ?");
+                assert_eq!(params, vec![json!("$.data"), json!("%language%")]);
             }
             _ => panic!("expected SqlCondition"),
         }
@@ -810,6 +944,137 @@ mod tests {
             }
             _ => panic!("expected SqlCondition"),
         }
+    }
+
+    // ── Field-name injection ─────────────────────────────────────────
+    //
+    // Field names reach the engine straight from user JSE. They used to be
+    // interpolated into the SQL string as `json_extract(content, '$.{field}')`,
+    // so a single quote closed the literal and the rest of the name became
+    // live SQL. They are now bound as a `json_extract(content, ?)` path
+    // parameter, and validated on top of that.
+
+    /// Payloads that escaped the JSON-path literal under the old `format!`.
+    const INJECTION_PAYLOADS: &[&str] = &[
+        "a'b",
+        "a') OR 1=1 --",
+        "x') OR 1=1 OR json_extract(content, '$.x",
+        "a') UNION SELECT name, content, created_at FROM knowledge --",
+        "a'); DROP TABLE knowledge; --",
+        "a\"b",
+        "",
+        "a..b",
+        "a b",
+    ];
+
+    fn field_operators() -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            ("$eq", json!("x")),
+            ("$ne", json!("x")),
+            ("$gt", json!(1)),
+            ("$lt", json!(1)),
+            ("$gte", json!(1)),
+            ("$lte", json!(1)),
+            ("$like", json!("x%")),
+            ("$contains", json!("x")),
+        ]
+    }
+
+    #[test]
+    fn field_name_injection_is_rejected() {
+        for (op, value) in field_operators() {
+            for payload in INJECTION_PAYLOADS {
+                let result = evaluate_operator(
+                    op,
+                    &[
+                        AstNode::Symbol(format!("${payload}")),
+                        AstNode::Literal(value.clone()),
+                    ],
+                    &serde_json::Map::new(),
+                    &kctx(),
+                    &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
+                );
+                match result {
+                    Err(HypatiaError::Validation(_)) => {}
+                    other => panic!(
+                        "{op} did not reject injected field name {payload:?}: {other:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legitimate_field_names_still_resolve() {
+        for field in [
+            "data", "tags", "format", "meta.author", "a.b.c", "tags[0]",
+            "rows[0][1]", "with_underscore", "with-dash", "字段", "f1",
+        ] {
+            resolve_field(&kctx(), field)
+                .unwrap_or_else(|e| panic!("field {field:?} rejected: {e}"));
+        }
+    }
+
+    #[test]
+    fn column_fields_resolve_to_columns_not_json() {
+        for field in COLUMN_FIELDS {
+            let resolved = resolve_field(&kctx(), field).unwrap();
+            assert!(!resolved.is_json, "field {field}");
+            assert_eq!(resolved.fragment, **field);
+            assert!(resolved.params.is_empty(), "field {field}");
+        }
+    }
+
+    /// The path never becomes SQL text, so it cannot terminate the literal
+    /// even if validation were bypassed.
+    #[test]
+    fn json_path_is_bound_not_interpolated() {
+        let resolved = resolve_field(&kctx(), "$meta.author").unwrap();
+        assert_eq!(resolved.fragment, "json_extract(content, ?)");
+        assert_eq!(resolved.params, vec![json!("$.meta.author")]);
+        assert!(!resolved.fragment.contains('\''));
+    }
+
+    #[test]
+    fn ordering_comparison_casts_and_still_binds_the_path() {
+        let result = evaluate_operator(
+            "$gt",
+            &[AstNode::Symbol("$age".to_string()), AstNode::Literal(json!(18))],
+            &serde_json::Map::new(),
+            &kctx(),
+            &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
+        ).unwrap();
+        match result {
+            OperatorResult::SqlCondition { fragment, params } => {
+                assert_eq!(fragment, "CAST(json_extract(content, ?) AS REAL) > ?");
+                assert_eq!(params, vec![json!("$.age"), json!(18.0)]);
+            }
+            _ => panic!("expected SqlCondition"),
+        }
+    }
+
+    /// `expect_symbol` also accepts a bare string, so the string form is the
+    /// same entry point and must be validated identically.
+    #[test]
+    fn string_literal_field_names_are_validated_too() {
+        let result = evaluate_operator(
+            "$eq",
+            &[
+                AstNode::Literal(json!("a') OR 1=1 --")),
+                AstNode::Literal(json!("x")),
+            ],
+            &serde_json::Map::new(),
+            &kctx(),
+            &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
+        );
+        assert!(matches!(result, Err(HypatiaError::Validation(_))));
+    }
+
+    #[test]
+    fn validation_error_names_the_offending_field() {
+        let err = resolve_field(&kctx(), "a'b").unwrap_err();
+        assert!(matches!(err, HypatiaError::Validation(_)));
+        assert!(err.to_string().contains("invalid field name"), "{err}");
     }
 
     #[test]
