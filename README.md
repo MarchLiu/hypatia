@@ -258,6 +258,21 @@ JSE (JSON Search Expression) enables precise queries against knowledge or statem
 | `$triple` | Triple position match | `["$triple", "Alice", "$*", "Bob"]` |
 | `$k-hop` | K-hop graph traversal | `["$k-hop", "Alice", "$*", 2]` |
 
+### Field Names
+
+A field name is either a table column (`name`, `created_at`, `head`, `relation`,
+`tail`, `triple`, `tr_start`, `tr_end`) or a path into the content JSON
+(`data`, `tags`, `meta.author`, `tags[0]`). A leading `$` marks a symbol and is
+not part of the name, so `"tags"` and `"$tags"` are the same field.
+
+Content paths are bound as query parameters, never spliced into SQL. Names that
+are not a valid path — anything with quotes, spaces, parentheses or empty
+segments — are rejected with a validation error rather than reaching the
+database.
+
+SQL errors report the database's message only. Set `HYPATIA_DEBUG_SQL=1` to
+include the generated statement when diagnosing a query.
+
 ### Examples
 
 ```bash
