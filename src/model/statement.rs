@@ -2,7 +2,7 @@ use chrono::NaiveDateTime;
 
 use super::Content;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct StatementKey {
     pub head: String,
     pub relation: String,
@@ -10,7 +10,11 @@ pub struct StatementKey {
 }
 
 impl StatementKey {
-    pub fn new(head: impl Into<String>, relation: impl Into<String>, tail: impl Into<String>) -> Self {
+    pub fn new(
+        head: impl Into<String>,
+        relation: impl Into<String>,
+        tail: impl Into<String>,
+    ) -> Self {
         Self {
             head: head.into(),
             relation: relation.into(),
@@ -43,7 +47,7 @@ impl StatementKey {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Statement {
     pub key: StatementKey,
     pub content: Content,
@@ -77,8 +81,6 @@ pub fn csv_split(s: &str) -> Vec<String> {
                 } else {
                     in_quotes = false;
                 }
-            } else if ch == '"' {
-                in_quotes = true;
             } else {
                 current.push(ch);
             }
@@ -155,6 +157,9 @@ mod tests {
 
     #[test]
     fn csv_split_quoted() {
-        assert_eq!(csv_split("\"Alice, Jr.\",knows,Bob"), vec!["Alice, Jr.", "knows", "Bob"]);
+        assert_eq!(
+            csv_split("\"Alice, Jr.\",knows,Bob"),
+            vec!["Alice, Jr.", "knows", "Bob"]
+        );
     }
 }

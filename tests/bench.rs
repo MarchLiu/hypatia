@@ -43,17 +43,22 @@ fn run_benchmark() {
     println!("  Generating synthetic data...");
     let mut generator = BenchDataGenerator::new(config);
     generator.generate();
-    println!("  Generated {} knowledge, {} statements, {} needles",
-        generator.knowledge.len(), generator.statements.len(), generator.needles.len());
+    println!(
+        "  Generated {} knowledge, {} statements, {} needles",
+        generator.knowledge.len(),
+        generator.statements.len(),
+        generator.needles.len()
+    );
 
     // Setup shelf in temp directory
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let shelf_path = tmp_dir.path().join("bench_shelf");
     // Hermetic home: never touch (or migrate!) the real ~/.hypatia shelf.
     let home = tempfile::tempdir().expect("create temp home");
-    let mut mgr = ShelfManager::with_home(home.path().to_path_buf())
-        .expect("create shelf manager");
-    let shelf_name = mgr.connect(&shelf_path, Some("bench")).expect("connect shelf");
+    let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).expect("create shelf manager");
+    let shelf_name = mgr
+        .connect(&shelf_path, Some("bench"))
+        .expect("connect shelf");
 
     // ── Phase 1: Ingest ────────────────────────────────────────────
     println!("\n  Phase 1: Ingestion...");
@@ -68,7 +73,10 @@ fn run_benchmark() {
         svc.create(&entry.name, content).expect("create knowledge");
         knowledge_count += 1;
         if knowledge_count % 500 == 0 {
-            print!("    {knowledge_count}/{} knowledge entries\r", generator.knowledge.len());
+            print!(
+                "    {knowledge_count}/{} knowledge entries\r",
+                generator.knowledge.len()
+            );
         }
     }
     let knowledge_time = t0.elapsed();
@@ -80,10 +88,14 @@ fn run_benchmark() {
         let content = Content::new(&entry.data);
         let shelf = mgr.get_mut(&shelf_name).expect("get shelf");
         let mut svc = hypatia::service::StatementService::new(shelf);
-        svc.create(&key, content, None, None).expect("create statement");
+        svc.create(&key, content, None, None)
+            .expect("create statement");
         stmt_count += 1;
         if stmt_count % 1000 == 0 {
-            print!("    {stmt_count}/{} statements\r", generator.statements.len());
+            print!(
+                "    {stmt_count}/{} statements\r",
+                generator.statements.len()
+            );
         }
     }
     let statement_time = t1.elapsed();
@@ -92,8 +104,14 @@ fn run_benchmark() {
     let knowledge_per_sec = knowledge_count as f64 / knowledge_time.as_secs_f64();
     let statement_per_sec = stmt_count as f64 / statement_time.as_secs_f64();
 
-    println!("    Knowledge: {knowledge_count} entries in {:.2}s ({knowledge_per_sec:.0}/s)", knowledge_time.as_secs_f64());
-    println!("    Statements: {stmt_count} entries in {:.2}s ({statement_per_sec:.0}/s)", statement_time.as_secs_f64());
+    println!(
+        "    Knowledge: {knowledge_count} entries in {:.2}s ({knowledge_per_sec:.0}/s)",
+        knowledge_time.as_secs_f64()
+    );
+    println!(
+        "    Statements: {stmt_count} entries in {:.2}s ({statement_per_sec:.0}/s)",
+        statement_time.as_secs_f64()
+    );
     println!("    Total ingest: {:.2}s", total_ingest.as_secs_f64());
 
     // ── Phase 2: FTS Search Recall ─────────────────────────────────
@@ -129,7 +147,9 @@ fn run_benchmark() {
             }
         };
 
-        let found_names: Vec<String> = result.rows.iter()
+        let found_names: Vec<String> = result
+            .rows
+            .iter()
             .filter_map(|row| row.get("key").and_then(|v| v.as_str()).map(String::from))
             .collect();
 
@@ -149,9 +169,21 @@ fn run_benchmark() {
     let recall_at_10 = recall_hits_at_10 as f64 / needle_count as f64;
 
     println!("    Needle queries: {needle_count}");
-    println!("    Recall@1:  {:.1}% ({}/{needle_count})", recall_at_1 * 100.0, recall_hits_at_1);
-    println!("    Recall@5:  {:.1}% ({}/{needle_count})", recall_at_5 * 100.0, recall_hits_at_5);
-    println!("    Recall@10: {:.1}% ({}/{needle_count})", recall_at_10 * 100.0, recall_hits_at_10);
+    println!(
+        "    Recall@1:  {:.1}% ({}/{needle_count})",
+        recall_at_1 * 100.0,
+        recall_hits_at_1
+    );
+    println!(
+        "    Recall@5:  {:.1}% ({}/{needle_count})",
+        recall_at_5 * 100.0,
+        recall_hits_at_5
+    );
+    println!(
+        "    Recall@10: {:.1}% ({}/{needle_count})",
+        recall_at_10 * 100.0,
+        recall_hits_at_10
+    );
 
     // ── Phase 3: FTS Search Latency ────────────────────────────────
     println!("\n  Phase 3: FTS Search Latency...");
@@ -225,7 +257,11 @@ fn run_benchmark() {
     }
 
     let jse_stats = LatencyStats::from_durations(&jse_durations);
-    println!("    Queries: {} ({} unique × 3 runs)", jse_durations.len(), jse_queries.len());
+    println!(
+        "    Queries: {} ({} unique × 3 runs)",
+        jse_durations.len(),
+        jse_queries.len()
+    );
     println!("    p50: {:.0} µs", jse_stats.p50_us);
     println!("    p99: {:.0} µs", jse_stats.p99_us);
     println!("    max: {:.0} µs", jse_stats.max_us);
@@ -234,7 +270,10 @@ fn run_benchmark() {
     println!("\n{}", "═".repeat(58));
     println!("  SUMMARY");
     println!("{}", "═".repeat(58));
-    println!("  Ingest:    {:.0} knowledge/s, {:.0} statements/s", knowledge_per_sec, statement_per_sec);
+    println!(
+        "  Ingest:    {:.0} knowledge/s, {:.0} statements/s",
+        knowledge_per_sec, statement_per_sec
+    );
     println!("  Recall@1:  {:.1}%", recall_at_1 * 100.0);
     println!("  Recall@5:  {:.1}%", recall_at_5 * 100.0);
     println!("  Recall@10: {:.1}%", recall_at_10 * 100.0);

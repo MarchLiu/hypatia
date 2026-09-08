@@ -18,7 +18,7 @@ use crate::error::{Result, StorageError};
 const RECURSE_BUDGET: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Posting {
+pub struct Posting {
     pub path: String,
     pub kind: &'static str,
     pub value: Option<String>,
@@ -72,7 +72,9 @@ pub fn content_postings(content_json: &str) -> Vec<Posting> {
 /// `format == "json"` payloads: index `data.<key>` for direct children.
 fn unpack_data(out: &mut Vec<Posting>, data_val: &Value) {
     let Value::String(s) = data_val else { return };
-    let Ok(parsed) = serde_json::from_str::<Value>(s) else { return };
+    let Ok(parsed) = serde_json::from_str::<Value>(s) else {
+        return;
+    };
     let Value::Object(map) = parsed else { return };
     for (key, val) in &map {
         let path = format!("data.{key}");
@@ -159,8 +161,11 @@ pub(crate) fn replace_postings_in(
     doc_id: i64,
     content_json: &str,
 ) -> Result<()> {
-    tx.execute("DELETE FROM json_index WHERE doc_id = ?1", rusqlite::params![doc_id])
-        .map_err(StorageError::from)?;
+    tx.execute(
+        "DELETE FROM json_index WHERE doc_id = ?1",
+        rusqlite::params![doc_id],
+    )
+    .map_err(StorageError::from)?;
     let postings = content_postings(content_json);
     for p in postings {
         tx.execute(
@@ -177,7 +182,8 @@ pub(crate) fn replace_postings_in(
 /// Returns the number of indexed documents.
 pub fn rebuild_all(conn: &rusqlite::Connection) -> Result<usize> {
     let tx = conn.unchecked_transaction().map_err(StorageError::from)?;
-    tx.execute("DELETE FROM json_index", []).map_err(StorageError::from)?;
+    tx.execute("DELETE FROM json_index", [])
+        .map_err(StorageError::from)?;
     let mut docs = 0usize;
     {
         let mut stmt = tx
@@ -191,9 +197,7 @@ pub fn rebuild_all(conn: &rusqlite::Connection) -> Result<usize> {
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
             .map_err(StorageError::from)?;
-        let pairs: Vec<(i64, String)> = rows
-            .filter_map(|r| r.ok())
-            .collect();
+        let pairs: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
         for (id, content_json) in pairs {
             replace_postings_in(&tx, id, &content_json)?;
             docs += 1;
@@ -213,9 +217,9 @@ pub fn json_contains(lhs: &Value, rhs: &Value) -> bool {
         (Value::Object(a), Value::Object(b)) => b
             .iter()
             .all(|(k, rv)| a.get(k).map(|lv| json_contains(lv, rv)).unwrap_or(false)),
-        (Value::Array(a), Value::Array(b)) => b.iter().all(|rv| {
-            a.iter().any(|lv| json_contains(lv, rv))
-        }),
+        (Value::Array(a), Value::Array(b)) => {
+            b.iter().all(|rv| a.iter().any(|lv| json_contains(lv, rv)))
+        }
         // PG: scalar containment requires type AND value equality.
         _ => lhs == rhs,
     }
@@ -224,7 +228,10 @@ pub fn json_contains(lhs: &Value, rhs: &Value) -> bool {
 /// `json_contains(content_json, rhs_json)` over raw JSON texts; either side
 /// unparsable or NULL → false.
 pub fn json_contains_str(lhs: &str, rhs: &str) -> bool {
-    match (serde_json::from_str::<Value>(lhs), serde_json::from_str::<Value>(rhs)) {
+    match (
+        serde_json::from_str::<Value>(lhs),
+        serde_json::from_str::<Value>(rhs),
+    ) {
         (Ok(l), Ok(r)) => json_contains(&l, &r),
         _ => false,
     }
@@ -267,9 +274,7 @@ mod tests {
         let p = content_postings(content);
         // budget 2: root(1) -> meta(2) -> a would exceed → opaque leaf
         // budget exhausted one level deeper: array stored opaque
-        assert!(p
-            .iter()
-            .any(|x| x.path == "meta.a.b" && x.kind == "array"));
+        assert!(p.iter().any(|x| x.path == "meta.a.b" && x.kind == "array"));
     }
 
     #[test]
@@ -287,8 +292,14 @@ mod tests {
             &json!({"author":{"country":"CN"}})
         ));
         // array containment: every rhs element matched somewhere in lhs
-        assert!(json_contains(&json!({"tags":["a","b"]}), &json!({"tags":["a"]})));
-        assert!(!json_contains(&json!({"tags":["a"]}), &json!({"tags":["a","b"]})));
+        assert!(json_contains(
+            &json!({"tags":["a","b"]}),
+            &json!({"tags":["a"]})
+        ));
+        assert!(!json_contains(
+            &json!({"tags":["a"]}),
+            &json!({"tags":["a","b"]})
+        ));
         // strings require equality (PG), not substring (jq)
         assert!(!json_contains(&json!("abc"), &json!("b")));
         assert!(json_contains(&json!("abc"), &json!("abc")));

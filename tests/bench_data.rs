@@ -18,13 +18,28 @@ pub struct ScaleConfig {
 
 impl ScaleConfig {
     pub fn small() -> Self {
-        Self { n_knowledge: 1_000, n_statements: 2_000, n_needles: 20, n_queries: 40 }
+        Self {
+            n_knowledge: 1_000,
+            n_statements: 2_000,
+            n_needles: 20,
+            n_queries: 40,
+        }
     }
     pub fn medium() -> Self {
-        Self { n_knowledge: 10_000, n_statements: 20_000, n_needles: 50, n_queries: 100 }
+        Self {
+            n_knowledge: 10_000,
+            n_statements: 20_000,
+            n_needles: 50,
+            n_queries: 100,
+        }
     }
     pub fn large() -> Self {
-        Self { n_knowledge: 50_000, n_statements: 100_000, n_needles: 100, n_queries: 200 }
+        Self {
+            n_knowledge: 50_000,
+            n_statements: 100_000,
+            n_needles: 100,
+            n_queries: 200,
+        }
     }
 
     pub fn from_name(name: &str) -> Self {
@@ -39,37 +54,107 @@ impl ScaleConfig {
 // ── Vocabulary banks ──────────────────────────────────────────────────
 
 const TECH_TERMS: &[&str] = &[
-    "authentication", "authorization", "middleware", "endpoint", "REST API",
-    "GraphQL", "WebSocket", "database migration", "ORM", "query optimization",
-    "caching strategy", "load balancer", "rate limiting", "pagination",
-    "serialization", "validation", "error handling", "logging framework",
-    "monitoring", "deployment pipeline", "CI/CD", "containerization",
-    "microservice", "event sourcing", "message queue", "pub/sub",
-    "connection pooling", "session management", "token refresh", "CORS",
-    "SSL termination", "health check", "circuit breaker", "retry logic",
-    "batch processing", "stream processing", "data pipeline", "ETL",
-    "feature flag", "A/B testing", "blue-green deployment", "canary release",
-    "vector database", "embedding model", "full text search", "inverted index",
-    "knowledge graph", "triple store", "semantic query", "structured data",
+    "authentication",
+    "authorization",
+    "middleware",
+    "endpoint",
+    "REST API",
+    "GraphQL",
+    "WebSocket",
+    "database migration",
+    "ORM",
+    "query optimization",
+    "caching strategy",
+    "load balancer",
+    "rate limiting",
+    "pagination",
+    "serialization",
+    "validation",
+    "error handling",
+    "logging framework",
+    "monitoring",
+    "deployment pipeline",
+    "CI/CD",
+    "containerization",
+    "microservice",
+    "event sourcing",
+    "message queue",
+    "pub/sub",
+    "connection pooling",
+    "session management",
+    "token refresh",
+    "CORS",
+    "SSL termination",
+    "health check",
+    "circuit breaker",
+    "retry logic",
+    "batch processing",
+    "stream processing",
+    "data pipeline",
+    "ETL",
+    "feature flag",
+    "A/B testing",
+    "blue-green deployment",
+    "canary release",
+    "vector database",
+    "embedding model",
+    "full text search",
+    "inverted index",
+    "knowledge graph",
+    "triple store",
+    "semantic query",
+    "structured data",
 ];
 
 const ENTITY_NAMES: &[&str] = &[
-    "Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi",
-    "Ivan", "Judy", "Karl", "Linda", "Mike", "Nina", "Oscar", "Pat",
-    "Quinn", "Rita", "Steve", "Tina", "Ursula", "Victor", "Wendy", "Xander",
+    "Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi", "Ivan", "Judy", "Karl",
+    "Linda", "Mike", "Nina", "Oscar", "Pat", "Quinn", "Rita", "Steve", "Tina", "Ursula", "Victor",
+    "Wendy", "Xander",
 ];
 
 const PREDICATES: &[&str] = &[
-    "works_on", "manages", "reports_to", "collaborates_with",
-    "created", "maintains", "uses", "depends_on", "replaced",
-    "reviewed", "deployed", "tested", "documented", "mentors", "leads",
-    "contributes_to", "is_a", "contains", "references", "integrates_with",
+    "works_on",
+    "manages",
+    "reports_to",
+    "collaborates_with",
+    "created",
+    "maintains",
+    "uses",
+    "depends_on",
+    "replaced",
+    "reviewed",
+    "deployed",
+    "tested",
+    "documented",
+    "mentors",
+    "leads",
+    "contributes_to",
+    "is_a",
+    "contains",
+    "references",
+    "integrates_with",
 ];
 
 const TAGS: &[&str] = &[
-    "backend", "frontend", "api", "database", "auth", "testing", "docs",
-    "config", "deployment", "models", "performance", "security", "monitoring",
-    "infrastructure", "benchmark", "rust", "python", "typescript", "go",
+    "backend",
+    "frontend",
+    "api",
+    "database",
+    "auth",
+    "testing",
+    "docs",
+    "config",
+    "deployment",
+    "models",
+    "performance",
+    "security",
+    "monitoring",
+    "infrastructure",
+    "benchmark",
+    "rust",
+    "python",
+    "typescript",
+    "go",
 ];
 
 const NEEDLE_TOPICS: &[&str] = &[
@@ -137,9 +222,15 @@ fn sanitize_fts_query(query: &str) -> String {
     // Replace FTS5 special characters with spaces, then collapse whitespace
     // FTS5 specials: : (column filter), " (phrase), * (prefix), ^ (beginning)
     // + (AND), - (NOT), ( ) (grouping), . (syntax error in some contexts)
-    let sanitized: String = query.chars()
+    let sanitized: String = query
+        .chars()
         .map(|c| {
-            matches!(c, ':' | '"' | '\'' | '*' | '^' | '+' | '-' | '(' | ')' | '.').then_some(' ').unwrap_or(c)
+            matches!(
+                c,
+                ':' | '"' | '\'' | '*' | '^' | '+' | '-' | '(' | ')' | '.'
+            )
+            .then_some(' ')
+            .unwrap_or(c)
         })
         .collect();
     let mut result = String::new();
@@ -205,14 +296,50 @@ impl BenchDataGenerator {
 
     fn random_sentence(&mut self) -> String {
         let n_terms = self.rng.random_range(3..=6);
-        let terms: Vec<&str> = self.pick_n(TECH_TERMS, n_terms).iter().map(|&t| *t).collect();
+        let terms: Vec<&str> = self
+            .pick_n(TECH_TERMS, n_terms)
+            .iter()
+            .map(|&t| *t)
+            .collect();
         let entity = *self.pick(ENTITY_NAMES);
         let templates = [
-            format!("{entity} discussed {} implementation with the team, focusing on {} patterns and {} best practices.", terms[0], terms.get(1).unwrap_or(&"design"), terms.get(2).unwrap_or(&"testing")),
-            format!("The {} module was refactored to improve {} performance. Key change: {} pipeline now uses {} for better throughput.", terms[0], terms.get(1).unwrap_or(&"system"), terms.get(2).unwrap_or(&"data"), terms.get(3).unwrap_or(&"async")),
-            format!("Bug report: {} fails when {} is null. Root cause identified as missing {} validation. Fixed by adding {} checks in the {} layer.", terms[0], terms.get(1).unwrap_or(&"input"), terms.get(2).unwrap_or(&"type"), terms.get(3).unwrap_or(&"boundary"), terms.get(4).unwrap_or(&"service")),
-            format!("Architecture decision: migrated from {} to {} for {} reasons. Performance improved by {}% after switching to {}-based {}.", terms[0], terms.get(1).unwrap_or(&"new system"), terms.get(2).unwrap_or(&"scalability"), self.rng.random_range(10..80), terms.get(3).unwrap_or(&"event"), terms.get(4).unwrap_or(&"processing")),
-            format!("Meeting notes: discussed {} with {entity}. Agreed to implement {} using {} approach. Deadline set for next sprint. Follow-up on {} integration required.", terms[0], terms.get(1).unwrap_or(&"feature"), terms.get(2).unwrap_or(&"modular"), terms.get(3).unwrap_or(&"system")),
+            format!(
+                "{entity} discussed {} implementation with the team, focusing on {} patterns and {} best practices.",
+                terms[0],
+                terms.get(1).unwrap_or(&"design"),
+                terms.get(2).unwrap_or(&"testing")
+            ),
+            format!(
+                "The {} module was refactored to improve {} performance. Key change: {} pipeline now uses {} for better throughput.",
+                terms[0],
+                terms.get(1).unwrap_or(&"system"),
+                terms.get(2).unwrap_or(&"data"),
+                terms.get(3).unwrap_or(&"async")
+            ),
+            format!(
+                "Bug report: {} fails when {} is null. Root cause identified as missing {} validation. Fixed by adding {} checks in the {} layer.",
+                terms[0],
+                terms.get(1).unwrap_or(&"input"),
+                terms.get(2).unwrap_or(&"type"),
+                terms.get(3).unwrap_or(&"boundary"),
+                terms.get(4).unwrap_or(&"service")
+            ),
+            format!(
+                "Architecture decision: migrated from {} to {} for {} reasons. Performance improved by {}% after switching to {}-based {}.",
+                terms[0],
+                terms.get(1).unwrap_or(&"new system"),
+                terms.get(2).unwrap_or(&"scalability"),
+                self.rng.random_range(10..80),
+                terms.get(3).unwrap_or(&"event"),
+                terms.get(4).unwrap_or(&"processing")
+            ),
+            format!(
+                "Meeting notes: discussed {} with {entity}. Agreed to implement {} using {} approach. Deadline set for next sprint. Follow-up on {} integration required.",
+                terms[0],
+                terms.get(1).unwrap_or(&"feature"),
+                terms.get(2).unwrap_or(&"modular"),
+                terms.get(3).unwrap_or(&"system")
+            ),
         ];
         templates[self.rng.random_range(0..templates.len())].clone()
     }
@@ -253,7 +380,9 @@ impl BenchDataGenerator {
             // (: is column filter, - is NOT, " is phrase, etc.)
             let query = sanitize_fts_query(&raw_query);
 
-            let content = format!("{needle_id}: {topic}. This is a unique planted needle for recall benchmarking at scale.");
+            let content = format!(
+                "{needle_id}: {topic}. This is a unique planted needle for recall benchmarking at scale."
+            );
 
             self.needles.push(Needle {
                 id: needle_id,
@@ -362,6 +491,11 @@ impl LatencyStats {
         let p99 = us[us.len() * 99 / 100];
         let max = *us.last().unwrap_or(&0);
         let min = *us.first().unwrap_or(&0);
-        Self { p50_us: p50, p99_us: p99, max_us: max, min_us: min }
+        Self {
+            p50_us: p50,
+            p99_us: p99,
+            max_us: max,
+            min_us: min,
+        }
     }
 }

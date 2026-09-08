@@ -23,9 +23,7 @@ enum Commands {
         name: Option<String>,
     },
     /// Disconnect from a shelf
-    Disconnect {
-        name: String,
-    },
+    Disconnect { name: String },
     /// List connected shelves
     List,
     /// Execute a JSE query
@@ -122,12 +120,21 @@ enum Commands {
         shelf: String,
     },
     /// Export a shelf to another directory
-    Export {
-        name: String,
-        dest: PathBuf,
+    Export { name: String, dest: PathBuf },
+    /// Import an export into an empty configured shelf (does not switch backends)
+    Import {
+        source: PathBuf,
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+        /// Omit exported vectors; use backfill with the target model afterwards
+        #[arg(long)]
+        reembed: bool,
     },
     /// Generate embeddings for existing entries that don't have vectors yet
     Backfill {
+        /// Explicitly invalidate all vectors and regenerate with the configured model
+        #[arg(long)]
+        reembed: bool,
         /// Shelf to backfill
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -225,8 +232,18 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 // Calculate column widths for alignment
                 let max_name = shelves.iter().map(|(n, _, _)| n.len()).max().unwrap_or(0);
                 for (name, path, connected) in &shelves {
-                    let status = if *connected { "[connected]" } else { "[disconnected]" };
-                    println!("  {:width$}  {}  {}", name, path.display(), status, width = max_name);
+                    let status = if *connected {
+                        "[connected]"
+                    } else {
+                        "[disconnected]"
+                    };
+                    println!(
+                        "  {:width$}  {}  {}",
+                        name,
+                        path.display(),
+                        status,
+                        width = max_name
+                    );
                 }
             }
         }
@@ -236,7 +253,15 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let result = lab.query(&shelf, &json)?;
             print_result(&result);
         }
-        Commands::KnowledgeCreate { name, data, tags, synonyms, figures, scopes, shelf } => {
+        Commands::KnowledgeCreate {
+            name,
+            data,
+            tags,
+            synonyms,
+            figures,
+            scopes,
+            shelf,
+        } => {
             let tags_vec: Vec<String> = if tags.is_empty() {
                 Vec::new()
             } else {
@@ -245,21 +270,34 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let syn = if synonyms.is_empty() {
                 None
             } else {
-                let list: Vec<String> = synonyms.split(',')
+                let list: Vec<String> = synonyms
+                    .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
-                if list.is_empty() { None } else { Some(Synonyms::Flat(list)) }
+                if list.is_empty() {
+                    None
+                } else {
+                    Some(Synonyms::Flat(list))
+                }
             };
             let figures_vec: Vec<String> = if figures.is_empty() {
                 Vec::new()
             } else {
-                figures.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                figures
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
             };
             let scopes_vec: Vec<String> = if scopes.is_empty() {
                 Vec::new()
             } else {
-                scopes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                scopes
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
             };
             // Treat trailing comma as implicit global scope
             let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
@@ -277,37 +315,47 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let k = lab.create_knowledge(&shelf, &name, content)?;
             println!("Created knowledge: {}", k.name);
         }
-        Commands::KnowledgeGet { name, shelf } => {
-            match lab.get_knowledge(&shelf, &name)? {
-                Some(k) => {
-                    let json = serde_json::to_string_pretty(&serde_json::json!({
-                        "name": k.name,
-                        "content": k.content,
-                        "created_at": k.created_at.to_string(),
-                    }))?;
-                    println!("{json}");
-                }
-                None => println!("Knowledge '{}' not found.", name),
+        Commands::KnowledgeGet { name, shelf } => match lab.get_knowledge(&shelf, &name)? {
+            Some(k) => {
+                let json = serde_json::to_string_pretty(&serde_json::json!({
+                    "name": k.name,
+                    "content": k.content,
+                    "created_at": k.created_at.to_string(),
+                }))?;
+                println!("{json}");
             }
-        }
+            None => println!("Knowledge '{}' not found.", name),
+        },
         Commands::KnowledgeDelete { name, shelf } => {
             lab.delete_knowledge(&shelf, &name)?;
             println!("Deleted knowledge: {name}");
         }
-        Commands::StatementDelete { head, relation, tail, shelf } => {
+        Commands::StatementDelete {
+            head,
+            relation,
+            tail,
+            shelf,
+        } => {
             let key = StatementKey::new(&head, &relation, &tail);
             lab.delete_statement(&shelf, &key)?;
             println!("Deleted statement: ({}, {}, {})", head, relation, tail);
         }
-        Commands::StatementCreate { head, relation, tail, data, synonyms, scopes, shelf } => {
+        Commands::StatementCreate {
+            head,
+            relation,
+            tail,
+            data,
+            synonyms,
+            scopes,
+            shelf,
+        } => {
             let key = StatementKey::new(&head, &relation, &tail);
             let syn = match synonyms {
                 Some(ref json_str) => {
                     let map: std::collections::HashMap<String, Vec<String>> =
-                        serde_json::from_str(json_str)
-                        .map_err(|e| crate::error::HypatiaError::Parse(
-                            format!("invalid synonyms JSON: {e}")
-                        ))?;
+                        serde_json::from_str(json_str).map_err(|e| {
+                            crate::error::HypatiaError::Parse(format!("invalid synonyms JSON: {e}"))
+                        })?;
                     Some(Synonyms::Positional(map))
                 }
                 None => None,
@@ -315,7 +363,11 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let scopes_vec: Vec<String> = if scopes.is_empty() {
                 Vec::new()
             } else {
-                scopes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                scopes
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
             };
             let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
                 let mut v = scopes_vec;
@@ -324,11 +376,22 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             } else {
                 scopes_vec
             };
-            let content = Content::new(&data).with_synonyms(syn).with_scopes(scopes_vec);
+            let content = Content::new(&data)
+                .with_synonyms(syn)
+                .with_scopes(scopes_vec);
             let s = lab.create_statement(&shelf, &key, content, None, None)?;
-            println!("Created statement: ({}, {}, {})", s.key.head, s.key.relation, s.key.tail);
+            println!(
+                "Created statement: ({}, {}, {})",
+                s.key.head, s.key.relation, s.key.tail
+            );
         }
-        Commands::Search { query, catalog, limit, offset, shelf } => {
+        Commands::Search {
+            query,
+            catalog,
+            limit,
+            offset,
+            shelf,
+        } => {
             let opts = SearchOpts {
                 catalog,
                 limit,
@@ -337,7 +400,12 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let result = lab.search(&shelf, &query, opts)?;
             print_result(&result);
         }
-        Commands::Similar { query, target, limit, shelf } => {
+        Commands::Similar {
+            query,
+            target,
+            limit,
+            shelf,
+        } => {
             let result = lab.similar(&shelf, &query, &target, limit)?;
             print_result(&result);
         }
@@ -345,13 +413,27 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             lab.export_shelf(&name, &dest)?;
             println!("Exported shelf '{name}' to {}", dest.display());
         }
-        Commands::Backfill { shelf } => {
-            let stats = lab.backfill_vectors(&shelf)?;
-            println!("Backfill complete: {} vectors created, {} skipped, {} errors",
-                stats.created, stats.skipped, stats.errors);
+        Commands::Import {
+            source,
+            shelf,
+            reembed,
+        } => {
+            lab.import_shelf(&shelf, &source, reembed)?;
+            println!(
+                "Imported {} into shelf '{shelf}'; connection configuration unchanged",
+                source.display()
+            );
+        }
+        Commands::Backfill { shelf, reembed } => {
+            let stats = lab.backfill_vectors_with_reembed(&shelf, reembed)?;
+            println!(
+                "Backfill complete: {} vectors created, {} skipped, {} errors",
+                stats.created, stats.skipped, stats.errors
+            );
         }
         Commands::ArchiveStore { file, name, shelf } => {
-            let file_name = file.file_name()
+            let file_name = file
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unnamed".to_string());
             let dest_relative = name.unwrap_or(file_name);
@@ -394,7 +476,8 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 "filename": dest_relative,
                 "size_bytes": size_bytes,
                 "mime_type": mime_type
-            }).to_string();
+            })
+            .to_string();
 
             let content = Content::new(&meta_data)
                 .with_format(crate::model::Format::Json)
@@ -409,30 +492,29 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
 
             // Create statement: <name> is_a archive
             let key = StatementKey::new(&dest_relative, "is_a", "archive");
-            let stmt_content = Content::new("")
-                .with_tags(vec!["archive".to_string()]);
+            let stmt_content = Content::new("").with_tags(vec!["archive".to_string()]);
             let _ = lab.create_statement(&shelf, &key, stmt_content, None, None);
 
             println!("Stored: archive://{}", dest_relative);
             println!("Knowledge: {}", k.name);
             println!("MIME: {}, Size: {} bytes", mime_type, size_bytes);
         }
-        Commands::ArchiveGet { name, output, shelf } => {
-            match lab.get_archive_path(&shelf, &name) {
-                Some(path) => {
-                    match output {
-                        Some(dest) => {
-                            std::fs::copy(&path, &dest)?;
-                            println!("Copied to: {}", dest.display());
-                        }
-                        None => {
-                            println!("{}", path.display());
-                        }
-                    }
+        Commands::ArchiveGet {
+            name,
+            output,
+            shelf,
+        } => match lab.get_archive_path(&shelf, &name) {
+            Some(path) => match output {
+                Some(dest) => {
+                    std::fs::copy(&path, &dest)?;
+                    println!("Copied to: {}", dest.display());
                 }
-                None => println!("Archive '{}' not found in shelf '{}'.", name, shelf),
-            }
-        }
+                None => {
+                    println!("{}", path.display());
+                }
+            },
+            None => println!("Archive '{}' not found in shelf '{}'.", name, shelf),
+        },
         Commands::ArchiveList { shelf } => {
             let files = lab.list_archives(&shelf)?;
             if files.is_empty() {
@@ -445,17 +527,21 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             }
         }
         Commands::SessionCurrent { scope, shelf } => {
-            let mut conditions = vec![
-                serde_json::json!(["$contains", "scopes", scope.as_deref().unwrap_or("")]),
-            ];
+            let mut conditions = vec![serde_json::json!([
+                "$contains",
+                "scopes",
+                scope.as_deref().unwrap_or("")
+            ])];
             if let Some(ref s) = scope {
                 if !s.is_empty() {
-                    conditions = vec![
-                        serde_json::json!(["$contains", "scopes", s]),
-                    ];
+                    conditions = vec![serde_json::json!(["$contains", "scopes", s])];
                 }
             }
-            let jse = serde_json::json!(["$not-summaried", "message", conditions.into_iter().next().unwrap()]);
+            let jse = serde_json::json!([
+                "$not-summaried",
+                "message",
+                conditions.into_iter().next().unwrap()
+            ]);
             let result = lab.query(&shelf, &jse)?;
             if result.rows.is_empty() {
                 println!("No unsummarized messages.");
@@ -484,8 +570,7 @@ fn execute_model_command(cmd: ModelCommands) -> crate::error::Result<()> {
             } else {
                 for (name, path) in &models {
                     // Show symlink target if applicable
-                    let resolved = std::fs::canonicalize(path)
-                        .unwrap_or_else(|_| path.clone());
+                    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
                     if resolved != *path {
                         println!("  {} -> {}", name, resolved.display());
                     } else {
@@ -504,45 +589,45 @@ fn execute_model_command(cmd: ModelCommands) -> crate::error::Result<()> {
                 }
                 Err(e) => {
                     return Err(crate::error::HypatiaError::Config(format!(
-                        "failed to register model '{}': {}", name, e
+                        "failed to register model '{}': {}",
+                        name, e
                     )));
                 }
             }
         }
-        ModelCommands::Show { name } => {
-            match crate::embedding::config::model_info(&name) {
-                Ok(info) => {
-                    println!("Model: {}", info.name);
-                    println!("Directory: {}", info.directory.display());
-                    println!("ONNX: {}", info.model_path.display());
-                    println!("Tokenizer: {}", info.tokenizer_path.display());
-                    println!("Files:");
-                    for f in &info.files {
-                        let size = if f.size_bytes >= 1_073_741_824 {
-                            format!("{:.1} GB", f.size_bytes as f64 / 1_073_741_824.0)
-                        } else if f.size_bytes >= 1_048_576 {
-                            format!("{:.1} MB", f.size_bytes as f64 / 1_048_576.0)
-                        } else if f.size_bytes >= 1024 {
-                            format!("{:.1} KB", f.size_bytes as f64 / 1024.0)
-                        } else {
-                            format!("{} B", f.size_bytes)
-                        };
-                        println!("  {:30} {}", f.name, size);
-                    }
-                    let total = if info.total_size_bytes >= 1_073_741_824 {
-                        format!("{:.1} GB", info.total_size_bytes as f64 / 1_073_741_824.0)
+        ModelCommands::Show { name } => match crate::embedding::config::model_info(&name) {
+            Ok(info) => {
+                println!("Model: {}", info.name);
+                println!("Directory: {}", info.directory.display());
+                println!("ONNX: {}", info.model_path.display());
+                println!("Tokenizer: {}", info.tokenizer_path.display());
+                println!("Files:");
+                for f in &info.files {
+                    let size = if f.size_bytes >= 1_073_741_824 {
+                        format!("{:.1} GB", f.size_bytes as f64 / 1_073_741_824.0)
+                    } else if f.size_bytes >= 1_048_576 {
+                        format!("{:.1} MB", f.size_bytes as f64 / 1_048_576.0)
+                    } else if f.size_bytes >= 1024 {
+                        format!("{:.1} KB", f.size_bytes as f64 / 1024.0)
                     } else {
-                        format!("{:.1} MB", info.total_size_bytes as f64 / 1_048_576.0)
+                        format!("{} B", f.size_bytes)
                     };
-                    println!("Total: {}", total);
+                    println!("  {:30} {}", f.name, size);
                 }
-                Err(e) => {
-                    return Err(crate::error::HypatiaError::Config(format!(
-                        "model '{}' not found: {}", name, e
-                    )));
-                }
+                let total = if info.total_size_bytes >= 1_073_741_824 {
+                    format!("{:.1} GB", info.total_size_bytes as f64 / 1_073_741_824.0)
+                } else {
+                    format!("{:.1} MB", info.total_size_bytes as f64 / 1_048_576.0)
+                };
+                println!("Total: {}", total);
             }
-        }
+            Err(e) => {
+                return Err(crate::error::HypatiaError::Config(format!(
+                    "model '{}' not found: {}",
+                    name, e
+                )));
+            }
+        },
     }
     Ok(())
 }

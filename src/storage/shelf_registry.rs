@@ -96,7 +96,10 @@ mod tests {
         let loaded = ShelfRegistry::load(&path).unwrap();
         assert_eq!(loaded.shelves.len(), 2);
         assert_eq!(loaded.get("default"), Some(&PathBuf::from("/tmp/default")));
-        assert_eq!(loaded.get("project-a"), Some(&PathBuf::from("/tmp/project-a")));
+        assert_eq!(
+            loaded.get("project-a"),
+            Some(&PathBuf::from("/tmp/project-a"))
+        );
     }
 
     #[test]

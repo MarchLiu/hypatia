@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 /// Embedding configuration loaded from `shelf.toml` (or defaults).
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
+    /// Stable configured model identity, independent of the local model cache.
+    pub model_identity: String,
+    /// True when a configured model name or local artifact fingerprint is available.
+    pub model_identity_trusted: bool,
     /// Which provider to use: "local" (ONNX) or "remote" (HTTP API).
     pub provider: ProviderKind,
     /// Local ONNX settings.
@@ -56,9 +60,9 @@ struct ShelfToml {
 
 /// Parsed `[embedding]` section from `shelf.toml`.
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-struct EmbeddingToml {
-    provider: String,
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct EmbeddingToml {
+    pub(crate) provider: String,
     /// HuggingFace-style model reference (e.g. "BAAI/bge-m3") or absolute path.
     model: Option<String>,
     /// Explicit model file path (backward compat).
@@ -114,10 +118,7 @@ pub fn resolve_model(model_ref: &str) -> Result<ResolvedModel, String> {
     }
 
     // Case 2: ~/.hypatia/models/<org>/<name>/
-    let hypatia_model_dir = dirs_home()
-        .join(".hypatia")
-        .join("models")
-        .join(model_ref);
+    let hypatia_model_dir = dirs_home().join(".hypatia").join("models").join(model_ref);
     if hypatia_model_dir.is_dir() {
         return resolve_model_dir(&hypatia_model_dir, model_ref);
     }
@@ -159,12 +160,8 @@ fn resolve_model_dir(dir: &Path, _model_ref: &str) -> Result<ResolvedModel, Stri
         )
     })?;
 
-    let tokenizer_path = find_tokenizer_file(dir).ok_or_else(|| {
-        format!(
-            "no tokenizer.json found in {}",
-            dir.display()
-        )
-    })?;
+    let tokenizer_path = find_tokenizer_file(dir)
+        .ok_or_else(|| format!("no tokenizer.json found in {}", dir.display()))?;
 
     Ok(ResolvedModel {
         model_dir: dir.to_path_buf(),
@@ -315,10 +312,7 @@ pub fn list_local_models() -> Vec<(String, PathBuf)> {
                     };
                     // Check it looks like a model dir (has at least one .onnx or tokenizer.json)
                     if is_model_dir(&model_entry.path()) {
-                        results.push((
-                            format!("{}/{}", org_name, model_name),
-                            model_entry.path(),
-                        ));
+                        results.push((format!("{}/{}", org_name, model_name), model_entry.path()));
                     }
                 }
             }
@@ -334,7 +328,11 @@ pub fn list_local_models() -> Vec<(String, PathBuf)> {
             }
             if let Some(name) = entry.file_name().to_str() {
                 // Skip if already listed as part of an org/name pair
-                if !name.contains('/') && !results.iter().any(|(n, _)| n.starts_with(&format!("{}/", name))) {
+                if !name.contains('/')
+                    && !results
+                        .iter()
+                        .any(|(n, _)| n.starts_with(&format!("{}/", name)))
+                {
                     if is_model_dir(&path) && find_tokenizer_file(&path).is_none() {
                         // This is an org dir, not a flat model
                     } else if is_model_dir(&path) && find_tokenizer_file(&path).is_some() {
@@ -364,7 +362,10 @@ pub fn register_model(name: &str, source_path: &Path) -> Result<PathBuf, String>
     let target = dirs_home().join(".hypatia").join("models").join(name);
 
     if !source_path.is_dir() {
-        return Err(format!("source path is not a directory: {}", source_path.display()));
+        return Err(format!(
+            "source path is not a directory: {}",
+            source_path.display()
+        ));
     }
 
     if !is_model_dir(source_path) {
@@ -420,7 +421,10 @@ pub fn model_info(name: &str) -> Result<ModelInfo, String> {
                     .to_string();
                 let size = meta.len();
                 total_size += size;
-                files.push(ModelFile { name: file_name, size_bytes: size });
+                files.push(ModelFile {
+                    name: file_name,
+                    size_bytes: size,
+                });
             }
         }
     }
@@ -480,6 +484,38 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn identity_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+fn artifact_identity(model: &Path, tokenizer: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut hash = Sha256::new();
+    for path in [model, tokenizer] {
+        let mut file = std::fs::File::open(path).ok()?;
+        hash.update(file.metadata().ok()?.len().to_le_bytes());
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = file.read(&mut buffer).ok()?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buffer[..n]);
+        }
+    }
+    Some(format!(
+        "artifacts:{}",
+        hash.finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    ))
+}
+
 // ── EmbeddingConfig construction ──────────────────────────────────────
 
 impl EmbeddingConfig {
@@ -496,6 +532,12 @@ impl EmbeddingConfig {
             EmbeddingToml::default()
         };
 
+        Self::from_parsed(toml, shelf_dir)
+    }
+
+    pub(crate) fn from_parsed(toml: EmbeddingToml, shelf_dir: &Path) -> Self {
+        let configured_model = toml.model.clone();
+        let configured_tokenizer = toml.tokenizer_path.clone();
         let provider = match toml.provider.as_str() {
             "remote" => ProviderKind::Remote,
             _ => ProviderKind::Local,
@@ -510,9 +552,17 @@ impl EmbeddingConfig {
             match resolve_model(model_ref) {
                 Ok(resolved) => (resolved.model_path, resolved.tokenizer_path),
                 Err(e) => {
-                    eprintln!("warning: model resolution failed for '{}': {}", model_ref, e);
-                    // Fall through to model_path or defaults
-                    resolve_legacy_paths(&toml, shelf_dir)
+                    eprintln!(
+                        "warning: model resolution failed for '{}': {}",
+                        model_ref, e
+                    );
+                    // An explicitly selected model must never run a different shelf-local model.
+                    // Keep unavailable paths for the selected identity; normal CRUD still works.
+                    let unavailable = dirs_home().join(".hypatia").join("models").join(model_ref);
+                    (
+                        unavailable.join("embedding_model.onnx"),
+                        unavailable.join("tokenizer.json"),
+                    )
                 }
             }
         } else {
@@ -531,20 +581,56 @@ impl EmbeddingConfig {
             api_url: toml
                 .api_url
                 .unwrap_or_else(|| "https://api.openai.com/v1/embeddings".into()),
-            api_key_env: toml
-                .api_key_env
-                .unwrap_or_else(|| "OPENAI_API_KEY".into()),
+            api_key_env: toml.api_key_env.unwrap_or_else(|| "OPENAI_API_KEY".into()),
             api_model: toml
                 .api_model
                 .unwrap_or_else(|| "text-embedding-3-small".into()),
             dimensions,
         };
 
+        let (model_identity, model_identity_trusted) = match provider {
+            ProviderKind::Remote => (
+                format!(
+                    "remote:{}:endpoint:{}",
+                    remote.api_model,
+                    identity_hash(remote.api_url.as_bytes())
+                ),
+                true,
+            ),
+            ProviderKind::Local => {
+                let identity = if let Some(name) = configured_model {
+                    Some(format!(
+                        "named:{name}:tokenizer:{}",
+                        configured_tokenizer
+                            .map(|p| identity_hash(p.as_bytes()))
+                            .unwrap_or_else(|| "model-default".into())
+                    ))
+                } else {
+                    artifact_identity(&local.model_path, &local.tokenizer_path)
+                };
+                let trusted = identity.is_some();
+                (
+                    format!(
+                        "local:{}:{:?}:{}",
+                        identity.unwrap_or_else(|| "unavailable".into()),
+                        local.pooling,
+                        local.max_seq_length
+                    ),
+                    trusted,
+                )
+            }
+        };
         Self {
+            model_identity,
+            model_identity_trusted,
             provider,
             local,
             remote,
         }
+    }
+
+    pub fn model_identity(&self) -> &str {
+        &self.model_identity
     }
 
     /// Effective dimensions for the active provider.
@@ -590,7 +676,14 @@ mod tests {
         // Create model.onnx but NOT embedding_model.onnx
         std::fs::write(dir.path().join("model.onnx"), b"fake").unwrap();
         let found = find_onnx_file(dir.path()).unwrap();
-        assert!(found.file_name().unwrap().to_str().unwrap().contains("model.onnx"));
+        assert!(
+            found
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("model.onnx")
+        );
     }
 
     #[test]
@@ -644,8 +737,14 @@ mod tests {
     fn from_shelf_dir_defaults_to_shelf_files() {
         let dir = tempfile::TempDir::new().unwrap();
         let config = EmbeddingConfig::from_shelf_dir(dir.path());
-        assert_eq!(config.local.model_path, dir.path().join("embedding_model.onnx"));
-        assert_eq!(config.local.tokenizer_path, dir.path().join("tokenizer.json"));
+        assert_eq!(
+            config.local.model_path,
+            dir.path().join("embedding_model.onnx")
+        );
+        assert_eq!(
+            config.local.tokenizer_path,
+            dir.path().join("tokenizer.json")
+        );
     }
 
     #[test]
@@ -678,8 +777,22 @@ dimensions = 768
 
         let config = EmbeddingConfig::from_shelf_dir(dir.path());
         assert_eq!(config.local.dimensions, 768);
-        assert!(config.local.model_path.to_str().unwrap().contains("TestOrg"));
-        assert!(config.local.tokenizer_path.to_str().unwrap().contains("TestOrg"));
+        assert!(
+            config
+                .local
+                .model_path
+                .to_str()
+                .unwrap()
+                .contains("TestOrg")
+        );
+        assert!(
+            config
+                .local
+                .tokenizer_path
+                .to_str()
+                .unwrap()
+                .contains("TestOrg")
+        );
 
         // Cleanup
         std::fs::remove_dir_all(model_dir.parent().unwrap().parent().unwrap()).ok();
@@ -698,8 +811,14 @@ dimensions = 512
         std::fs::write(dir.path().join("shelf.toml"), toml_content).unwrap();
 
         let config = EmbeddingConfig::from_shelf_dir(dir.path());
-        assert_eq!(config.local.model_path, PathBuf::from("/custom/path/model.onnx"));
-        assert_eq!(config.local.tokenizer_path, PathBuf::from("/custom/path/tokenizer.json"));
+        assert_eq!(
+            config.local.model_path,
+            PathBuf::from("/custom/path/model.onnx")
+        );
+        assert_eq!(
+            config.local.tokenizer_path,
+            PathBuf::from("/custom/path/tokenizer.json")
+        );
         assert_eq!(config.local.dimensions, 512);
     }
 

@@ -13,16 +13,13 @@ impl<'a> KnowledgeService<'a> {
 
     pub fn create(&mut self, name: &str, content: Content) -> Result<Knowledge> {
         // Source row + FTS doc are written in one store transaction.
-        self.shelf.store.insert_knowledge(name, &content)?;
+        let version = self.shelf.backend.insert_knowledge(name, &content)?;
 
         // Generate embedding and store the BLOB (best-effort: skip if model unavailable)
-        if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
-            self.shelf.store.upsert_knowledge_embedding(name, &vector)?;
-            self.shelf.vector_upsert("knowledge", name, &vector)?;
-        }
+        self.shelf.embed_saved("knowledge", name, &content, version);
 
         // Read back to get the generated timestamp
-        let knowledge = self.shelf.store.get_knowledge(name)?.ok_or_else(|| {
+        let knowledge = self.shelf.backend.get_knowledge(name)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
                 kind: "knowledge".to_string(),
                 key: name.to_string(),
@@ -32,18 +29,15 @@ impl<'a> KnowledgeService<'a> {
     }
 
     pub fn get(&self, name: &str) -> Result<Option<Knowledge>> {
-        self.shelf.store.get_knowledge(name)
+        self.shelf.backend.get_knowledge(name)
     }
 
     pub fn update(&mut self, name: &str, content: Content) -> Result<Knowledge> {
-        self.shelf.store.update_knowledge(name, &content)?;
+        let version = self.shelf.backend.update_knowledge(name, &content)?;
 
-        if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(name))? {
-            self.shelf.store.upsert_knowledge_embedding(name, &vector)?;
-            self.shelf.vector_upsert("knowledge", name, &vector)?;
-        }
+        self.shelf.embed_saved("knowledge", name, &content, version);
 
-        let knowledge = self.shelf.store.get_knowledge(name)?.ok_or_else(|| {
+        let knowledge = self.shelf.backend.get_knowledge(name)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
                 kind: "knowledge".to_string(),
                 key: name.to_string(),
@@ -53,8 +47,6 @@ impl<'a> KnowledgeService<'a> {
     }
 
     pub fn delete(&mut self, name: &str) -> Result<()> {
-        // Drop the ANN vector BEFORE the doc row disappears (doc_id lookup).
-        self.shelf.vector_remove("knowledge", name)?;
-        self.shelf.store.delete_knowledge(name)
+        self.shelf.backend.delete_knowledge(name)
     }
 }

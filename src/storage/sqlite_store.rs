@@ -10,13 +10,13 @@
 use std::path::Path;
 
 use chrono::NaiveDateTime;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{HypatiaError, Result, StorageError};
-use crate::storage::json_index::{json_contains_str, rebuild_all, replace_postings_in};
 use crate::model::{Content, Knowledge, SearchOpts, Statement, StatementKey};
+use crate::storage::json_index::{json_contains_str, rebuild_all, replace_postings_in};
 
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 
 const META_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -102,14 +102,7 @@ END;
 /// BM25 column weights: fts_key=10, fts_data=1, fts_tags=5, fts_synonyms=3
 const BM25_WEIGHTS: &str = "bm25(docs_fts, 10.0, 1.0, 5.0, 3.0)";
 
-#[derive(Debug, Clone)]
-pub struct FtsResult {
-    pub id: i64,
-    pub catalog: String,
-    pub key: String,
-    pub content: String,
-    pub rank: f64,
-}
+pub use super::FtsResult;
 
 /// Structured document for FTS indexing with multi-column support.
 pub struct FtsDoc {
@@ -129,7 +122,11 @@ pub struct SqliteStore {
 pub fn vector_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter()
         .flat_map(|f| {
-            let f = if f.is_nan() || f.is_infinite() { 0.0f32 } else { *f };
+            let f = if f.is_nan() || f.is_infinite() {
+                0.0f32
+            } else {
+                *f
+            };
             f.to_le_bytes()
         })
         .collect()
@@ -178,11 +175,9 @@ fn json_to_sql(v: &serde_json::Value) -> rusqlite::types::Value {
 
 fn parse_timestamp(s: &str) -> Result<NaiveDateTime> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").map_err(|e| {
-        HypatiaError::Storage(StorageError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(e),
-        )))
+        HypatiaError::Storage(StorageError::Sqlite(
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)),
+        ))
     })
 }
 
@@ -200,7 +195,11 @@ fn row_to_knowledge(row: &rusqlite::Row) -> rusqlite::Result<Knowledge> {
     let created_at = parse_timestamp(&created_at).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
-    Ok(Knowledge { name, content, created_at })
+    Ok(Knowledge {
+        name,
+        content,
+        created_at,
+    })
 }
 
 fn row_to_statement(row: &rusqlite::Row) -> rusqlite::Result<Statement> {
@@ -222,12 +221,24 @@ fn row_to_statement(row: &rusqlite::Row) -> rusqlite::Result<Statement> {
     })?;
     let _ = triple; // PK; key derived from columns
     Ok(Statement {
-        key: StatementKey { head, relation, tail },
+        key: StatementKey {
+            head,
+            relation,
+            tail,
+        },
         content,
         created_at: parse(created_at)?,
         tr_start: tr_start.map(parse).transpose()?,
         tr_end: tr_end.map(parse).transpose()?,
     })
+}
+
+fn catalog_table(catalog: &str) -> Result<(&'static str, &'static str)> {
+    match catalog {
+        "knowledge" => Ok(("knowledge", "name")),
+        "statement" => Ok(("statement", "triple")),
+        _ => Err(HypatiaError::Validation("unknown catalog".into())),
+    }
 }
 
 impl SqliteStore {
@@ -244,19 +255,14 @@ impl SqliteStore {
     fn register_udfs(&self) -> Result<()> {
         use rusqlite::functions::FunctionFlags;
         self.conn
-            .create_scalar_function(
-                "json_contains",
-                2,
-                FunctionFlags::SQLITE_UTF8,
-                |ctx| {
-                    let lhs: Option<String> = ctx.get(0)?;
-                    let rhs: Option<String> = ctx.get(1)?;
-                    match (lhs, rhs) {
-                        (Some(l), Some(r)) => Ok(json_contains_str(&l, &r)),
-                        _ => Ok(false),
-                    }
-                },
-            )
+            .create_scalar_function("json_contains", 2, FunctionFlags::SQLITE_UTF8, |ctx| {
+                let lhs: Option<String> = ctx.get(0)?;
+                let rhs: Option<String> = ctx.get(1)?;
+                match (lhs, rhs) {
+                    (Some(l), Some(r)) => Ok(json_contains_str(&l, &r)),
+                    _ => Ok(false),
+                }
+            })
             .map_err(StorageError::from)?;
         Ok(())
     }
@@ -288,6 +294,27 @@ impl SqliteStore {
     }
 
     fn init_schema(&self) -> Result<()> {
+        let has_meta: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_meta {
+            let version: Option<String> = self
+                .conn
+                .query_row("SELECT v FROM meta WHERE k='schema_version'", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if version
+                .as_deref()
+                .is_some_and(|v| !matches!(v, "1" | "2" | "3"))
+            {
+                return Err(HypatiaError::Config(
+                    "unsupported SQLite schema version; use a compatible binary".into(),
+                ));
+            }
+        }
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -306,12 +333,55 @@ impl SqliteStore {
                 r.get(0)
             })
             .optional()?;
+        if version
+            .as_deref()
+            .is_some_and(|v| !matches!(v, "1" | "2" | "3"))
+        {
+            return Err(HypatiaError::Config(
+                "unsupported SQLite schema version; use a compatible binary".into(),
+            ));
+        }
         if version.is_none() {
             self.conn.execute(
                 "INSERT INTO meta(k, v) VALUES('schema_version', ?1)",
                 params![SCHEMA_VERSION],
             )?;
         }
+        // A shelf-wide clock prevents stale writeback even after delete/recreate.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO meta(k,v) VALUES('content_clock','0')",
+            [],
+        )?;
+        for (table, pk) in [("knowledge", "name"), ("statement", "triple")] {
+            let has_version: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='content_version')"), [], |r| r.get(0))?;
+            if !has_version {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN content_version INTEGER NOT NULL DEFAULT 0"
+                ))?;
+            }
+            tx.execute_batch(&format!("
+                CREATE TRIGGER IF NOT EXISTS {table}_version_insert AFTER INSERT ON {table} BEGIN
+                  UPDATE meta SET v=CAST(v AS INTEGER)+1 WHERE k='content_clock';
+                  UPDATE {table} SET content_version=(SELECT CAST(v AS INTEGER) FROM meta WHERE k='content_clock') WHERE {pk}=new.{pk};
+                END;
+                CREATE TRIGGER IF NOT EXISTS {table}_cache_delete AFTER DELETE ON {table} BEGIN
+                  UPDATE meta SET v=CAST(v AS INTEGER)+1 WHERE k='content_clock';
+                END;
+                CREATE TRIGGER IF NOT EXISTS {table}_cache_embedding AFTER UPDATE OF embedding ON {table} BEGIN
+                  UPDATE meta SET v=CAST(v AS INTEGER)+1 WHERE k='content_clock';
+                END;
+                CREATE TRIGGER IF NOT EXISTS {table}_version_update AFTER UPDATE OF content ON {table} BEGIN
+                  UPDATE meta SET v=CAST(v AS INTEGER)+1 WHERE k='content_clock';
+                  UPDATE {table} SET embedding=NULL, content_version=(SELECT CAST(v AS INTEGER) FROM meta WHERE k='content_clock') WHERE {pk}=new.{pk};
+                END;
+            "))?;
+        }
+        tx.execute(
+            "UPDATE meta SET v=?1 WHERE k='schema_version'",
+            [SCHEMA_VERSION],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -335,13 +405,27 @@ impl SqliteStore {
             tx.execute(
                 "UPDATE docs SET fts_key=?1, fts_data=?2, fts_tags=?3, fts_synonyms=?4
                  WHERE catalog=?5 AND key=?6",
-                params![doc.fts_key, doc.fts_data, doc.fts_tags, doc.fts_synonyms, catalog, key],
+                params![
+                    doc.fts_key,
+                    doc.fts_data,
+                    doc.fts_tags,
+                    doc.fts_synonyms,
+                    catalog,
+                    key
+                ],
             )?;
         } else {
             tx.execute(
                 "INSERT INTO docs(catalog, key, fts_key, fts_data, fts_tags, fts_synonyms)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![catalog, key, doc.fts_key, doc.fts_data, doc.fts_tags, doc.fts_synonyms],
+                params![
+                    catalog,
+                    key,
+                    doc.fts_key,
+                    doc.fts_data,
+                    doc.fts_tags,
+                    doc.fts_synonyms
+                ],
             )?;
         }
         let id: i64 = tx
@@ -361,7 +445,7 @@ impl SqliteStore {
 
     // ── Knowledge CRUD ───────────────────────────────────────────────
 
-    pub fn insert_knowledge(&self, name: &str, content: &Content) -> Result<()> {
+    pub fn insert_knowledge(&self, name: &str, content: &Content) -> Result<i64> {
         let json = content.to_json_string();
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -371,8 +455,13 @@ impl SqliteStore {
         .map_err(StorageError::from)?;
         let doc_id = self.docs_upsert_in(&tx, "knowledge", name, &fts_doc_for(content, name))?;
         replace_postings_in(&tx, doc_id, &json)?;
+        let version: i64 = tx.query_row(
+            "SELECT content_version FROM knowledge WHERE name=?1",
+            [&name],
+            |r| r.get(0),
+        )?;
         tx.commit()?;
-        Ok(())
+        Ok(version)
     }
 
     pub fn get_knowledge(&self, name: &str) -> Result<Option<Knowledge>> {
@@ -387,7 +476,7 @@ impl SqliteStore {
         Ok(result)
     }
 
-    pub fn update_knowledge(&self, name: &str, content: &Content) -> Result<()> {
+    pub fn update_knowledge(&self, name: &str, content: &Content) -> Result<i64> {
         let json = content.to_json_string();
         let tx = self.conn.unchecked_transaction()?;
         let rows = tx
@@ -404,8 +493,13 @@ impl SqliteStore {
         }
         let doc_id = self.docs_upsert_in(&tx, "knowledge", name, &fts_doc_for(content, name))?;
         replace_postings_in(&tx, doc_id, &json)?;
+        let version: i64 = tx.query_row(
+            "SELECT content_version FROM knowledge WHERE name=?1",
+            [&name],
+            |r| r.get(0),
+        )?;
         tx.commit()?;
-        Ok(())
+        Ok(version)
     }
 
     pub fn delete_knowledge(&self, name: &str) -> Result<()> {
@@ -436,7 +530,10 @@ impl SqliteStore {
         let sql_params: Vec<rusqlite::types::Value> = params.iter().map(json_to_sql).collect();
         let mut stmt = self.conn.prepare(sql).map_err(StorageError::from)?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(sql_params.clone()), row_to_knowledge)
+            .query_map(
+                rusqlite::params_from_iter(sql_params.clone()),
+                row_to_knowledge,
+            )
             .map_err(StorageError::from)?;
         let mut result = Vec::new();
         for row in rows {
@@ -453,7 +550,7 @@ impl SqliteStore {
         content: &Content,
         tr_start: Option<NaiveDateTime>,
         tr_end: Option<NaiveDateTime>,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let json = content.to_json_string();
         let triple = key.to_csv_key();
         let tr_start_str = tr_start.as_ref().map(format_timestamp);
@@ -462,13 +559,27 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO statement (triple, head, relation, tail, content, tr_start, tr_end)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![triple, key.head, key.relation, key.tail, json, tr_start_str, tr_end_str],
+            params![
+                triple,
+                key.head,
+                key.relation,
+                key.tail,
+                json,
+                tr_start_str,
+                tr_end_str
+            ],
         )
         .map_err(StorageError::from)?;
-        let doc_id = self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
+        let doc_id =
+            self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
         replace_postings_in(&tx, doc_id, &json)?;
+        let version: i64 = tx.query_row(
+            "SELECT content_version FROM statement WHERE triple=?1",
+            [&triple],
+            |r| r.get(0),
+        )?;
         tx.commit()?;
-        Ok(())
+        Ok(version)
     }
 
     pub fn get_statement(&self, key: &StatementKey) -> Result<Option<Statement>> {
@@ -491,7 +602,7 @@ impl SqliteStore {
         content: &Content,
         tr_start: Option<NaiveDateTime>,
         tr_end: Option<NaiveDateTime>,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let json = content.to_json_string();
         let triple = key.to_csv_key();
         let tr_start_str = tr_start.as_ref().map(format_timestamp);
@@ -509,10 +620,16 @@ impl SqliteStore {
                 key: triple,
             });
         }
-        let doc_id = self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
+        let doc_id =
+            self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
         replace_postings_in(&tx, doc_id, &json)?;
+        let version: i64 = tx.query_row(
+            "SELECT content_version FROM statement WHERE triple=?1",
+            [&triple],
+            |r| r.get(0),
+        )?;
         tx.commit()?;
-        Ok(())
+        Ok(version)
     }
 
     pub fn delete_statement(&self, key: &StatementKey) -> Result<()> {
@@ -555,7 +672,10 @@ impl SqliteStore {
         let sql_params: Vec<rusqlite::types::Value> = params.iter().map(json_to_sql).collect();
         let mut stmt = self.conn.prepare(sql).map_err(StorageError::from)?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(sql_params.clone()), row_to_statement)
+            .query_map(
+                rusqlite::params_from_iter(sql_params.clone()),
+                row_to_statement,
+            )
             .map_err(StorageError::from)?;
         let mut result = Vec::new();
         for row in rows {
@@ -613,17 +733,219 @@ impl SqliteStore {
              FROM hop GROUP BY triple ORDER BY MIN(depth), created_at DESC"
         );
 
-        let sql_params: Vec<rusqlite::types::Value> =
-            sql_params.iter().map(json_to_sql).collect();
+        let sql_params: Vec<rusqlite::types::Value> = sql_params.iter().map(json_to_sql).collect();
         let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(sql_params.clone()), row_to_statement)
+            .query_map(
+                rusqlite::params_from_iter(sql_params.clone()),
+                row_to_statement,
+            )
             .map_err(StorageError::from)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row.map_err(StorageError::from)?);
         }
         Ok(result)
+    }
+
+    pub fn embedding_version(&self, catalog: &str, key: &str) -> Result<Option<i64>> {
+        let (table, pk) = catalog_table(catalog)?;
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT content_version FROM {table} WHERE {pk}=?1"),
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn install_embedding(
+        &self,
+        catalog: &str,
+        key: &str,
+        version: i64,
+        vector: &[f32],
+    ) -> Result<bool> {
+        let (table, pk) = catalog_table(catalog)?;
+        Ok(self.conn.execute(
+            &format!("UPDATE {table} SET embedding=?1 WHERE {pk}=?2 AND content_version=?3"),
+            params![vector_to_blob(vector), key, version],
+        )? == 1)
+    }
+
+    pub fn missing_embeddings(
+        &self,
+        catalog: &str,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<(String, Content, i64)>> {
+        let (table, pk) = catalog_table(catalog)?;
+        let mut stmt = self.conn.prepare(&format!("SELECT {pk},content,content_version FROM {table} WHERE embedding IS NULL AND (?1 IS NULL OR {pk}>?1) ORDER BY {pk} LIMIT ?2"))?;
+        let rows = stmt.query_map(params![after, limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (key, c, v) = r?;
+            Ok((key, Content::from_json_str(&c)?, v))
+        })
+        .collect()
+    }
+
+    pub fn reset_embeddings(
+        &self,
+        metadata: &crate::storage::transfer::EmbeddingMetadata,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Updating content to itself bumps versions, invalidating pre-reset jobs too.
+        tx.execute("UPDATE knowledge SET content=content,embedding=NULL", [])?;
+        tx.execute("UPDATE statement SET content=content,embedding=NULL", [])?;
+        tx.execute("INSERT INTO meta(k,v) VALUES('embedding_metadata',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[serde_json::to_string(metadata)?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn embedding_metadata(
+        &self,
+    ) -> Result<Option<crate::storage::transfer::EmbeddingMetadata>> {
+        let value: Option<String> = self
+            .conn
+            .query_row("SELECT v FROM meta WHERE k='embedding_metadata'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        value
+            .map(|s| serde_json::from_str(&s).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn configure_embedding(
+        &self,
+        metadata: &crate::storage::transfer::EmbeddingMetadata,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Acquire the write lock before inspecting metadata to serialize first-open.
+        tx.execute("UPDATE meta SET v=v WHERE k='content_clock'", [])?;
+        if let Some(existing) = self.embedding_metadata()? {
+            if existing != *metadata {
+                return Err(HypatiaError::Config("embedding model or dimensions changed; import a --reembed snapshot into an empty shelf".into()));
+            }
+        } else if self.embedding_row_count("knowledge")? + self.embedding_row_count("statement")?
+            == 0
+        {
+            self.conn.execute(
+                "INSERT INTO meta(k,v) VALUES('embedding_metadata',?1)",
+                [serde_json::to_string(metadata)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<crate::storage::transfer::Snapshot> {
+        use crate::storage::transfer::*;
+        let tx = self.conn.unchecked_transaction()?;
+        let embedding = self.embedding_metadata()?;
+        let knowledge = self.query_knowledge(
+            "SELECT name,content,created_at FROM knowledge ORDER BY name",
+            vec![],
+        )?;
+        let statements = self.query_statements("SELECT triple,head,relation,tail,content,created_at,tr_start,tr_end FROM statement ORDER BY triple", vec![])?;
+        let vector = |table: &str, pk: &str, key: &str| -> Result<Option<Vec<f32>>> {
+            if embedding.is_none() {
+                return Ok(None);
+            }
+            let blob: Option<Vec<u8>> = tx.query_row(
+                &format!("SELECT embedding FROM {table} WHERE {pk}=?1"),
+                [key],
+                |r| r.get(0),
+            )?;
+            Ok(blob.map(|b| blob_to_vector(&b)))
+        };
+        let knowledge = knowledge
+            .into_iter()
+            .map(|k| {
+                Ok(KnowledgeRecord {
+                    embedding: vector("knowledge", "name", &k.name)?,
+                    knowledge: k,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let statements = statements
+            .into_iter()
+            .map(|s| {
+                Ok(StatementRecord {
+                    embedding: vector("statement", "triple", &s.key.to_csv_key())?,
+                    statement: s,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(Snapshot {
+            format_version: 1,
+            embedding,
+            knowledge,
+            statements,
+        })
+    }
+
+    pub fn import_snapshot(&self, snapshot: &crate::storage::transfer::Snapshot) -> Result<()> {
+        snapshot.validate()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let count: i64 = tx.query_row(
+            "SELECT (SELECT COUNT(*) FROM knowledge)+(SELECT COUNT(*) FROM statement)",
+            [],
+            |r| r.get(0),
+        )?;
+        if count != 0 {
+            return Err(HypatiaError::Validation(
+                "import requires an empty target shelf".into(),
+            ));
+        }
+        if let Some(meta) = &snapshot.embedding {
+            if self.embedding_metadata()?.as_ref() != Some(meta) {
+                return Err(HypatiaError::Config(
+                    "snapshot embedding metadata differs from target; use --reembed".into(),
+                ));
+            }
+        }
+        for r in &snapshot.knowledge {
+            let k = &r.knowledge;
+            let json = k.content.to_json_string();
+            tx.execute(
+                "INSERT INTO knowledge(name,content,created_at,embedding) VALUES(?1,?2,?3,?4)",
+                params![
+                    k.name,
+                    json,
+                    format_timestamp(&k.created_at),
+                    r.embedding.as_ref().map(|v| vector_to_blob(v))
+                ],
+            )?;
+            let id =
+                self.docs_upsert_in(&tx, "knowledge", &k.name, &fts_doc_for(&k.content, &k.name))?;
+            replace_postings_in(&tx, id, &json)?;
+        }
+        for r in &snapshot.statements {
+            let s = &r.statement;
+            let triple = s.key.to_csv_key();
+            let json = s.content.to_json_string();
+            tx.execute("INSERT INTO statement(triple,head,relation,tail,content,created_at,tr_start,tr_end,embedding) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![triple,s.key.head,s.key.relation,s.key.tail,json,format_timestamp(&s.created_at),s.tr_start.as_ref().map(format_timestamp),s.tr_end.as_ref().map(format_timestamp),r.embedding.as_ref().map(|v|vector_to_blob(v))])?;
+            let id =
+                self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(&s.content, &triple))?;
+            replace_postings_in(&tx, id, &json)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Online SQLite backup includes committed WAL contents in one consistent database.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        self.conn.backup("main", path, None)?;
+        Ok(())
     }
 
     // ── Embeddings (BLOB = source of truth) ──────────────────────────
@@ -691,9 +1013,7 @@ impl SqliteStore {
     }
 
     pub fn knowledge_without_embeddings(&self) -> Result<Vec<(String, String)>> {
-        self.entries_with_embeddings(
-            "SELECT name, content FROM knowledge WHERE embedding IS NULL",
-        )
+        self.entries_with_embeddings("SELECT name, content FROM knowledge WHERE embedding IS NULL")
     }
 
     pub fn statements_without_embeddings(&self) -> Result<Vec<(String, String)>> {
@@ -710,7 +1030,10 @@ impl SqliteStore {
             "statement" => "SELECT COUNT(*) FROM statement WHERE embedding IS NOT NULL",
             _ => "SELECT COUNT(*) FROM knowledge WHERE embedding IS NOT NULL",
         };
-        let n: i64 = self.conn.query_row(sql, [], |r| r.get(0)).map_err(StorageError::from)?;
+        let n: i64 = self
+            .conn
+            .query_row(sql, [], |r| r.get(0))
+            .map_err(StorageError::from)?;
         Ok(n as usize)
     }
 
@@ -765,7 +1088,9 @@ impl SqliteStore {
                      JOIN docs d ON d.catalog='statement' AND d.key = s.triple \
                      WHERE d.id IN ({placeholders})"
                 ),
-                ids.iter().map(|i| json_to_sql(&serde_json::Value::from(*i))).collect(),
+                ids.iter()
+                    .map(|i| json_to_sql(&serde_json::Value::from(*i)))
+                    .collect(),
             ),
             _ => (
                 format!(
@@ -773,7 +1098,9 @@ impl SqliteStore {
                      JOIN docs d ON d.catalog='knowledge' AND d.key = k.name \
                      WHERE d.id IN ({placeholders})"
                 ),
-                ids.iter().map(|i| json_to_sql(&serde_json::Value::from(*i))).collect(),
+                ids.iter()
+                    .map(|i| json_to_sql(&serde_json::Value::from(*i)))
+                    .collect(),
             ),
         };
         let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
@@ -859,7 +1186,11 @@ impl SqliteStore {
              LEFT JOIN statement s ON d.catalog = 'statement' AND s.triple = d.key \
              WHERE docs_fts MATCH ?1 {} \
              ORDER BY rank LIMIT ?2 OFFSET ?3",
-            if catalog_filter.is_some() { "AND d.catalog = ?4" } else { "" }
+            if catalog_filter.is_some() {
+                "AND d.catalog = ?4"
+            } else {
+                ""
+            }
         );
         let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
         let map_row = |row: &rusqlite::Row| -> rusqlite::Result<FtsResult> {
@@ -872,9 +1203,12 @@ impl SqliteStore {
             })
         };
         let rows: Vec<rusqlite::Result<FtsResult>> = if let Some(cat) = catalog_filter {
-            stmt.query_map(rusqlite::params![query, opts.limit, opts.offset, cat], map_row)
-                .map_err(StorageError::from)?
-                .collect()
+            stmt.query_map(
+                rusqlite::params![query, opts.limit, opts.offset, cat],
+                map_row,
+            )
+            .map_err(StorageError::from)?
+            .collect()
         } else {
             stmt.query_map(rusqlite::params![query, opts.limit, opts.offset], map_row)
                 .map_err(StorageError::from)?
@@ -907,9 +1241,33 @@ pub fn sanitize_fts_query(query: &str) -> String {
         .map(|c| {
             matches!(
                 c,
-                ':' | '"' | '\'' | '*' | '^' | '+' | '-' | '(' | ')' | '.' | '?'
-                | '!' | ',' | '/' | '`' | '{' | '}' | '[' | ']' | '~' | '@'
-                | '#' | '%' | ';' | '&' | '|' | '<' | '>'
+                ':' | '"'
+                    | '\''
+                    | '*'
+                    | '^'
+                    | '+'
+                    | '-'
+                    | '('
+                    | ')'
+                    | '.'
+                    | '?'
+                    | '!'
+                    | ','
+                    | '/'
+                    | '`'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '~'
+                    | '@'
+                    | '#'
+                    | '%'
+                    | ';'
+                    | '&'
+                    | '|'
+                    | '<'
+                    | '>'
             )
             .then_some(' ')
             .unwrap_or(c)
@@ -1070,7 +1428,10 @@ mod tests {
         {
             let store = SqliteStore::open(&db_path).unwrap();
             store
-                .insert_knowledge("rust", &Content::new("Rust is a systems programming language"))
+                .insert_knowledge(
+                    "rust",
+                    &Content::new("Rust is a systems programming language"),
+                )
                 .unwrap();
         }
         {
@@ -1111,7 +1472,9 @@ mod tests {
         store
             .insert_knowledge("auth", &Content::new("user authenticating via OAuth2"))
             .unwrap();
-        let results = store.search("authentication", &SearchOpts::default()).unwrap();
+        let results = store
+            .search("authentication", &SearchOpts::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "auth");
     }
@@ -1141,7 +1504,11 @@ mod tests {
         let rows = store
             .query_knowledge(
                 "SELECT name, content, created_at FROM knowledge WHERE name = ? LIMIT ? OFFSET ?",
-                vec![serde_json::json!("k1"), serde_json::json!(100), serde_json::json!(0)],
+                vec![
+                    serde_json::json!("k1"),
+                    serde_json::json!(100),
+                    serde_json::json!(0),
+                ],
             )
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -1161,7 +1528,9 @@ mod tests {
         let vector_a = vec![1.0f32; 64];
         let vector_b = vec![0.0f32; 64];
         store.upsert_knowledge_embedding("rust", &vector_a).unwrap();
-        store.upsert_knowledge_embedding("python", &vector_b).unwrap();
+        store
+            .upsert_knowledge_embedding("python", &vector_b)
+            .unwrap();
 
         let results = store.vector_search_knowledge(&vector_a, 10).unwrap();
         assert_eq!(results.len(), 2);
@@ -1171,11 +1540,17 @@ mod tests {
     #[test]
     fn vector_search_excludes_null_embeddings() {
         let (_dir, store) = setup();
-        store.insert_knowledge("with_vec", &Content::new("data")).unwrap();
-        store.insert_knowledge("no_vec", &Content::new("data")).unwrap();
+        store
+            .insert_knowledge("with_vec", &Content::new("data"))
+            .unwrap();
+        store
+            .insert_knowledge("no_vec", &Content::new("data"))
+            .unwrap();
 
         let vector = vec![0.5f32; 32];
-        store.upsert_knowledge_embedding("with_vec", &vector).unwrap();
+        store
+            .upsert_knowledge_embedding("with_vec", &vector)
+            .unwrap();
 
         let results = store.vector_search_knowledge(&vector, 10).unwrap();
         assert_eq!(results.len(), 1);
@@ -1185,11 +1560,17 @@ mod tests {
     #[test]
     fn without_embeddings_lists_only_missing() {
         let (_dir, store) = setup();
-        store.insert_knowledge("has_vec", &Content::new("data")).unwrap();
-        store.insert_knowledge("no_vec", &Content::new("data")).unwrap();
+        store
+            .insert_knowledge("has_vec", &Content::new("data"))
+            .unwrap();
+        store
+            .insert_knowledge("no_vec", &Content::new("data"))
+            .unwrap();
 
         let vector = vec![0.5f32; 32];
-        store.upsert_knowledge_embedding("has_vec", &vector).unwrap();
+        store
+            .upsert_knowledge_embedding("has_vec", &vector)
+            .unwrap();
 
         let missing = store.knowledge_without_embeddings().unwrap();
         assert_eq!(missing.len(), 1);
@@ -1212,10 +1593,20 @@ mod tests {
     fn khop_1hop_specific_relation() {
         let (_dir, store) = setup();
         store
-            .insert_statement(&StatementKey::new("Alice", "knows", "Bob"), &Content::new("a->b"), None, None)
+            .insert_statement(
+                &StatementKey::new("Alice", "knows", "Bob"),
+                &Content::new("a->b"),
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_statement(&StatementKey::new("Bob", "knows", "Carol"), &Content::new("b->c"), None, None)
+            .insert_statement(
+                &StatementKey::new("Bob", "knows", "Carol"),
+                &Content::new("b->c"),
+                None,
+                None,
+            )
             .unwrap();
 
         let results = store.query_khop("Alice", Some("knows"), 1).unwrap();
@@ -1227,13 +1618,28 @@ mod tests {
     fn khop_2hop_specific_relation() {
         let (_dir, store) = setup();
         store
-            .insert_statement(&StatementKey::new("Alice", "knows", "Bob"), &Content::new("a->b"), None, None)
+            .insert_statement(
+                &StatementKey::new("Alice", "knows", "Bob"),
+                &Content::new("a->b"),
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_statement(&StatementKey::new("Bob", "knows", "Carol"), &Content::new("b->c"), None, None)
+            .insert_statement(
+                &StatementKey::new("Bob", "knows", "Carol"),
+                &Content::new("b->c"),
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_statement(&StatementKey::new("Bob", "works_with", "Dave"), &Content::new("b->d"), None, None)
+            .insert_statement(
+                &StatementKey::new("Bob", "works_with", "Dave"),
+                &Content::new("b->d"),
+                None,
+                None,
+            )
             .unwrap();
 
         let results = store.query_khop("Alice", Some("knows"), 2).unwrap();
@@ -1247,13 +1653,28 @@ mod tests {
     fn khop_wildcard_relation() {
         let (_dir, store) = setup();
         store
-            .insert_statement(&StatementKey::new("Alice", "knows", "Bob"), &Content::new("a->b"), None, None)
+            .insert_statement(
+                &StatementKey::new("Alice", "knows", "Bob"),
+                &Content::new("a->b"),
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_statement(&StatementKey::new("Bob", "knows", "Carol"), &Content::new("b->c"), None, None)
+            .insert_statement(
+                &StatementKey::new("Bob", "knows", "Carol"),
+                &Content::new("b->c"),
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_statement(&StatementKey::new("Bob", "works_with", "Dave"), &Content::new("b->d"), None, None)
+            .insert_statement(
+                &StatementKey::new("Bob", "works_with", "Dave"),
+                &Content::new("b->d"),
+                None,
+                None,
+            )
             .unwrap();
 
         let results = store.query_khop("Alice", None, 2).unwrap();
@@ -1268,10 +1689,20 @@ mod tests {
     fn khop_cycle() {
         let (_dir, store) = setup();
         store
-            .insert_statement(&StatementKey::new("A", "knows", "B"), &Content::new("a->b"), None, None)
+            .insert_statement(
+                &StatementKey::new("A", "knows", "B"),
+                &Content::new("a->b"),
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_statement(&StatementKey::new("B", "knows", "A"), &Content::new("b->a"), None, None)
+            .insert_statement(
+                &StatementKey::new("B", "knows", "A"),
+                &Content::new("b->a"),
+                None,
+                None,
+            )
             .unwrap();
 
         let results = store.query_khop("A", Some("knows"), 5).unwrap();
@@ -1300,8 +1731,8 @@ mod tests {
             .unwrap();
 
         use crate::engine::ast::AstNode;
+        use crate::engine::operators::{OpContext, evaluate_operator};
         use crate::model::QueryTarget;
-        use crate::engine::operators::{evaluate_operator, OpContext};
         let ctx = OpContext::for_target(QueryTarget::Knowledge);
         let mut map = serde_json::Map::new();
         map.insert("tags".to_string(), serde_json::json!(["refactor"]));
@@ -1319,9 +1750,7 @@ mod tests {
             }
             other => panic!("expected SqlCondition, got {other:?}"),
         };
-        let sql = format!(
-            "SELECT name, content, created_at FROM knowledge WHERE {fragment}"
-        );
+        let sql = format!("SELECT name, content, created_at FROM knowledge WHERE {fragment}");
         let rows = store.query_knowledge(&sql, params).unwrap();
         let names: Vec<String> = rows.into_iter().map(|k| k.name).collect();
         assert_eq!(names, vec!["plan".to_string()], "fragment: {fragment}");
@@ -1332,10 +1761,12 @@ mod tests {
         assert_eq!(rows.len(), 1, "recall failed");
 
         // Split: recheck only
-        let recheck_only =
-            "SELECT name, content, created_at FROM knowledge WHERE name = 'plan' AND json_contains(content, ?)";
+        let recheck_only = "SELECT name, content, created_at FROM knowledge WHERE name = 'plan' AND json_contains(content, ?)";
         let rows = store
-            .query_knowledge(recheck_only, vec![serde_json::json!({"tags": ["refactor"]})])
+            .query_knowledge(
+                recheck_only,
+                vec![serde_json::json!({"tags": ["refactor"]})],
+            )
             .unwrap();
         let recheck_names: Vec<String> = rows.into_iter().map(|k| k.name).collect();
         assert_eq!(recheck_names, vec!["plan".to_string()], "recheck failed");

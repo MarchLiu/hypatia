@@ -13,6 +13,7 @@
 #   ./scripts/build.sh --backend cross <target> # use cross instead of zigbuild
 #   ./scripts/build.sh --debug <target>         # debug build
 #   ./scripts/build.sh --no-strip <target>      # skip strip step
+#   ./scripts/build.sh --features postgres-backend # include PostgreSQL support
 #
 # Prerequisites:
 #   - rustup + cargo
@@ -75,8 +76,13 @@ NATIVE_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 # ─── Arg parsing ───
 
 TARGETS=()
+FEATURE_FLAGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --features)
+            FEATURE_FLAGS=(--features "${2:?--features requires a value}")
+            shift 2
+            ;;
         --backend)
             BACKEND="$2"
             shift 2
@@ -149,7 +155,7 @@ build_native() {
         profile_flag=(--release)
     fi
 
-    cargo build --target "$target" "${profile_flag[@]}" -p hypatia
+    cargo build --target "$target" "${profile_flag[@]}" ${FEATURE_FLAGS[@]+"${FEATURE_FLAGS[@]}"} -p hypatia
 
     post_build "$target"
 }
@@ -166,7 +172,7 @@ build_zigbuild() {
         profile_flag=(--release)
     fi
 
-    cargo zigbuild --target "$target" "${profile_flag[@]}" -p hypatia
+    cargo zigbuild --target "$target" "${profile_flag[@]}" ${FEATURE_FLAGS[@]+"${FEATURE_FLAGS[@]}"} -p hypatia
 
     post_build "$target"
 }
@@ -183,7 +189,7 @@ build_cross() {
         profile_flag=(--release)
     fi
 
-    cross build --target "$target" "${profile_flag[@]}" -p hypatia
+    cross build --target "$target" "${profile_flag[@]}" ${FEATURE_FLAGS[@]+"${FEATURE_FLAGS[@]}"} -p hypatia
 
     post_build "$target"
 }

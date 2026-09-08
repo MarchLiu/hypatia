@@ -1,16 +1,28 @@
 use serde_json::{Map, Value};
 
-use crate::error::{HypatiaError, Result};
 use super::ast::AstNode;
+use crate::error::{HypatiaError, Result};
 
 /// Recognized Hypatia JSE operators.
 const OPERATORS: &[&str] = &[
-    "$knowledge", "$statement",
-    "$and", "$or", "$not",
-    "$search", "$similar", "$k-hop", "$not-summaried",
-    "$gte", "$lte", "$gt", "$lt",
-    "$eq", "$ne",
-    "$like", "$contains", "$content",
+    "$knowledge",
+    "$statement",
+    "$and",
+    "$or",
+    "$not",
+    "$search",
+    "$similar",
+    "$k-hop",
+    "$not-summaried",
+    "$gte",
+    "$lte",
+    "$gt",
+    "$lt",
+    "$eq",
+    "$ne",
+    "$like",
+    "$contains",
+    "$content",
     "$quote",
 ];
 
@@ -39,7 +51,10 @@ impl Parser {
                     return Ok(AstNode::Array(Vec::new()));
                 }
                 // Check if first element is an operator string
-                if let Some(Value::String(first)) = arr.first().filter(|v| matches!(v, Value::String(s) if s.starts_with('$'))) {
+                if let Some(Value::String(first)) = arr
+                    .first()
+                    .filter(|v| matches!(v, Value::String(s) if s.starts_with('$')))
+                {
                     let operator = first.clone();
                     if operator == "$quote" {
                         // Quote: parse inner but wrap in Quote node
@@ -63,7 +78,8 @@ impl Parser {
                     });
                 }
                 // Plain array: parse each element
-                let nodes: Vec<AstNode> = arr.iter().map(Self::parse).collect::<Result<Vec<_>>>()?;
+                let nodes: Vec<AstNode> =
+                    arr.iter().map(Self::parse).collect::<Result<Vec<_>>>()?;
                 Ok(AstNode::Array(nodes))
             }
             Value::Object(obj) => {
@@ -103,11 +119,10 @@ impl Parser {
                             metadata,
                         })
                     }
-                    _ => {
-                        Err(HypatiaError::Parse(
-                            format!("object has multiple $ keys: {:?}", dollar_keys),
-                        ))
-                    }
+                    _ => Err(HypatiaError::Parse(format!(
+                        "object has multiple $ keys: {:?}",
+                        dollar_keys
+                    ))),
                 }
             }
         }
@@ -147,7 +162,9 @@ mod tests {
     fn parse_operator_array_form() {
         let ast = Parser::parse(&json!(["$and", true, false])).unwrap();
         match ast {
-            AstNode::Operator { operator, operands, .. } => {
+            AstNode::Operator {
+                operator, operands, ..
+            } => {
                 assert_eq!(operator, "$and");
                 assert_eq!(operands.len(), 2);
             }
@@ -159,7 +176,9 @@ mod tests {
     fn parse_operator_object_form() {
         let ast = Parser::parse(&json!({"$eq": "value"})).unwrap();
         match ast {
-            AstNode::Operator { operator, operands, .. } => {
+            AstNode::Operator {
+                operator, operands, ..
+            } => {
                 assert_eq!(operator, "$eq");
                 assert_eq!(operands.len(), 1);
             }
@@ -171,7 +190,9 @@ mod tests {
     fn parse_operator_with_metadata() {
         let ast = Parser::parse(&json!({"$search": "query text", "catalog": "knowledge"})).unwrap();
         match ast {
-            AstNode::Operator { operator, metadata, .. } => {
+            AstNode::Operator {
+                operator, metadata, ..
+            } => {
                 assert_eq!(operator, "$search");
                 assert_eq!(metadata["catalog"], json!("knowledge"));
             }
@@ -199,9 +220,16 @@ mod tests {
 
     #[test]
     fn parse_nested_operators() {
-        let ast = Parser::parse(&json!(["$and", ["$eq", "name", "Alice"], ["$gt", "age", 18]])).unwrap();
+        let ast = Parser::parse(&json!([
+            "$and",
+            ["$eq", "name", "Alice"],
+            ["$gt", "age", 18]
+        ]))
+        .unwrap();
         match ast {
-            AstNode::Operator { operator, operands, .. } => {
+            AstNode::Operator {
+                operator, operands, ..
+            } => {
                 assert_eq!(operator, "$and");
                 assert_eq!(operands.len(), 2);
                 // Each operand should be an Operator node
@@ -216,7 +244,9 @@ mod tests {
     fn parse_knowledge_operator() {
         let ast = Parser::parse(&json!(["$knowledge", ["$eq", "name", "test"]])).unwrap();
         match ast {
-            AstNode::Operator { operator, operands, .. } => {
+            AstNode::Operator {
+                operator, operands, ..
+            } => {
                 assert_eq!(operator, "$knowledge");
                 assert_eq!(operands.len(), 1);
             }

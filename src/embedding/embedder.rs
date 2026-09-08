@@ -38,16 +38,20 @@ mod model_tests {
 
     #[test]
     fn tokenizer_loads() {
-        if !model_available() { return; }
+        if !model_available() {
+            return;
+        }
         let tokenizer_path = shelf_dir().join("tokenizer.json");
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-            .expect("tokenizer should load");
+        let tokenizer =
+            tokenizers::Tokenizer::from_file(&tokenizer_path).expect("tokenizer should load");
         assert!(tokenizer.get_vocab_size(false) > 0);
     }
 
     #[test]
     fn tokenizer_encodes_multilingual() {
-        if !model_available() { return; }
+        if !model_available() {
+            return;
+        }
         let tokenizer_path = shelf_dir().join("tokenizer.json");
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).unwrap();
 
@@ -60,7 +64,9 @@ mod model_tests {
 
     #[test]
     fn onnx_model_loads_with_ort() {
-        if !model_available() { return; }
+        if !model_available() {
+            return;
+        }
         let model_path = shelf_dir().join("embedding_model.onnx");
         let session = ort::session::Session::builder()
             .expect("builder")
@@ -77,32 +83,46 @@ mod model_tests {
 
     #[test]
     fn embedder_full_pipeline() {
-        if !model_available() { return; }
+        if !model_available() {
+            return;
+        }
         let embedder = make_provider();
         assert!(embedder.is_available());
 
-        let vector = embedder.embed("Hello, world! 你好世界").expect("embed should succeed");
+        let vector = embedder
+            .embed("Hello, world! 你好世界")
+            .expect("embed should succeed");
         assert!(!vector.is_empty(), "embedding should not be empty");
 
         let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.01, "L2 norm should be ~1.0, got {norm}");
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "L2 norm should be ~1.0, got {norm}"
+        );
     }
 
     #[test]
     fn embedder_semantic_similarity() {
-        if !model_available() { return; }
+        if !model_available() {
+            return;
+        }
         let embedder = make_provider();
 
         let v_cat = embedder.embed("The cat sat on the mat").unwrap();
         let v_kitten = embedder.embed("A kitten is sitting on a rug").unwrap();
-        let v_code = embedder.embed("Rust programming language compiler").unwrap();
+        let v_code = embedder
+            .embed("Rust programming language compiler")
+            .unwrap();
 
         let sim_sim = cosine_similarity(&v_cat, &v_kitten);
         let sim_diff = cosine_similarity(&v_cat, &v_code);
 
         eprintln!("cat vs kitten similarity: {sim_sim:.4}");
         eprintln!("cat vs code similarity:   {sim_diff:.4}");
-        assert!(sim_sim > sim_diff, "semantically similar texts should have higher cosine similarity");
+        assert!(
+            sim_sim > sim_diff,
+            "semantically similar texts should have higher cosine similarity"
+        );
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

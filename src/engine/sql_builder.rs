@@ -1,5 +1,13 @@
 use crate::model::QueryTarget;
 
+/// SQL emitted for the selected storage backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SqlDialect {
+    #[default]
+    Sqlite,
+    Postgres,
+}
+
 /// Builds parameterized SQL queries from collected conditions (SQLite dialect).
 pub struct SqlBuilder {
     target: QueryTarget,
@@ -56,7 +64,8 @@ impl SqlBuilder {
 
         // Bound parameters are typed by the store (numbers -> INTEGER), so
         // plain LIMIT/OFFSET placeholders suffice.
-        self.params.push(serde_json::Value::Number(self.limit.into()));
+        self.params
+            .push(serde_json::Value::Number(self.limit.into()));
         self.params
             .push(serde_json::Value::Number(self.offset.into()));
 
@@ -88,7 +97,9 @@ mod tests {
         builder.set_limit(10);
         builder.set_offset(20);
         let (sql, params) = builder.build();
-        assert!(sql.contains("SELECT triple, head, relation, tail, content, created_at, tr_start, tr_end"));
+        assert!(sql.contains(
+            "SELECT triple, head, relation, tail, content, created_at, tr_start, tr_end"
+        ));
         assert!(sql.contains("FROM statement"));
         assert!(sql.contains("LIMIT ? OFFSET ?"));
         assert_eq!(params[0], serde_json::json!(10));

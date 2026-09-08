@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use usearch::{new_index, Index, IndexOptions, MetricKind, ScalarKind};
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 
 use crate::error::{Result, StorageError};
 pub struct VectorFileIndex {
@@ -22,12 +22,9 @@ pub struct VectorFileIndex {
 
 impl VectorFileIndex {
     /// Build a fresh in-memory index and insert every item.
-    pub fn build(
-        path: &Path,
-        dimensions: usize,
-        items: &[(i64, Vec<f32>)],
-    ) -> Result<Self> {
-        let index = new_index(&options(dimensions)).map_err(|e| StorageError::Vector(e.to_string()))?;
+    pub fn build(path: &Path, dimensions: usize, items: &[(i64, Vec<f32>)]) -> Result<Self> {
+        let index =
+            new_index(&options(dimensions)).map_err(|e| StorageError::Vector(e.to_string()))?;
         index
             .reserve(items.len().max(64))
             .map_err(|e| StorageError::Vector(e.to_string()))?;
@@ -50,8 +47,11 @@ impl VectorFileIndex {
     /// Load an existing index file. Errors if absent/corrupt — caller falls
     /// back to `build`.
     pub fn load(path: &Path, dimensions: usize) -> Result<Self> {
-        let index = new_index(&options(dimensions)).map_err(|e| StorageError::Vector(e.to_string()))?;
-        index.load(path.to_str().unwrap_or("")).map_err(|e| StorageError::Vector(e.to_string()))?;
+        let index =
+            new_index(&options(dimensions)).map_err(|e| StorageError::Vector(e.to_string()))?;
+        index
+            .load(path.to_str().unwrap_or(""))
+            .map_err(|e| StorageError::Vector(e.to_string()))?;
         Ok(Self {
             index,
             dimensions,
@@ -106,7 +106,10 @@ impl VectorFileIndex {
             return Ok(Vec::new());
         }
         let k = k.min(self.index.size());
-        let results = self.index.search(query, k).map_err(|e| StorageError::Vector(e.to_string()))?;
+        let results = self
+            .index
+            .search(query, k)
+            .map_err(|e| StorageError::Vector(e.to_string()))?;
         Ok(results
             .keys
             .iter()
@@ -115,14 +118,24 @@ impl VectorFileIndex {
             .collect())
     }
 
-    /// Atomic snapshot: save to `<path>.tmp` then rename into place.
+    /// Atomic snapshot with a uniquely reserved temporary file per writer.
     pub fn save(&mut self) -> Result<()> {
         if !self.dirty {
             return Ok(());
         }
-        let tmp = suffix_path(&self.path, ".tmp");
-        self.index.save(tmp.to_str().unwrap_or("")).map_err(|e| StorageError::Vector(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path)?;
+        let (tmp, file) = reserve_temporary(&self.path)?;
+        drop(file);
+        let result = (|| -> Result<()> {
+            self.index
+                .save(tmp.to_str().unwrap_or(""))
+                .map_err(|e| StorageError::Vector(e.to_string()))?;
+            std::fs::rename(&tmp, &self.path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result?;
         self.dirty = false;
         Ok(())
     }
@@ -130,6 +143,44 @@ impl VectorFileIndex {
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
+}
+
+/// Reserve a distinct sibling temporary file even for simultaneous writers.
+fn reserve_temporary(path: &Path) -> Result<(std::path::PathBuf, std::fs::File)> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    loop {
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp = suffix_path(path, &format!(".{}.{}.{seq}.tmp", std::process::id(), time));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let (tmp, mut file) = reserve_temporary(path)?;
+    let result = (|| -> Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn options(dimensions: usize) -> IndexOptions {
@@ -155,14 +206,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn concurrent_atomic_saves_do_not_share_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.usearch");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut index = VectorFileIndex::build(&path, 2, &[(i, vec![1., 0.])]).unwrap();
+                    barrier.wait();
+                    index.save().unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(VectorFileIndex::load(&path, 2).unwrap().size(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn build_search_save_load_roundtrip() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("knowledge.usearch");
 
-        let items = vec![
-            (1i64, vec![1.0f32, 0.0, 0.0]),
-            (2i64, vec![0.0, 1.0, 0.0]),
-        ];
+        let items = vec![(1i64, vec![1.0f32, 0.0, 0.0]), (2i64, vec![0.0, 1.0, 0.0])];
         let mut index = VectorFileIndex::build(&path, 3, &items).unwrap();
         assert_eq!(index.size(), 2);
 

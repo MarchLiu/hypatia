@@ -1,46 +1,28 @@
+use crate::embedding::{EmbeddingProvider, build_provider};
+use crate::error::{HypatiaError, Result};
+use crate::model::{Content, QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
+use crate::storage::{ShelfRegistry, Storage, backend::ShelfBackend, settings::ShelfSettings};
 use std::collections::HashMap;
 use std::path::Path;
-
-use crate::embedding::{EmbeddingConfig, EmbeddingProvider, build_provider};
-use crate::error::{HypatiaError, Result};
-use crate::model::{QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
-use crate::storage::vector_index::VectorFileIndex;
-use crate::storage::{ShelfRegistry, SqliteStore, Storage, open_or_migrate};
 
 pub struct OpenShelf {
     pub id: ShelfId,
     pub config: ShelfConfig,
-    pub store: SqliteStore,
+    pub settings: ShelfSettings,
+    pub backend: ShelfBackend,
     pub embedder: Box<dyn EmbeddingProvider>,
-    /// ANN indexes per catalog (`vectors/<catalog>.usearch`). Rebuildable
-    /// cache — see plan §4; `None` when the catalog has no embeddings.
-    pub vectors: VectorIndexes,
 }
-
-/// Per-catalog ANN index handles.
-pub struct VectorIndexes {
-    pub dims: usize,
-    pub knowledge: Option<VectorFileIndex>,
-    pub statement: Option<VectorFileIndex>,
-}
-
-impl VectorIndexes {
-    pub fn get(&self, catalog: &str) -> Option<&VectorFileIndex> {
-        match catalog {
-            "statement" => self.statement.as_ref(),
-            _ => self.knowledge.as_ref(),
-        }
-    }
-
-    pub fn get_mut(&mut self, catalog: &str) -> Option<&mut VectorFileIndex> {
-        match catalog {
-            "statement" => self.statement.as_mut(),
-            _ => self.knowledge.as_mut(),
-        }
-    }
-}
-
 impl Storage for OpenShelf {
+    fn sql_dialect(&self) -> crate::engine::SqlDialect {
+        if self.backend.is_local() {
+            crate::engine::SqlDialect::Sqlite
+        } else {
+            crate::engine::SqlDialect::Postgres
+        }
+    }
+    fn sql_schema(&self) -> Option<&str> {
+        self.backend.schema()
+    }
     fn execute_query(
         &self,
         target: QueryTarget,
@@ -48,231 +30,126 @@ impl Storage for OpenShelf {
         params: Vec<serde_json::Value>,
     ) -> Result<QueryResult> {
         let rows = match target {
-            QueryTarget::Knowledge => {
-                let knowledge = self.store.query_knowledge(sql, params)?;
-                knowledge.into_iter().map(|k| knowledge_to_row(&k)).collect()
-            }
-            QueryTarget::Statement => {
-                let statements = self.store.query_statements(sql, params)?;
-                statements.into_iter().map(|s| statement_to_row(&s)).collect()
-            }
+            QueryTarget::Knowledge => self
+                .backend
+                .query_knowledge(sql, params)?
+                .iter()
+                .map(knowledge_to_row)
+                .collect(),
+            QueryTarget::Statement => self
+                .backend
+                .query_statements(sql, params)?
+                .iter()
+                .map(statement_to_row)
+                .collect(),
         };
         Ok(QueryResult::new(rows))
     }
-
     fn execute_search(&self, query: &str, opts: &SearchOpts) -> Result<QueryResult> {
-        let results = self.store.search(query, opts)?;
-        let rows = results
+        let rows = self
+            .backend
+            .search(query, opts)?
             .into_iter()
             .map(|r| {
-                let mut map = serde_json::Map::new();
-                map.insert("id".to_string(), serde_json::Value::Number(r.id.into()));
-                map.insert("catalog".to_string(), serde_json::Value::String(r.catalog));
-                map.insert("key".to_string(), serde_json::Value::String(r.key));
-                map.insert("content".to_string(), serde_json::Value::String(r.content));
-                map.insert(
-                    "rank".to_string(),
-                    serde_json::Value::Number(
-                        serde_json::Number::from_f64(r.rank)
-                            .unwrap_or(serde_json::Number::from(0)),
-                    ),
-                );
-                map
+                let mut m = serde_json::Map::new();
+                m.insert("id".into(), serde_json::json!(r.id));
+                m.insert("catalog".into(), serde_json::json!(r.catalog));
+                m.insert("key".into(), serde_json::json!(r.key));
+                m.insert("content".into(), serde_json::json!(r.content));
+                m.insert("rank".into(), serde_json::json!(r.rank));
+                m
             })
             .collect();
         Ok(QueryResult::new(rows))
     }
-
     fn execute_similar(
         &self,
         query_text: &str,
         opts: &SearchOpts,
         target: QueryTarget,
     ) -> Result<QueryResult> {
-        let query_vector = self.embedder.embed(query_text)?;
-        let catalog = match target {
-            QueryTarget::Knowledge => "knowledge",
-            QueryTarget::Statement => "statement",
-        };
-
-        // ANN path (usearch cache) — preferred when an index is available.
-        if let Some(idx) = self.vectors.get(catalog) {
-            if let Ok(hits) = idx.search(&query_vector, opts.limit as usize) {
-                if !hits.is_empty() {
-                    let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
-                    let dist: HashMap<i64, f64> =
-                        hits.iter().map(|(id, d)| (*id, *d)).collect();
-                    let rows_raw = self.store.rows_by_doc_ids(catalog, &ids)?;
-                    let by_id: std::collections::HashMap<i64, (String, String)> = rows_raw
-                        .into_iter()
-                        .map(|(id, k, c)| (id, (k.clone(), c)))
-                        .collect();
-                    let key_field = match target {
-                        QueryTarget::Knowledge => "name",
-                        QueryTarget::Statement => "triple",
-                    };
-                    let mut rows: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
-                    for (id, distance) in &hits {
-                        let Some((key, content)) = by_id.get(id) else { continue };
-                        let mut map = serde_json::Map::new();
-                        map.insert(key_field.to_string(), serde_json::Value::String(key.clone()));
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
-                            map.insert("content".to_string(), parsed);
-                        }
-                        map.insert(
-                            "distance".to_string(),
-                            serde_json::Value::Number(
-                                serde_json::Number::from_f64(*distance)
-                                    .unwrap_or(serde_json::Number::from(0)),
-                            ),
-                        );
-                        rows.push(map);
-                    }
-                    return Ok(QueryResult::new(rows));
-                }
-            }
-        }
-
-        // Fallback: Rust brute-force kNN over embedding BLOBs.
-        let rows = match target {
-            QueryTarget::Knowledge => {
-                let results = self.store.vector_search_knowledge(&query_vector, opts.limit)?;
-                results.into_iter().map(|(name, content, distance)| {
-                    let mut map = serde_json::Map::new();
-                    map.insert("name".to_string(), serde_json::Value::String(name));
-                    map.insert("content".to_string(), serde_json::Value::String(content));
-                    map.insert(
-                        "distance".to_string(),
-                        serde_json::Value::Number(
-                            serde_json::Number::from_f64(distance)
-                                .unwrap_or(serde_json::Number::from(0)),
-                        ),
-                    );
-                    map
-                }).collect()
-            }
-            QueryTarget::Statement => {
-                let results = self.store.vector_search_statements(&query_vector, opts.limit)?;
-                results.into_iter().map(|(triple, content, distance)| {
-                    let mut map = serde_json::Map::new();
-                    map.insert("triple".to_string(), serde_json::Value::String(triple));
-                    map.insert("content".to_string(), serde_json::Value::String(content));
-                    map.insert(
-                        "distance".to_string(),
-                        serde_json::Value::Number(
-                            serde_json::Number::from_f64(distance)
-                                .unwrap_or(serde_json::Number::from(0)),
-                        ),
-                    );
-                    map
-                }).collect()
-            }
-        };
-        Ok(QueryResult::new(rows))
-    }
-
-    fn execute_khop(
-        &self,
-        head: &str,
-        relation: Option<&str>,
-        depth: i64,
-    ) -> Result<QueryResult> {
-        let statements = self.store.query_khop(head, relation, depth)?;
-        let rows = statements.into_iter().map(|s| statement_to_row(&s)).collect();
-        Ok(QueryResult::new(rows))
-    }
-}
-
-impl OpenShelf {
-    fn open_vector_indexes(&mut self, dims: usize) -> Result<()> {
-        for catalog in ["knowledge", "statement"] {
-            let path = self.config.vectors_path.join(format!("{catalog}.usearch"));
-            let idx = Self::open_vector_index(&self.store, &path, catalog, dims)?;
-            match catalog {
-                "statement" => self.vectors.statement = idx,
-                _ => self.vectors.knowledge = idx,
-            }
-        }
-        Ok(())
-    }
-
-    fn open_vector_index(
-        store: &SqliteStore,
-        path: &Path,
-        catalog: &str,
-        dims: usize,
-    ) -> Result<Option<VectorFileIndex>> {
-        let pairs = store.embedding_pairs(catalog)?;
-        let items: Vec<(i64, Vec<f32>)> = pairs
+        let vector = self.embedder.embed(query_text)?;
+        let rows = self
+            .backend
+            .vector_search(target, &vector, opts.limit)?
             .into_iter()
-            .map(|(id, blob)| (id, crate::storage::sqlite_store::blob_to_vector(&blob)))
-            .filter(|(_, v)| v.len() == dims)
+            .map(|(key, content, distance)| {
+                let mut m = serde_json::Map::new();
+                m.insert(target.key_column().into(), serde_json::json!(key));
+                // One shape for ANN, exact local search, and PostgreSQL.
+                m.insert(
+                    "content".into(),
+                    serde_json::from_str(&content).unwrap_or(serde_json::Value::Null),
+                );
+                m.insert("distance".into(), serde_json::json!(distance));
+                m
+            })
             .collect();
-        if items.is_empty() {
-            return Ok(None);
-        }
-        if VectorFileIndex::exists(path) {
-            if let Ok(idx) = VectorFileIndex::load(path, dims) {
-                // Reconcile against the authoritative BLOB rows.
-                if idx.size() == items.len() {
-                    return Ok(Some(idx));
-                }
-            }
-        }
-        VectorFileIndex::build(path, dims, &items).map(Some)
+        Ok(QueryResult::new(rows))
     }
-
-    /// Push one embedding into the ANN index (doc_id resolved from docs).
-    pub fn vector_upsert(&mut self, catalog: &str, key: &str, vector: &[f32]) -> Result<()> {
-        let Some(idx) = self.vectors.get_mut(catalog) else {
-            return Ok(());
-        };
-        if let Some(doc_id) = self.store.doc_id_by_key(catalog, key)? {
-            idx.upsert(doc_id, vector)?;
-        }
-        Ok(())
-    }
-
-    /// Remove one vector from the ANN index.
-    pub fn vector_remove(&mut self, catalog: &str, key: &str) -> Result<()> {
-        let Some(idx) = self.vectors.get_mut(catalog) else {
-            return Ok(());
-        };
-        if let Some(doc_id) = self.store.doc_id_by_key(catalog, key)? {
-            idx.remove(doc_id)?;
-        }
-        Ok(())
-    }
-
-    /// Persist dirty ANN snapshots (atomic rename).
-    pub fn save_vector_indexes(&mut self) -> Result<()> {
-        for idx in [&mut self.vectors.knowledge, &mut self.vectors.statement] {
-            if let Some(idx) = idx {
-                idx.save()?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Rebuild both ANN indexes from the authoritative embedding BLOBs and save.
-    pub fn rebuild_vector_indexes(&mut self) -> Result<()> {
-        let dims = self.vectors.dims;
-        self.open_vector_indexes(dims)?;
-        self.save_vector_indexes()
+    fn execute_khop(&self, head: &str, relation: Option<&str>, depth: i64) -> Result<QueryResult> {
+        Ok(QueryResult::new(
+            self.backend
+                .query_khop(head, relation, depth)?
+                .iter()
+                .map(statement_to_row)
+                .collect(),
+        ))
     }
 }
-
-impl Drop for OpenShelf {
-    fn drop(&mut self) {
-        // Best-effort snapshot on process exit; a lost snapshot is repaired
-        // by the count-reconcile on next open.
-        let _ = self.save_vector_indexes();
+impl OpenShelf {
+    pub fn open(path: &Path, name: Option<&str>) -> Result<Self> {
+        // Configuration errors must not create a SQLite file or local vector directory.
+        let settings = ShelfSettings::load(path)?;
+        let config = ShelfConfig::from_path(path, name);
+        std::fs::create_dir_all(path)?;
+        let backend = ShelfBackend::open(&config, &settings)?;
+        std::fs::create_dir_all(&config.archives_path)?;
+        let embedder = build_provider(&settings.embedding);
+        Ok(Self {
+            id: config.id.clone(),
+            config,
+            settings,
+            backend,
+            embedder,
+        })
+    }
+    /// Content has committed. Embedding failures leave the row pending for backfill.
+    pub fn embed_saved(&mut self, catalog: &str, key: &str, content: &Content, version: i64) {
+        let outcome = (|| -> Result<bool> {
+            let Some(v) = self.embedder.maybe_embed(&content.embedding_text(key))? else {
+                return Ok(false);
+            };
+            self.backend.install_embedding(catalog, key, version, &v)
+        })();
+        match outcome {
+            Ok(true) => {}
+            Ok(false) => eprintln!(
+                "warning: {catalog}/{key}: content saved; embedding pending (model unavailable or content changed); run backfill"
+            ),
+            Err(e) => eprintln!(
+                "warning: {catalog}/{key}: content saved; embedding pending: {e}; run backfill"
+            ),
+        }
+    }
+    pub fn save_vector_indexes(&mut self) -> Result<()> {
+        self.backend.flush()
+    }
+    pub fn rebuild_vector_indexes(&mut self) -> Result<()> {
+        if self.backend.is_local() {
+            self.backend.rebuild_indexes()
+        } else {
+            self.backend.flush()
+        }
     }
 }
 
 fn knowledge_to_row(k: &crate::model::Knowledge) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
-    map.insert("name".to_string(), serde_json::Value::String(k.name.clone()));
+    map.insert(
+        "name".to_string(),
+        serde_json::Value::String(k.name.clone()),
+    );
     map.insert(
         "content".to_string(),
         serde_json::to_value(&k.content).unwrap_or(serde_json::Value::Null),
@@ -286,10 +163,22 @@ fn knowledge_to_row(k: &crate::model::Knowledge) -> serde_json::Map<String, serd
 
 fn statement_to_row(s: &crate::model::Statement) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
-    map.insert("triple".to_string(), serde_json::Value::String(s.key.to_csv_key()));
-    map.insert("head".to_string(), serde_json::Value::String(s.key.head.clone()));
-    map.insert("relation".to_string(), serde_json::Value::String(s.key.relation.clone()));
-    map.insert("tail".to_string(), serde_json::Value::String(s.key.tail.clone()));
+    map.insert(
+        "triple".to_string(),
+        serde_json::Value::String(s.key.to_csv_key()),
+    );
+    map.insert(
+        "head".to_string(),
+        serde_json::Value::String(s.key.head.clone()),
+    );
+    map.insert(
+        "relation".to_string(),
+        serde_json::Value::String(s.key.relation.clone()),
+    );
+    map.insert(
+        "tail".to_string(),
+        serde_json::Value::String(s.key.tail.clone()),
+    );
     map.insert(
         "content".to_string(),
         serde_json::to_value(&s.content).unwrap_or(serde_json::Value::Null),
@@ -299,10 +188,16 @@ fn statement_to_row(s: &crate::model::Statement) -> serde_json::Map<String, serd
         serde_json::Value::String(s.created_at.to_string()),
     );
     if let Some(ts) = s.tr_start {
-        map.insert("tr_start".to_string(), serde_json::Value::String(ts.to_string()));
+        map.insert(
+            "tr_start".to_string(),
+            serde_json::Value::String(ts.to_string()),
+        );
     }
     if let Some(te) = s.tr_end {
-        map.insert("tr_end".to_string(), serde_json::Value::String(te.to_string()));
+        map.insert(
+            "tr_end".to_string(),
+            serde_json::Value::String(te.to_string()),
+        );
     }
     map
 }
@@ -368,42 +263,14 @@ impl ShelfManager {
 
     /// Internal connect logic without registry persistence.
     fn connect_internal(&mut self, path: &Path, name: Option<&str>) -> Result<String> {
-        // Ensure directory exists
-        std::fs::create_dir_all(path)?;
-
         let config = ShelfConfig::from_path(path, name);
-
-        // Ensure archives/ and vectors/ directories exist
-        std::fs::create_dir_all(&config.archives_path)?;
-        std::fs::create_dir_all(&config.vectors_path)?;
         let shelf_name = config.id.name.clone();
-
-        // Check if already connected
         if self.shelves.contains_key(&shelf_name) {
             return Err(HypatiaError::Shelf(format!(
-                "shelf '{}' is already connected",
-                shelf_name
+                "shelf '{shelf_name}' is already connected"
             )));
         }
-
-        let embedding_config = EmbeddingConfig::from_shelf_dir(path);
-        // Migrates legacy duckdb+sqlite shelves transparently on open.
-        let store = open_or_migrate(&config)?;
-
-        let embedder = build_provider(&embedding_config);
-
-        let mut shelf = OpenShelf {
-            id: config.id.clone(),
-            config: config.clone(),
-            store,
-            embedder,
-            vectors: VectorIndexes {
-                dims: embedding_config.dimensions(),
-                knowledge: None,
-                statement: None,
-            },
-        };
-        shelf.open_vector_indexes(embedding_config.dimensions())?;
+        let shelf = OpenShelf::open(path, name)?;
 
         self.shelves.insert(shelf_name.clone(), shelf);
         Ok(shelf_name)
@@ -445,23 +312,121 @@ impl ShelfManager {
             .get(name)
             .ok_or_else(|| HypatiaError::Shelf(format!("shelf '{name}' is not connected")))?;
 
-        std::fs::create_dir_all(dest)?;
-
-        // Copy the unified SQLite database.
-        std::fs::copy(&shelf.config.sqlite_path, dest.join("hypatia.sqlite"))?;
-
-        // Copy vectors/ (rebuildable cache, but ships with the export).
-        let vectors_dest = dest.join("vectors");
-        if shelf.config.vectors_path.exists() {
-            copy_dir_recursive(&shelf.config.vectors_path, &vectors_dest)?;
+        if dest.exists() && std::fs::read_dir(dest)?.next().is_some() {
+            return Err(HypatiaError::Validation(
+                "export destination must be empty".into(),
+            ));
         }
-
-        // Copy archives/ directory if it exists and has content
-        let archives_dest = dest.join("archives");
+        let parent = dest
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let source = shelf
+            .config
+            .archives_path
+            .parent()
+            .unwrap()
+            .canonicalize()?;
+        if parent.canonicalize()?.starts_with(&source) {
+            return Err(HypatiaError::Validation(
+                "export destination must be outside source shelf".into(),
+            ));
+        }
+        let stage = tempfile::Builder::new()
+            .prefix(".hypatia-export-")
+            .tempdir_in(parent)?;
+        // Both local formats describe exactly the same WAL-safe snapshot.
+        let snapshot = if shelf.backend.is_local() {
+            let db = stage.path().join("hypatia.sqlite");
+            shelf.backend.backup_local(&db)?;
+            super::SqliteStore::open(&db)?.snapshot()?
+        } else {
+            shelf.backend.snapshot()?
+        };
+        snapshot.validate()?;
+        let mut writer =
+            std::io::BufWriter::new(std::fs::File::create(stage.path().join("snapshot.json"))?);
+        serde_json::to_writer_pretty(&mut writer, &snapshot)?;
+        std::io::Write::flush(&mut writer)?;
+        drop(writer);
         if shelf.config.archives_path.exists() {
-            copy_dir_recursive(&shelf.config.archives_path, &archives_dest)?;
+            copy_dir_recursive(&shelf.config.archives_path, &stage.path().join("archives"))?;
         }
+        super::transfer::validate_archives(&snapshot, &stage.path().join("archives"))?;
+        super::transfer::write_manifest(stage.path(), &snapshot)?;
+        // Publishing a completed package is one rename; failures leave no partial export.
+        if dest.exists() {
+            std::fs::remove_dir(dest)?;
+        }
+        std::fs::rename(stage.path(), dest)?;
+        Ok(())
+    }
 
+    /// Import logical data into an already configured, empty target. Never switches config.
+    pub fn import(&mut self, name: &str, source: &Path, reembed: bool) -> Result<()> {
+        let shelf = self
+            .shelves
+            .get_mut(name)
+            .ok_or_else(|| HypatiaError::Shelf(format!("shelf '{name}' is not connected")))?;
+        let logical = source.join("snapshot.json");
+        let snapshot = if logical.exists() {
+            let snapshot = serde_json::from_reader::<_, super::transfer::Snapshot>(
+                std::io::BufReader::new(std::fs::File::open(logical)?),
+            )?;
+            super::transfer::verify_manifest(source, &snapshot)?;
+            snapshot
+        } else {
+            // Read a legacy export through a temporary backup, so opening/migrating
+            // its schema cannot modify the user's source export.
+            let db = source.join("hypatia.sqlite");
+            if !db.is_file() {
+                return Err(HypatiaError::Validation(
+                    "source must contain snapshot.json or hypatia.sqlite".into(),
+                ));
+            }
+            let temporary = tempfile::tempdir()?;
+            let database = temporary.path().join("hypatia.sqlite");
+            let legacy = rusqlite::Connection::open_with_flags(
+                &db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            legacy.backup("main", &database, None)?;
+            super::SqliteStore::open(&database)?.snapshot()?
+        };
+        let snapshot = if reembed {
+            snapshot.without_embeddings()
+        } else {
+            snapshot
+        };
+        snapshot.validate()?;
+        // Check source attachment references before committing any imported records.
+        super::transfer::validate_archives(&snapshot, &source.join("archives"))?;
+        let source_archives = source.join("archives");
+        if source_archives.exists() {
+            // Copy first: a filesystem failure cannot leave imported references broken.
+            // Any copied files on database failure remain safe and reusable on retry.
+            copy_dir_recursive(&source_archives, &shelf.config.archives_path)?;
+        }
+        shelf.backend.import_snapshot(&snapshot)?;
+        shelf.backend.rebuild_indexes()?;
+        let mut restored = shelf.backend.snapshot()?;
+        let mut expected = snapshot.clone();
+        restored
+            .knowledge
+            .sort_by(|a, b| a.knowledge.name.cmp(&b.knowledge.name));
+        expected
+            .knowledge
+            .sort_by(|a, b| a.knowledge.name.cmp(&b.knowledge.name));
+        restored
+            .statements
+            .sort_by_key(|r| r.statement.key.to_csv_key());
+        expected
+            .statements
+            .sort_by_key(|r| r.statement.key.to_csv_key());
+        if restored.knowledge != expected.knowledge || restored.statements != expected.statements {
+            return Err(HypatiaError::Validation("data imported but verification differed; preserve source and inspect target before switching".into()));
+        }
         Ok(())
     }
 
@@ -498,6 +463,11 @@ fn dirs_home() -> std::path::PathBuf {
 
 /// Recursively copy a directory tree.
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(HypatiaError::Validation(
+            "archive destination cannot be a symlink".into(),
+        ));
+    }
     if !src.exists() {
         return Ok(());
     }
@@ -505,11 +475,30 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
+        if entry.file_type()?.is_symlink() {
+            return Err(HypatiaError::Validation(
+                "archive copy does not follow symlinks".into(),
+            ));
+        }
         let dest_path = dest.join(entry.file_name());
+        if std::fs::symlink_metadata(&dest_path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(HypatiaError::Validation(
+                "archive destination cannot be a symlink".into(),
+            ));
+        }
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dest_path)?;
         } else {
-            std::fs::copy(&src_path, &dest_path)?;
+            if dest_path.exists() {
+                if std::fs::read(&src_path)? != std::fs::read(&dest_path)? {
+                    return Err(HypatiaError::Validation(format!(
+                        "archive destination already contains different content: {}",
+                        dest_path.display()
+                    )));
+                }
+            } else {
+                std::fs::copy(&src_path, &dest_path)?;
+            }
         }
     }
     Ok(())
@@ -574,7 +563,7 @@ mod tests {
         // Add some data
         let shelf = mgr.get("export-test").unwrap();
         shelf
-            .store
+            .backend
             .insert_knowledge("test", &Content::new("data"))
             .unwrap();
 
@@ -618,7 +607,10 @@ mod tests {
         mgr.connect(dir.path(), Some("status-test")).unwrap();
 
         let shelves = mgr.list();
-        let entry = shelves.iter().find(|(n, _, _)| *n == "status-test").unwrap();
+        let entry = shelves
+            .iter()
+            .find(|(n, _, _)| *n == "status-test")
+            .unwrap();
         assert!(entry.2); // is_connected = true
     }
 }
