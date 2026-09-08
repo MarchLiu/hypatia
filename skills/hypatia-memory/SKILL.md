@@ -46,6 +46,19 @@ Codex lifecycle events into the exact trigger signals above:
 Installation: `./codex-integration/install.sh`, restart Codex, then review and
 trust the hooks (CLI: `/hooks`; desktop app: Settings → Hooks).
 
+## OpenCode Integration
+
+OpenCode runs the same policy natively via the plugin in
+`opencode-integration/` of the Hypatia repo (installed at
+`~/.opencode/hypatia-memory-plugin/`, registered in `opencode.json`).
+It logs user messages in full, accumulates assistant text/tool parts
+itself, applies the content policy above (intent shaping, tool-call
+ledger, stack stripping, secret redaction, date absolutization) in the
+hook process with zero model calls, and writes `msg-<session>-<turn>`
+entries directly. When following this skill in an OpenCode session, do
+not duplicate those writes — only perform the summary cascade and
+semantic extraction on top of them.
+
 The hook scripts are thin, deterministic shells: they write message entries
 (`msg-<session_id>-<turn_id>`, tag `message`) and retrieval context, and emit
 trigger signals. The AI-heavy steps in this document (summary synthesis,
@@ -112,6 +125,36 @@ Rules:
 - Do not skip trivial messages (greetings, "ok", etc.) — the log layer is complete.
 - Never store secrets (passwords, API keys, tokens) — redact before writing.
 
+#### Content policy for assistant messages (MANDATORY)
+
+Shape what you save by what the **user asked for**, not by what the assistant produced:
+
+| User intent (from the triggering question) | Save as |
+|---|---|
+| Data-analysis / report request (报告/分析/统计/summary…) | **Report summary**: heading structure + opening + conclusion paragraphs (≈500 chars each) — not the full report |
+| Operation task (运行/修复/部署/安装/create/fix…, or tools were invoked) | **Operation ledger**: 用时 (wall time) / 手段 (tools used × count) / 结果 (final outcome statement, ≤600 chars) |
+| Discussion (default) | **Markdown context**: the full reply body |
+
+#### Tool-call ledger (applies to EVERY intent)
+
+For tool calls, bash, MCP and other external invocations, record **what was called, how long, and whether it succeeded** — never raw outputs:
+
+```
+## Tool Calls
+1. `bash` — ❌ 2.0s — Error: Cannot find module '/srv/app/config'
+   - 调用: `{"command":"node deploy.js"}`
+2. `mcp:fs.read` ×2 (总用时 100ms) — 2✅
+```
+
+- Repeated identical calls collapse into one entry with a repeat count.
+- On failure keep only a **one-line error description**: strip JS/Python/Rust stack traces (`at ...` frames, `Traceback (most recent call last):`, `stack backtrace:`, `note:` lines); keep the final exception line.
+- Native crash dumps with no readable message (e.g. Windows access violation: hex addresses + `module!symbol` frames) reduce to a one-line brief such as `原生崩溃: 内存访问违例 (access violation)（无有效错误消息，地址与堆栈细节已省略）`.
+
+#### Write-time transforms (both roles)
+
+- **Secret redaction**: `sk-…`, `Bearer …`, `apiKey=…`, `password=/token=/secret=…`, AWS `AKIA…`, GitHub `ghp_…`, GitLab `glpat-…`, Slack `xox…`, PEM private-key blocks.
+- **Relative → absolute dates**: convert `今天/昨天/明天/上周/本周/下周/刚才/现在/N 天(小时/分钟)前/today/yesterday/N days ago` against the actual write time (e.g. `昨天` → `2026-09-07`).
+
 ### Step 2: Record session knowledge (when summary available)
 
 If the hook or environment provides a **session-level summary** (e.g. compaction summary, session title, or end-of-session digest):
@@ -143,7 +186,7 @@ After writing each new message, run the cascade from level 1 upward.
 
 **Constants:** `BATCH_SIZE = 16` (for L2+)
 
-**Relation:** All summary triples use relation `summary`.
+**Predicate:** All summary triples use predicate `summary`.
 
 | Triple | Meaning |
 |---|---|
@@ -331,7 +374,6 @@ Content:
 - Be specific. "Use `Arc<Mutex<T>>`" is good. "Use proper synchronization" is useless.
 - Include non-obvious details.
 - Name things well.
-- **Normalize relative temporal expressions to absolute dates/times.** Use the message timestamp as the reference point: "明天" → `2026-08-29`, "下周一" → `2026-08-31`, "三小时后" → the concrete clock time. Never store "明天/下周/稍后" verbatim — the memory will be read at a different time than it was written.
 
 ### Phase 5: Selective Extraction
 
@@ -378,10 +420,9 @@ When the user explicitly asks to remember or forget:
 ### Remember / Store
 
 1. Identify what to remember
-2. **If the content contains relative temporal expressions (明天, 下周, 三小时后, tonight, …), rewrite them to absolute dates/times** using the current timestamp as the reference point before storing. Example: "明天提醒我备份数据" → "2026年8月29日提醒我备份数据".
-3. Classify as `rule`, `taboo`, or general `memory`
-4. Determine scopes
-5. Create:
+2. Classify as `rule`, `taboo`, or general `memory`
+3. Determine scopes
+4. Create:
    ```bash
    hypatia knowledge-create "<name>" \
      -d "<content>" \
@@ -440,7 +481,6 @@ When the user explicitly asks to remember or forget:
 8. **Don't interrupt the user** — memory operations are background tasks
 9. **Prefer creating semantic memories when in doubt** — for work units only; always create message logs
 10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules use `""`
-11. **Absolute dates, always** — relative temporal expressions ("明天", "下周一", "3 hours later") must be rewritten to absolute dates/times at extraction time, using the message timestamp as reference. A memory stored as "明天" is meaningless when recalled days later.
 
 ## Graph Schema Reference
 
