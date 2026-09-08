@@ -1,0 +1,47 @@
+name: build-windows
+
+# Windows 交叉编译被 ort 预编译库(/MD)与 cxx/esaxx(/MT) 的 CRT 冲突卡住，
+# 改用 windows-latest 原生 MSVC 构建。
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "tag or branch to build"
+        required: true
+        default: "v0.3.1"
+      upload_to_release:
+        description: "upload binary to this GitHub release tag (empty = artifact only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc -p hypatia
+      - name: Package
+        shell: bash
+        run: |
+          cd target/x86_64-pc-windows-msvc/release
+          tar czf "hypatia-x86_64-pc-windows-msvc.tar.gz" hypatia.exe onnxruntime.dll 2>/dev/null || tar czf "hypatia-x86_64-pc-windows-msvc.tar.gz" hypatia.exe
+          cp "hypatia-x86_64-pc-windows-msvc.tar.gz" "$GITHUB_WORKSPACE/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypatia-x86_64-pc-windows-msvc
+          path: hypatia-x86_64-pc-windows-msvc.tar.gz
+      - name: Upload to release
+        if: inputs.upload_to_release != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.upload_to_release }}" hypatia-x86_64-pc-windows-msvc.tar.gz --clobber
