@@ -185,8 +185,7 @@ mod tests {
 
     #[test]
     fn figures_roundtrip() {
-        let c = Content::new("desc")
-            .with_figures(vec!["archive://euclid/fig1.png".to_string()]);
+        let c = Content::new("desc").with_figures(vec!["archive://euclid/fig1.png".to_string()]);
         let json = c.to_json_string();
         let c2 = Content::from_json_str(&json).unwrap();
         assert_eq!(c, c2);
@@ -232,7 +231,10 @@ mod tests {
     fn synonyms_positional_roundtrip() {
         let mut map = HashMap::new();
         map.insert("head".to_string(), vec!["Alice A.".to_string()]);
-        map.insert("relation".to_string(), vec!["leads".to_string(), "manages".to_string()]);
+        map.insert(
+            "relation".to_string(),
+            vec!["leads".to_string(), "manages".to_string()],
+        );
         let c = Content::new("data").with_synonyms(Some(Synonyms::Positional(map)));
         let json = c.to_json_string();
         let c2 = Content::from_json_str(&json).unwrap();
@@ -254,7 +256,10 @@ mod tests {
     #[test]
     fn fts_fields_positional_synonyms() {
         let mut map = HashMap::new();
-        map.insert("head".to_string(), vec!["Bob".to_string(), "Robert".to_string()]);
+        map.insert(
+            "head".to_string(),
+            vec!["Bob".to_string(), "Robert".to_string()],
+        );
         map.insert("tail".to_string(), vec!["DB".to_string()]);
         let c = Content::new("data").with_synonyms(Some(Synonyms::Positional(map)));
         let f = c.fts_fields("triple_key");

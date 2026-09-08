@@ -1,5 +1,5 @@
-use crate::error::{HypatiaError, Result};
 use super::ast::AstNode;
+use crate::error::{HypatiaError, Result};
 
 /// Result of evaluating an operator in the context of query building.
 #[derive(Debug, Clone)]
@@ -10,13 +10,9 @@ pub enum OperatorResult {
         params: Vec<serde_json::Value>,
     },
     /// A FTS search query string. Opts are inherited from the parent query.
-    FtsQuery {
-        query: String,
-    },
+    FtsQuery { query: String },
     /// A semantic similarity query. The evaluator embeds the text and searches vectors.
-    VectorQuery {
-        query_text: String,
-    },
+    VectorQuery { query_text: String },
     /// A k-hop forward graph traversal query on the statement graph.
     KHop {
         subject: String,
@@ -70,7 +66,10 @@ impl OpContext {
     /// construction time, is what keeps the caller from having to rewrite
     /// finished SQL by textual substitution.
     pub fn qualified(self) -> Self {
-        Self { qualify_columns: true, ..self }
+        Self {
+            qualify_columns: true,
+            ..self
+        }
     }
 
     /// Render a column reference, qualifying it when it would be ambiguous.
@@ -88,7 +87,11 @@ impl OpContext {
 const ARRAY_FIELDS: &[&str] = &["tags", "scopes", "figures", "synonyms"];
 
 /// Correlated membership predicate: the document's json_index has (path, token).
-fn membership_fragment(ctx: &OpContext, path: &str, token: &str) -> (String, Vec<serde_json::Value>) {
+fn membership_fragment(
+    ctx: &OpContext,
+    path: &str,
+    token: &str,
+) -> (String, Vec<serde_json::Value>) {
     (
         format!(
             "EXISTS (SELECT 1 FROM docs d JOIN json_index j ON j.doc_id = d.id \
@@ -105,16 +108,14 @@ fn membership_fragment(ctx: &OpContext, path: &str, token: &str) -> (String, Vec
 /// Depth-first first-scalar-leaf of a JSON value, for @> recall narrowing.
 fn first_leaf(v: &serde_json::Value, path: &str) -> Option<(String, String)> {
     match v {
-        serde_json::Value::Object(m) => m
-            .iter()
-            .find_map(|(k, rv)| {
-                let child = if path.is_empty() {
-                    k.to_string()
-                } else {
-                    format!("{path}.{k}")
-                };
-                first_leaf(rv, &child)
-            }),
+        serde_json::Value::Object(m) => m.iter().find_map(|(k, rv)| {
+            let child = if path.is_empty() {
+                k.to_string()
+            } else {
+                format!("{path}.{k}")
+            };
+            first_leaf(rv, &child)
+        }),
         serde_json::Value::Array(e) => e.iter().find_map(|rv| first_leaf(rv, path)),
         other => crate::storage::json_index::scalar_token(other).map(|t| (path.to_string(), t)),
     }
@@ -154,7 +155,8 @@ pub fn evaluate_operator(
                     }
                     other => {
                         return Err(HypatiaError::Eval(format!(
-                            "$and expects SQL conditions, got {:?}", other
+                            "$and expects SQL conditions, got {:?}",
+                            other
                         )));
                     }
                 }
@@ -187,7 +189,8 @@ pub fn evaluate_operator(
                     }
                     other => {
                         return Err(HypatiaError::Eval(format!(
-                            "$or expects SQL conditions, got {:?}", other
+                            "$or expects SQL conditions, got {:?}",
+                            other
                         )));
                     }
                 }
@@ -206,7 +209,9 @@ pub fn evaluate_operator(
         }
         "$not" => {
             if operands.len() != 1 {
-                return Err(HypatiaError::Eval("$not expects exactly one argument".to_string()));
+                return Err(HypatiaError::Eval(
+                    "$not expects exactly one argument".to_string(),
+                ));
             }
             match eval_fn(&operands[0])? {
                 OperatorResult::SqlCondition { fragment, params } => {
@@ -216,7 +221,8 @@ pub fn evaluate_operator(
                     })
                 }
                 other => Err(HypatiaError::Eval(format!(
-                    "$not expects SQL condition, got {:?}", other
+                    "$not expects SQL condition, got {:?}",
+                    other
                 ))),
             }
         }
@@ -272,7 +278,9 @@ pub fn evaluate_operator(
             let mut params = Vec::new();
             for v in &values {
                 let token = crate::storage::json_index::scalar_token(v).ok_or_else(|| {
-                    HypatiaError::Eval("$has value must be a scalar or array of scalars".to_string())
+                    HypatiaError::Eval(
+                        "$has value must be a scalar or array of scalars".to_string(),
+                    )
                 })?;
                 let (f, mut p) = membership_fragment(ctx, &field, &token);
                 params.append(&mut p);
@@ -342,7 +350,7 @@ pub fn evaluate_operator(
                 _ => {
                     return Err(HypatiaError::Eval(
                         "$content expects a JSON object".to_string(),
-                    ))
+                    ));
                 }
             };
             if map.is_empty() {
@@ -358,8 +366,7 @@ pub fn evaluate_operator(
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                let token = crate::storage::json_index::scalar_token(val)
-                    .unwrap_or(str_val);
+                let token = crate::storage::json_index::scalar_token(val).unwrap_or(str_val);
                 let (f, mut p) = membership_fragment(ctx, key, &token);
                 fragments.push(f);
                 params.append(&mut p);
@@ -371,7 +378,9 @@ pub fn evaluate_operator(
         }
         "$search" => {
             let query = if operands.is_empty() {
-                return Err(HypatiaError::Eval("$search expects a query argument".to_string()));
+                return Err(HypatiaError::Eval(
+                    "$search expects a query argument".to_string(),
+                ));
             } else {
                 expect_literal(&operands[0])?
             };
@@ -379,13 +388,13 @@ pub fn evaluate_operator(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            Ok(OperatorResult::FtsQuery {
-                query: query_str,
-            })
+            Ok(OperatorResult::FtsQuery { query: query_str })
         }
         "$similar" => {
             let query = if operands.is_empty() {
-                return Err(HypatiaError::Eval("$similar expects a query argument".to_string()));
+                return Err(HypatiaError::Eval(
+                    "$similar expects a query argument".to_string(),
+                ));
             } else {
                 expect_literal(&operands[0])?
             };
@@ -433,9 +442,9 @@ pub fn evaluate_operator(
             let depth_val = expect_literal(&operands[2])?;
             let depth = match &depth_val {
                 serde_json::Value::Number(n) => {
-                    let d = n.as_i64().ok_or_else(|| HypatiaError::Eval(
-                        "$k-hop depth must be an integer".to_string(),
-                    ))?;
+                    let d = n.as_i64().ok_or_else(|| {
+                        HypatiaError::Eval("$k-hop depth must be an integer".to_string())
+                    })?;
                     if d <= 0 {
                         return Err(HypatiaError::Eval(
                             "$k-hop depth must be a positive integer".to_string(),
@@ -449,11 +458,17 @@ pub fn evaluate_operator(
                     ));
                 }
             };
-            Ok(OperatorResult::KHop { subject, predicate, depth })
+            Ok(OperatorResult::KHop {
+                subject,
+                predicate,
+                depth,
+            })
         }
         "$quote" => {
             if operands.len() != 1 {
-                return Err(HypatiaError::Eval("$quote expects exactly one argument".to_string()));
+                return Err(HypatiaError::Eval(
+                    "$quote expects exactly one argument".to_string(),
+                ));
             }
             // Return the unevaluated operand as a literal value
             Ok(OperatorResult::Value(ast_to_value(&operands[0])))
@@ -465,8 +480,9 @@ pub fn evaluate_operator(
                 ));
             }
             // Parse each operand: "$*" means wildcard (None), otherwise exact match
-            let patterns: Vec<Option<String>> = operands.iter().map(|op| {
-                match op {
+            let patterns: Vec<Option<String>> = operands
+                .iter()
+                .map(|op| match op {
                     AstNode::Symbol(s) if s == "$*" => Ok(None),
                     AstNode::Literal(serde_json::Value::String(s)) if s == "$*" => Ok(None),
                     other => {
@@ -478,8 +494,8 @@ pub fn evaluate_operator(
                             )),
                         }
                     }
-                }
-            }).collect::<Result<Vec<_>>>()?;
+                })
+                .collect::<Result<Vec<_>>>()?;
 
             // Error: all wildcards is a no-op
             if patterns.iter().all(|p| p.is_none()) {
@@ -562,7 +578,8 @@ fn comparison_op(
         eval_fn(&operands[0])
     } else {
         Err(HypatiaError::Eval(format!(
-            "comparison operator expects 1 or 2 arguments, got {}", operands.len()
+            "comparison operator expects 1 or 2 arguments, got {}",
+            operands.len()
         )))
     }
 }
@@ -573,7 +590,8 @@ fn expect_symbol(node: &AstNode) -> Result<String> {
         AstNode::Symbol(s) => Ok(s.clone()),
         AstNode::Literal(serde_json::Value::String(s)) => Ok(s.clone()),
         _ => Err(HypatiaError::Eval(format!(
-            "expected symbol or string, got {:?}", node
+            "expected symbol or string, got {:?}",
+            node
         ))),
     }
 }
@@ -590,7 +608,14 @@ fn expect_literal(node: &AstNode) -> Result<serde_json::Value> {
 /// Field names that address a real table column rather than a Content
 /// JSON path.
 const COLUMN_FIELDS: &[&str] = &[
-    "head", "relation", "tail", "triple", "name", "created_at", "tr_start", "tr_end",
+    "head",
+    "relation",
+    "tail",
+    "triple",
+    "name",
+    "created_at",
+    "tr_start",
+    "tr_end",
 ];
 
 /// A field reference rendered as SQL, plus the bindings its placeholders need.
@@ -608,7 +633,10 @@ struct ResolvedField {
 
 impl ResolvedField {
     /// Combine with the operator's value parameters, keeping placeholder order.
-    fn with_values(self, values: impl IntoIterator<Item = serde_json::Value>) -> Vec<serde_json::Value> {
+    fn with_values(
+        self,
+        values: impl IntoIterator<Item = serde_json::Value>,
+    ) -> Vec<serde_json::Value> {
         let mut params = self.params;
         params.extend(values);
         params
@@ -620,7 +648,7 @@ impl ResolvedField {
 /// The path is bound as a parameter rather than interpolated, so this check is
 /// defense in depth. It exists so a malformed name fails loudly at the field
 /// instead of producing a JSON path that silently matches nothing.
-fn validate_field_path(field: &str) -> Result<()> {
+pub(super) fn validate_field_path(field: &str) -> Result<()> {
     let invalid = || {
         HypatiaError::Validation(format!(
             "invalid field name {field:?}: expected a JSON path such as \
@@ -635,7 +663,11 @@ fn validate_field_path(field: &str) -> Result<()> {
             Some(i) => segment.split_at(i),
             None => (segment, ""),
         };
-        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
             return Err(invalid());
         }
         // Trailing array subscripts: `[0]`, `[0][1]`.
@@ -689,12 +721,14 @@ fn ast_to_value(node: &AstNode) -> serde_json::Value {
     match node {
         AstNode::Literal(v) => v.clone(),
         AstNode::Symbol(s) => serde_json::Value::String(s.clone()),
-        AstNode::Array(nodes) => {
-            serde_json::Value::Array(nodes.iter().map(ast_to_value).collect())
-        }
+        AstNode::Array(nodes) => serde_json::Value::Array(nodes.iter().map(ast_to_value).collect()),
         AstNode::Object(map) => serde_json::Value::Object(map.clone()),
         AstNode::Quote(inner) => ast_to_value(inner),
-        AstNode::Operator { operator, operands, metadata } => {
+        AstNode::Operator {
+            operator,
+            operands,
+            metadata,
+        } => {
             let mut arr = vec![serde_json::Value::String(operator.clone())];
             arr.extend(operands.iter().map(ast_to_value));
             if metadata.is_empty() {
@@ -702,7 +736,10 @@ fn ast_to_value(node: &AstNode) -> serde_json::Value {
             } else {
                 // Merge with metadata
                 let mut obj = metadata.clone();
-                obj.insert(operator.clone(), serde_json::Value::Array(arr[1..].to_vec()));
+                obj.insert(
+                    operator.clone(),
+                    serde_json::Value::Array(arr[1..].to_vec()),
+                );
                 serde_json::Value::Object(obj)
             }
         }
@@ -723,11 +760,15 @@ mod tests {
     fn eq_operator() {
         let result = evaluate_operator(
             "$eq",
-            &[AstNode::Symbol("$name".to_string()), AstNode::Literal(json!("Alice"))],
+            &[
+                AstNode::Symbol("$name".to_string()),
+                AstNode::Literal(json!("Alice")),
+            ],
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert!(fragment.contains("="));
@@ -744,28 +785,37 @@ mod tests {
             &[
                 AstNode::Operator {
                     operator: "$eq".to_string(),
-                    operands: vec![AstNode::Symbol("$name".to_string()), AstNode::Literal(json!("test"))],
+                    operands: vec![
+                        AstNode::Symbol("$name".to_string()),
+                        AstNode::Literal(json!("test")),
+                    ],
                     metadata: serde_json::Map::new(),
                 },
                 AstNode::Operator {
                     operator: "$gt".to_string(),
-                    operands: vec![AstNode::Symbol("$age".to_string()), AstNode::Literal(json!(18))],
+                    operands: vec![
+                        AstNode::Symbol("$age".to_string()),
+                        AstNode::Literal(json!(18)),
+                    ],
                     metadata: serde_json::Map::new(),
                 },
             ],
             &serde_json::Map::new(),
             &kctx(),
-            &|node: &AstNode| {
-                match node {
-                    AstNode::Operator { operator, operands, .. } => {
-                        evaluate_operator(operator, operands, &serde_json::Map::new(), &kctx(), &|_| {
-                            Err(HypatiaError::Eval("no deeper nesting".to_string()))
-                        })
-                    }
-                    _ => Err(HypatiaError::Eval("expected operator".to_string())),
-                }
+            &|node: &AstNode| match node {
+                AstNode::Operator {
+                    operator, operands, ..
+                } => evaluate_operator(
+                    operator,
+                    operands,
+                    &serde_json::Map::new(),
+                    &kctx(),
+                    &|_| Err(HypatiaError::Eval("no deeper nesting".to_string())),
+                ),
+                _ => Err(HypatiaError::Eval("expected operator".to_string())),
             },
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert!(fragment.contains("AND"));
@@ -785,7 +835,8 @@ mod tests {
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::FtsQuery { query } => {
                 assert_eq!(query, "hello world");
@@ -803,11 +854,15 @@ mod tests {
         for field in ["$tags", "tags"] {
             let result = evaluate_operator(
                 "$contains",
-                &[AstNode::Symbol(field.to_string()), AstNode::Literal(json!("rust"))],
+                &[
+                    AstNode::Symbol(field.to_string()),
+                    AstNode::Literal(json!("rust")),
+                ],
                 &serde_json::Map::new(),
                 &kctx(),
                 &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-            ).unwrap();
+            )
+            .unwrap();
             match result {
                 OperatorResult::SqlCondition { fragment, params } => {
                     assert!(fragment.contains("json_index"), "field {field}");
@@ -822,11 +877,15 @@ mod tests {
     fn contains_operator_scalar_field() {
         let result = evaluate_operator(
             "$contains",
-            &[AstNode::Symbol("$data".to_string()), AstNode::Literal(json!("rust"))],
+            &[
+                AstNode::Symbol("$data".to_string()),
+                AstNode::Literal(json!("rust")),
+            ],
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert_eq!(fragment, "json_extract(content, ?) LIKE ?");
@@ -842,22 +901,28 @@ mod tests {
             "$not",
             &[AstNode::Operator {
                 operator: "$eq".to_string(),
-                operands: vec![AstNode::Symbol("$name".to_string()), AstNode::Literal(json!("test"))],
+                operands: vec![
+                    AstNode::Symbol("$name".to_string()),
+                    AstNode::Literal(json!("test")),
+                ],
                 metadata: serde_json::Map::new(),
             }],
             &serde_json::Map::new(),
             &kctx(),
-            &|node: &AstNode| {
-                match node {
-                    AstNode::Operator { operator, operands, .. } => {
-                        evaluate_operator(operator, operands, &serde_json::Map::new(), &kctx(), &|_| {
-                            Err(HypatiaError::Eval("no deeper".to_string()))
-                        })
-                    }
-                    _ => Err(HypatiaError::Eval("expected operator".to_string())),
-                }
+            &|node: &AstNode| match node {
+                AstNode::Operator {
+                    operator, operands, ..
+                } => evaluate_operator(
+                    operator,
+                    operands,
+                    &serde_json::Map::new(),
+                    &kctx(),
+                    &|_| Err(HypatiaError::Eval("no deeper".to_string())),
+                ),
+                _ => Err(HypatiaError::Eval("expected operator".to_string())),
             },
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, .. } => {
                 assert!(fragment.starts_with("NOT ("));
@@ -870,11 +935,15 @@ mod tests {
     fn like_operator() {
         let result = evaluate_operator(
             "$like",
-            &[AstNode::Symbol("$name".to_string()), AstNode::Literal(json!("rust%"))],
+            &[
+                AstNode::Symbol("$name".to_string()),
+                AstNode::Literal(json!("rust%")),
+            ],
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert!(fragment.contains("LIKE"));
@@ -888,11 +957,15 @@ mod tests {
     fn like_operator_json_field() {
         let result = evaluate_operator(
             "$like",
-            &[AstNode::Symbol("$data".to_string()), AstNode::Literal(json!("%language%"))],
+            &[
+                AstNode::Symbol("$data".to_string()),
+                AstNode::Literal(json!("%language%")),
+            ],
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert_eq!(fragment, "json_extract(content, ?) LIKE ?");
@@ -912,7 +985,8 @@ mod tests {
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert!(fragment.contains("EXISTS (SELECT 1 FROM docs d JOIN json_index j"));
@@ -936,7 +1010,8 @@ mod tests {
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert!(fragment.contains(" AND "));
@@ -996,9 +1071,9 @@ mod tests {
                 );
                 match result {
                     Err(HypatiaError::Validation(_)) => {}
-                    other => panic!(
-                        "{op} did not reject injected field name {payload:?}: {other:?}"
-                    ),
+                    other => {
+                        panic!("{op} did not reject injected field name {payload:?}: {other:?}")
+                    }
                 }
             }
         }
@@ -1007,8 +1082,17 @@ mod tests {
     #[test]
     fn legitimate_field_names_still_resolve() {
         for field in [
-            "data", "tags", "format", "meta.author", "a.b.c", "tags[0]",
-            "rows[0][1]", "with_underscore", "with-dash", "字段", "f1",
+            "data",
+            "tags",
+            "format",
+            "meta.author",
+            "a.b.c",
+            "tags[0]",
+            "rows[0][1]",
+            "with_underscore",
+            "with-dash",
+            "字段",
+            "f1",
         ] {
             resolve_field(&kctx(), field)
                 .unwrap_or_else(|e| panic!("field {field:?} rejected: {e}"));
@@ -1039,11 +1123,15 @@ mod tests {
     fn ordering_comparison_casts_and_still_binds_the_path() {
         let result = evaluate_operator(
             "$gt",
-            &[AstNode::Symbol("$age".to_string()), AstNode::Literal(json!(18))],
+            &[
+                AstNode::Symbol("$age".to_string()),
+                AstNode::Literal(json!(18)),
+            ],
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert_eq!(fragment, "CAST(json_extract(content, ?) AS REAL) > ?");
@@ -1085,7 +1173,8 @@ mod tests {
             &serde_json::Map::new(),
             &kctx(),
             &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             OperatorResult::SqlCondition { fragment, params } => {
                 assert_eq!(fragment, "1=1");

@@ -89,10 +89,19 @@ mod tests {
     #[test]
     fn shelf_config_paths() {
         let config = ShelfConfig::from_path(Path::new("/tmp/test-shelf"), None);
-        assert_eq!(config.sqlite_path, PathBuf::from("/tmp/test-shelf/hypatia.sqlite"));
-        assert_eq!(config.vectors_path, PathBuf::from("/tmp/test-shelf/vectors"));
+        assert_eq!(
+            config.sqlite_path,
+            PathBuf::from("/tmp/test-shelf/hypatia.sqlite")
+        );
+        assert_eq!(
+            config.vectors_path,
+            PathBuf::from("/tmp/test-shelf/vectors")
+        );
         assert_eq!(config.id.name, "test-shelf");
-        assert_eq!(config.archives_path, PathBuf::from("/tmp/test-shelf/archives"));
+        assert_eq!(
+            config.archives_path,
+            PathBuf::from("/tmp/test-shelf/archives")
+        );
     }
 
     #[test]

@@ -14,7 +14,10 @@ impl Repl {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        println!("hypatia {} — AI-oriented memory management", env!("CARGO_PKG_VERSION"));
+        println!(
+            "hypatia {} — AI-oriented memory management",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("Type .help for commands, or enter JSE queries as JSON.");
 
         loop {
@@ -74,13 +77,14 @@ impl Repl {
             }
             "connect" => {
                 let path = parts.get(1).ok_or_else(|| {
-                    crate::error::HypatiaError::Validation("usage: .connect <path> [name]".to_string())
+                    crate::error::HypatiaError::Validation(
+                        "usage: .connect <path> [name]".to_string(),
+                    )
                 })?;
                 let name = parts.get(2).map(|s| s.to_string());
-                let shelf_name = self.lab.connect_shelf(
-                    std::path::Path::new(path),
-                    name.as_deref(),
-                )?;
+                let shelf_name = self
+                    .lab
+                    .connect_shelf(std::path::Path::new(path), name.as_deref())?;
                 println!("Connected to shelf: {shelf_name}");
             }
             "disconnect" => {
@@ -97,17 +101,31 @@ impl Repl {
                 } else {
                     let max_name = shelves.iter().map(|(n, _, _)| n.len()).max().unwrap_or(0);
                     for (name, path, connected) in &shelves {
-                        let status = if *connected { "[connected]" } else { "[disconnected]" };
-                        println!("  {:width$}  {}  {}", name, path.display(), status, width = max_name);
+                        let status = if *connected {
+                            "[connected]"
+                        } else {
+                            "[disconnected]"
+                        };
+                        println!(
+                            "  {:width$}  {}  {}",
+                            name,
+                            path.display(),
+                            status,
+                            width = max_name
+                        );
                     }
                 }
             }
             "export" => {
                 let name = parts.get(1).ok_or_else(|| {
-                    crate::error::HypatiaError::Validation("usage: .export <name> <dest>".to_string())
+                    crate::error::HypatiaError::Validation(
+                        "usage: .export <name> <dest>".to_string(),
+                    )
                 })?;
                 let dest = parts.get(2).ok_or_else(|| {
-                    crate::error::HypatiaError::Validation("usage: .export <name> <dest>".to_string())
+                    crate::error::HypatiaError::Validation(
+                        "usage: .export <name> <dest>".to_string(),
+                    )
                 })?;
                 self.lab.export_shelf(name, std::path::Path::new(dest))?;
                 println!("Exported shelf '{name}' to {dest}");

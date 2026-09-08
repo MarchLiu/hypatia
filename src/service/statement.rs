@@ -22,15 +22,16 @@ impl<'a> StatementService<'a> {
     ) -> Result<Statement> {
         let csv_key = key.to_csv_key();
         // Source row + FTS doc are written in one store transaction.
-        self.shelf.store.insert_statement(key, &content, tr_start, tr_end)?;
+        let version = self
+            .shelf
+            .backend
+            .insert_statement(key, &content, tr_start, tr_end)?;
 
         // Generate embedding and store the BLOB (best-effort)
-        if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(&csv_key))? {
-            self.shelf.store.upsert_statement_embedding(&csv_key, &vector)?;
-            self.shelf.vector_upsert("statement", &csv_key, &vector)?;
-        }
+        self.shelf
+            .embed_saved("statement", &csv_key, &content, version);
 
-        let statement = self.shelf.store.get_statement(key)?.ok_or_else(|| {
+        let statement = self.shelf.backend.get_statement(key)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
                 kind: "statement".to_string(),
                 key: csv_key,
@@ -40,7 +41,7 @@ impl<'a> StatementService<'a> {
     }
 
     pub fn get(&self, key: &StatementKey) -> Result<Option<Statement>> {
-        self.shelf.store.get_statement(key)
+        self.shelf.backend.get_statement(key)
     }
 
     pub fn update(
@@ -51,14 +52,15 @@ impl<'a> StatementService<'a> {
         tr_end: Option<NaiveDateTime>,
     ) -> Result<Statement> {
         let csv_key = key.to_csv_key();
-        self.shelf.store.update_statement(key, &content, tr_start, tr_end)?;
+        let version = self
+            .shelf
+            .backend
+            .update_statement(key, &content, tr_start, tr_end)?;
 
-        if let Some(vector) = self.shelf.embedder.maybe_embed(&content.embedding_text(&csv_key))? {
-            self.shelf.store.upsert_statement_embedding(&csv_key, &vector)?;
-            self.shelf.vector_upsert("statement", &csv_key, &vector)?;
-        }
+        self.shelf
+            .embed_saved("statement", &csv_key, &content, version);
 
-        let statement = self.shelf.store.get_statement(key)?.ok_or_else(|| {
+        let statement = self.shelf.backend.get_statement(key)?.ok_or_else(|| {
             crate::error::HypatiaError::NotFound {
                 kind: "statement".to_string(),
                 key: csv_key,
@@ -68,8 +70,6 @@ impl<'a> StatementService<'a> {
     }
 
     pub fn delete(&mut self, key: &StatementKey) -> Result<()> {
-        // Drop the ANN vector BEFORE the doc row disappears (doc_id lookup).
-        self.shelf.vector_remove("statement", &key.to_csv_key())?;
-        self.shelf.store.delete_statement(key)
+        self.shelf.backend.delete_statement(key)
     }
 }

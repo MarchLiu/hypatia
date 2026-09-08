@@ -14,7 +14,12 @@ Hypatia 的知识由两大类组成，
 
 Hypatia 的知识通过 shelves 分组，提供一个默认的 shelves，允许用户导入、导出和引用不同的 shelves。
 
-一个 Shelves 是一个目录，每个目录包含 `hypatia.sqlite`（唯一源真相：knowledge/statement 表 + docs 锚点 + json_index 倒排 + FTS5 + 向量 BLOB 列）、`vectors/`（usearch ANN 快照，可重建缓存）、可选的 `shelf.toml`（嵌入模型配置）和嵌入模型文件。0.2 起不再使用 duckdb。
+一个 Shelves 是一个目录，每个目录包含配置、附件和按后端选择的数据存储：
+
+- **SQLite 后端（默认）**：`hypatia.sqlite`（唯一源真相：knowledge/statement 表 + docs 锚点 + json_index 倒排 + FTS5 + 向量 BLOB 列）、`vectors/`（usearch ANN 快照，可重建缓存）。
+- **PostgreSQL 后端**：数据库由 `shelf.toml` 中的 `[storage]` 配置指定，使用 PostgreSQL + JSONB + tsvector + pgvector 管理数据；附件仍保留在 shelf 本地 `archives/`。
+
+可选的 `shelf.toml` 同时包含 `[storage]`（后端选择）和 `[embedding]`（嵌入模型配置）。0.2 起不再使用 duckdb。
 
 Hypatia 面向局部环境，因此数据管理也遵循简单原则，例如 knowledge 直接保存 name 作为主键，statement 中直接保存三元组的可读性形式 `head, relation, tail` 作为主键。content 是一个 json 对象，默认总会包含：
 
@@ -72,12 +77,44 @@ pooling = "mean"             # "mean" / "cls" / "last_token"
 
 默认使用 BAAI/bge-m3 (568M params, 1024d, mean pooling)。也支持 EmbeddingGemma-300M、gte 系列、Jina v5 等模型，以及 OpenAI 兼容的远程 API。
 
+### 存储后端配置
+
+通过 `shelf.toml` 的 `[storage]` 段选择后端，默认使用 SQLite：
+
+```toml
+[storage]
+backend = "sqlite"   # 默认
+```
+
+也可选择 PostgreSQL + pgvector 作为完整后端：
+
+```toml
+[storage]
+backend = "pgvector"
+
+[storage.postgres]
+url_env = "HYPATIA_POSTGRES_URL"   # 或 url = "postgresql://..."
+schema = "hypatia_team_memory"
+connect_timeout_seconds = 5
+statement_timeout_ms = 30000
+
+[storage.vector]
+index = "hnsw"   # 或 "none" 使用精确扫描
+metric = "cosine"
+```
+
+PostgreSQL 后端需要以 `--features postgres-backend` 编译；附件仍保留在 shelf 本地 `archives/` 目录，不会随数据库自动共享。详见 [docs/pgvector-backend.md](pgvector-backend.md)。
+
 ### 全文索引与 JSON 倒排
 
-全文检索沿用 SQLite FTS5（jieba 预分词 + porter），锚定统一文档表 `docs(id, catalog, key)`；
+**SQLite 后端**：全文检索使用 SQLite FTS5（jieba 预分词 + porter），锚定统一文档表 `docs(id, catalog, key)`；
 JSON 字段查询走路径树倒排 `json_index(doc_id, path, kind, value, array_index)`，
 支持 $has（成员）、$content（键值）、$json-contains（@> 结构包含，倒排召回 + json_contains UDF recheck）；
 向量检索由外置 usearch 快照承担（可从 embedding BLOB 列重建），详见 docs/sqlite-refactor-plan.md。
+
+**PostgreSQL 后端**：全文检索使用 PostgreSQL `tsvector` + `simple` 配置 + Jieba 预分词；
+JSON 字段查询使用 JSONB 路径与派生 `tokens` JSONB；向量检索使用 pgvector（HNSW 或精确扫描）。
+两后端的 FTS 排名、词干处理和分数语义可能存在差异，跨后端部署时应注意。
 
 ## 命令行
 
@@ -118,7 +155,7 @@ Hypatia 的 JSE 指令包含：
 - $or 会转化成 SQL where 条件中的 or
 - $not 会转化成 SQL where 条件中的 not
 - $search 会转化成 SQLite FTS 数据中的查询，它始终在 $knowledge 或 $statement 内部使用，与 $and、$or 等指令一致，不单独传入 opts 参数，而是遵循外部的 opts 参数。$search 的产物是对应的子查询，这些子查询限制 knowledge 的 name 或 statement 的 head、relation、tail 匹配从 FTS 搜索到的 key
-- $similar 语义向量搜索，将查询文本编码为向量后通过 DuckDB cosine distance 检索最相似的条目
+- $similar 语义向量搜索，将查询文本编码为向量后通过 SQLite usearch 或 PostgreSQL pgvector 的 cosine distance 检索最相似的条目
 - $eq 对应等于
 - $ne 对应不等于
 - $gte 对应 大于等于
@@ -132,7 +169,7 @@ Hypatia 的 JSE 指令包含：
 - $k-hop 图遍历查询，基于 statement triples 做 k 跳递归 CTE，探索实体间的关系路径
 - $has 数组/标量成员精确匹配（倒排索引）；$json-contains 结构包含（倒排召回 + json_contains UDF recheck）
 - $quote 用于封装对查询的延迟解释，对应 LISP 语言的 quote 形式
-- 以上针对 duckdb 数据集的查询也包含可选的 opts 字典，其中包含
+- 以上针对 SQLite 或 PostgreSQL 数据集的查询也包含可选的 opts 字典，其中包含
   - catalog
   - offset
   - limit

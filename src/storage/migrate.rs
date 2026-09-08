@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::model::shelf::ShelfConfig;
-use crate::storage::sqlite_store::{fts_doc_for, vector_to_blob, SqliteStore};
+use crate::storage::sqlite_store::{SqliteStore, fts_doc_for, vector_to_blob};
 
 /// Open a shelf, migrating first when needed. The single entry point used by
 /// ShelfManager.
@@ -67,16 +67,15 @@ fn run_migration(config: &ShelfConfig, target: &Path) -> Result<()> {
     let config_duckdb = duckdb::Config::default()
         .access_mode(duckdb::AccessMode::ReadOnly)
         .map_err(crate::error::StorageError::from)?;
-    let legacy = duckdb::Connection::open_with_flags(
-        &config.legacy_duckdb_path(),
-        config_duckdb,
-    )
-    .map_err(crate::error::StorageError::from)?;
+    let legacy = duckdb::Connection::open_with_flags(&config.legacy_duckdb_path(), config_duckdb)
+        .map_err(crate::error::StorageError::from)?;
 
     let store = SqliteStore::open(target)?;
     let conn = store.conn();
 
-    let tx = conn.unchecked_transaction().map_err(crate::error::StorageError::from)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(crate::error::StorageError::from)?;
 
     // ── knowledge ────────────────────────────────────────────────────
     // Embeddings are read as JSON text (to_json) for duckdb ARRAY portability.
@@ -171,11 +170,7 @@ fn parse_embedding(json: Option<String>) -> Result<Option<Vec<f32>>> {
         None => Ok(None),
         Some(s) => {
             let v: Vec<f32> = serde_json::from_str(&s)?;
-            if v.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(v))
-            }
+            if v.is_empty() { Ok(None) } else { Ok(Some(v)) }
         }
     }
 }
@@ -198,7 +193,14 @@ fn insert_docs_row(
     tx.execute(
         "INSERT INTO docs(catalog, key, fts_key, fts_data, fts_tags, fts_synonyms)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![catalog, key, doc.fts_key, doc.fts_data, doc.fts_tags, doc.fts_synonyms],
+        rusqlite::params![
+            catalog,
+            key,
+            doc.fts_key,
+            doc.fts_data,
+            doc.fts_tags,
+            doc.fts_synonyms
+        ],
     )
     .map_err(crate::error::StorageError::from)?;
     Ok(())
@@ -281,7 +283,12 @@ mod tests {
 
         // Legacy files renamed to .bak
         assert!(!config.legacy_duckdb_path().exists());
-        assert!(config.legacy_duckdb_path().with_extension("duckdb.bak").exists());
+        assert!(
+            config
+                .legacy_duckdb_path()
+                .with_extension("duckdb.bak")
+                .exists()
+        );
         assert!(!config.needs_migration());
 
         // New store contents
@@ -300,7 +307,9 @@ mod tests {
         assert_eq!(store.knowledge_with_embeddings().unwrap().len(), 1);
 
         // FTS index works after migration
-        let results = store.search("Rust", &crate::model::SearchOpts::default()).unwrap();
+        let results = store
+            .search("Rust", &crate::model::SearchOpts::default())
+            .unwrap();
         assert!(!results.is_empty());
 
         // Re-running is a no-op
@@ -314,7 +323,11 @@ mod tests {
         seed_legacy(&config.legacy_duckdb_path());
 
         // Simulate an interrupted run: partial output + leftover wal.
-        std::fs::write(config.sqlite_path.with_extension("sqlite.migrating"), b"junk").unwrap();
+        std::fs::write(
+            config.sqlite_path.with_extension("sqlite.migrating"),
+            b"junk",
+        )
+        .unwrap();
         std::fs::write(
             config.sqlite_path.with_extension("sqlite.migrating-wal"),
             b"junk",
@@ -325,7 +338,12 @@ mod tests {
 
         let store = SqliteStore::open(&config.sqlite_path).unwrap();
         assert!(store.get_knowledge("rust").unwrap().is_some());
-        assert!(!config.sqlite_path.with_extension("sqlite.migrating").exists());
+        assert!(
+            !config
+                .sqlite_path
+                .with_extension("sqlite.migrating")
+                .exists()
+        );
     }
 
     #[test]

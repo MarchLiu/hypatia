@@ -95,8 +95,7 @@ fn extract_sessions(conv_data: &ConversationData) -> Vec<(usize, String, Vec<Tur
                     .unwrap_or("unknown date")
                     .to_string();
 
-                let turns: Vec<Turn> = serde_json::from_value(value.clone())
-                    .unwrap_or_default();
+                let turns: Vec<Turn> = serde_json::from_value(value.clone()).unwrap_or_default();
 
                 sessions.push((session_num, date, turns));
             }
@@ -208,17 +207,18 @@ struct EvalResult {
 }
 
 fn compute_recall(top_keys: &[String], expected: &[String], k: usize) -> bool {
-    expected.iter().any(|exp| top_keys.iter().take(k).any(|k_| k_ == exp))
+    expected
+        .iter()
+        .any(|exp| top_keys.iter().take(k).any(|k_| k_ == exp))
 }
 
 // ── Main benchmark ───────────────────────────────────────────────────
 
 #[test]
 fn run_locomo_benchmark() {
-    let data_path =
-        env::var("LOCOMO_DATA").unwrap_or_else(|_| "locomo10.json".to_string());
-    let results_path = env::var("LOCOMO_RESULTS")
-        .unwrap_or_else(|_| "locomo_results.jsonl".to_string());
+    let data_path = env::var("LOCOMO_DATA").unwrap_or_else(|_| "locomo10.json".to_string());
+    let results_path =
+        env::var("LOCOMO_RESULTS").unwrap_or_else(|_| "locomo_results.jsonl".to_string());
 
     // Load LoCoMo data
     println!();
@@ -261,8 +261,7 @@ fn run_locomo_benchmark() {
 
     // Hermetic home: never touch (or migrate!) the real ~/.hypatia shelf.
     let home = tempfile::tempdir().expect("create temp home");
-    let mut mgr = ShelfManager::with_home(home.path().to_path_buf())
-        .expect("create shelf manager");
+    let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).expect("create shelf manager");
     let shelf_name = mgr
         .connect(&shelf_path, Some("locomo"))
         .expect("connect shelf");
@@ -306,7 +305,11 @@ fn run_locomo_benchmark() {
             if let Some(summary) = conv.session_summary.get(&summary_key) {
                 if let Some(text) = summary.as_str() {
                     let name = format!("{sid}__summary_{session_num}");
-                    let tags = vec![sid.clone(), format!("session_{session_num}"), "summary".into()];
+                    let tags = vec![
+                        sid.clone(),
+                        format!("session_{session_num}"),
+                        "summary".into(),
+                    ];
                     let content = Content::new(text).with_tags(tags);
                     let shelf = mgr.get_mut(&shelf_name).expect("get shelf");
                     let mut svc = hypatia::service::KnowledgeService::new(shelf);
@@ -321,7 +324,11 @@ fn run_locomo_benchmark() {
             if let Some(events) = conv.event_summary.get(&event_key) {
                 let name = format!("{sid}__events_{session_num}");
                 let text = serde_json::to_string(events).unwrap_or_default();
-                let tags = vec![sid.clone(), format!("session_{session_num}"), "events".into()];
+                let tags = vec![
+                    sid.clone(),
+                    format!("session_{session_num}"),
+                    "events".into(),
+                ];
                 let content = Content::new(&text).with_tags(tags);
                 let shelf = mgr.get_mut(&shelf_name).expect("get shelf");
                 let mut svc = hypatia::service::KnowledgeService::new(shelf);
@@ -335,7 +342,11 @@ fn run_locomo_benchmark() {
             if let Some(obs) = conv.observation.get(&obs_key) {
                 let name = format!("{sid}__obs_{session_num}");
                 let text = serde_json::to_string(obs).unwrap_or_default();
-                let tags = vec![sid.clone(), format!("session_{session_num}"), "observation".into()];
+                let tags = vec![
+                    sid.clone(),
+                    format!("session_{session_num}"),
+                    "observation".into(),
+                ];
                 let content = Content::new(&text).with_tags(tags);
                 let shelf = mgr.get_mut(&shelf_name).expect("get shelf");
                 let mut svc = hypatia::service::KnowledgeService::new(shelf);
@@ -357,7 +368,10 @@ fn run_locomo_benchmark() {
     );
 
     // ── Phase 2: Search (FTS + Vector) ──────────────────────────────
-    println!("\n  Phase 2: Running searches for {} QA pairs...", non_adversarial);
+    println!(
+        "\n  Phase 2: Running searches for {} QA pairs...",
+        non_adversarial
+    );
     println!("    Methods: FTS (BM25) + Vector (cosine similarity)");
 
     let shelf = mgr.get(&shelf_name).expect("get shelf");
@@ -398,7 +412,8 @@ fn run_locomo_benchmark() {
 
             let (fts_top_keys, fts_r1, fts_r5, fts_r10, fts_lat) = {
                 let t = Instant::now();
-                let result = shelf.execute_search(&fts_query, &fts_opts)
+                let result = shelf
+                    .execute_search(&fts_query, &fts_opts)
                     .unwrap_or_else(|e| {
                         eprintln!("    WARN: FTS search failed for '{}': {}", qa.question, e);
                         hypatia::model::QueryResult::new(Vec::new())
@@ -515,26 +530,52 @@ fn run_locomo_benchmark() {
     for r in &eval_results {
         let fts = fts_by_cat.entry(r.category).or_insert((0, 0, 0, 0));
         fts.0 += 1;
-        if r.fts_recall_at_1 { fts.1 += 1; }
-        if r.fts_recall_at_5 { fts.2 += 1; }
-        if r.fts_recall_at_10 { fts.3 += 1; }
+        if r.fts_recall_at_1 {
+            fts.1 += 1;
+        }
+        if r.fts_recall_at_5 {
+            fts.2 += 1;
+        }
+        if r.fts_recall_at_10 {
+            fts.3 += 1;
+        }
 
-        if let (Some(vr1), Some(vr5), Some(vr10)) = (r.vec_recall_at_1, r.vec_recall_at_5, r.vec_recall_at_10) {
+        if let (Some(vr1), Some(vr5), Some(vr10)) =
+            (r.vec_recall_at_1, r.vec_recall_at_5, r.vec_recall_at_10)
+        {
             let vec = vec_by_cat.entry(r.category).or_insert((0, 0, 0, 0));
             vec.0 += 1;
-            if vr1 { vec.1 += 1; }
-            if vr5 { vec.2 += 1; }
-            if vr10 { vec.3 += 1; }
+            if vr1 {
+                vec.1 += 1;
+            }
+            if vr5 {
+                vec.2 += 1;
+            }
+            if vr10 {
+                vec.3 += 1;
+            }
         }
     }
 
     fts_latencies.sort();
     vec_latencies.sort();
 
-    let fts_p50 = fts_latencies.get(fts_latencies.len() / 2).copied().unwrap_or(0);
-    let fts_p99 = fts_latencies.get(fts_latencies.len() * 99 / 100).copied().unwrap_or(0);
-    let vec_p50 = vec_latencies.get(vec_latencies.len() / 2).copied().unwrap_or(0);
-    let vec_p99 = vec_latencies.get(vec_latencies.len() * 99 / 100).copied().unwrap_or(0);
+    let fts_p50 = fts_latencies
+        .get(fts_latencies.len() / 2)
+        .copied()
+        .unwrap_or(0);
+    let fts_p99 = fts_latencies
+        .get(fts_latencies.len() * 99 / 100)
+        .copied()
+        .unwrap_or(0);
+    let vec_p50 = vec_latencies
+        .get(vec_latencies.len() / 2)
+        .copied()
+        .unwrap_or(0);
+    let vec_p99 = vec_latencies
+        .get(vec_latencies.len() * 99 / 100)
+        .copied()
+        .unwrap_or(0);
 
     // ── Summary ──────────────────────────────────────────────────────
     println!("\n\n{}", "═".repeat(70));
@@ -544,18 +585,31 @@ fn run_locomo_benchmark() {
     println!("  QA evaluated:   {eval_count}");
     println!();
 
-    let cat_names = [(4u32, "Single-hop"), (1, "Multi-hop"), (2, "Temporal"), (3, "Open-domain")];
+    let cat_names = [
+        (4u32, "Single-hop"),
+        (1, "Multi-hop"),
+        (2, "Temporal"),
+        (3, "Open-domain"),
+    ];
 
     // FTS table
     println!("  FTS (BM25, top-K)");
-    println!("  {:20} {:>5} {:>8} {:>8} {:>8}", "Category", "N", "R@1", "R@5", "R@10");
+    println!(
+        "  {:20} {:>5} {:>8} {:>8} {:>8}",
+        "Category", "N", "R@1", "R@5", "R@10"
+    );
     println!("  {}", "-".repeat(53));
     let mut fts_total = (0usize, 0usize, 0usize, 0usize);
     for (cat, name) in &cat_names {
         if let Some(&(n, r1, r5, r10)) = fts_by_cat.get(cat) {
-            fts_total.0 += n; fts_total.1 += r1; fts_total.2 += r5; fts_total.3 += r10;
-            println!("  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
-                name, n,
+            fts_total.0 += n;
+            fts_total.1 += r1;
+            fts_total.2 += r5;
+            fts_total.3 += r10;
+            println!(
+                "  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
+                name,
+                n,
                 r1 as f64 / n as f64 * 100.0,
                 r5 as f64 / n as f64 * 100.0,
                 r10 as f64 / n as f64 * 100.0,
@@ -563,8 +617,10 @@ fn run_locomo_benchmark() {
         }
     }
     println!("  {}", "-".repeat(53));
-    println!("  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
-        "OVERALL", fts_total.0,
+    println!(
+        "  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
+        "OVERALL",
+        fts_total.0,
         fts_total.1 as f64 / fts_total.0 as f64 * 100.0,
         fts_total.2 as f64 / fts_total.0 as f64 * 100.0,
         fts_total.3 as f64 / fts_total.0 as f64 * 100.0,
@@ -574,14 +630,22 @@ fn run_locomo_benchmark() {
     if has_model && !vec_by_cat.is_empty() {
         println!();
         println!("  Vector (cosine similarity, top-K)");
-        println!("  {:20} {:>5} {:>8} {:>8} {:>8}", "Category", "N", "R@1", "R@5", "R@10");
+        println!(
+            "  {:20} {:>5} {:>8} {:>8} {:>8}",
+            "Category", "N", "R@1", "R@5", "R@10"
+        );
         println!("  {}", "-".repeat(53));
         let mut vec_total = (0usize, 0usize, 0usize, 0usize);
         for (cat, name) in &cat_names {
             if let Some(&(n, r1, r5, r10)) = vec_by_cat.get(cat) {
-                vec_total.0 += n; vec_total.1 += r1; vec_total.2 += r5; vec_total.3 += r10;
-                println!("  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
-                    name, n,
+                vec_total.0 += n;
+                vec_total.1 += r1;
+                vec_total.2 += r5;
+                vec_total.3 += r10;
+                println!(
+                    "  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
+                    name,
+                    n,
                     r1 as f64 / n as f64 * 100.0,
                     r5 as f64 / n as f64 * 100.0,
                     r10 as f64 / n as f64 * 100.0,
@@ -590,8 +654,10 @@ fn run_locomo_benchmark() {
         }
         println!("  {}", "-".repeat(53));
         if vec_total.0 > 0 {
-            println!("  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
-                "OVERALL", vec_total.0,
+            println!(
+                "  {:20} {:>5} {:>7.1}% {:>7.1}% {:>7.1}%",
+                "OVERALL",
+                vec_total.0,
                 vec_total.1 as f64 / vec_total.0 as f64 * 100.0,
                 vec_total.2 as f64 / vec_total.0 as f64 * 100.0,
                 vec_total.3 as f64 / vec_total.0 as f64 * 100.0,
@@ -600,26 +666,42 @@ fn run_locomo_benchmark() {
             // Delta
             println!();
             println!("  IMPROVEMENT (Vector vs FTS)");
-            println!("  {:20} {:>8} {:>8} {:>8}", "Category", "Δ R@1", "Δ R@5", "Δ R@10");
+            println!(
+                "  {:20} {:>8} {:>8} {:>8}",
+                "Category", "Δ R@1", "Δ R@5", "Δ R@10"
+            );
             println!("  {}", "-".repeat(48));
             for (cat, name) in &cat_names {
-                let fts = fts_by_cat.get(cat).copied().unwrap_or((0,0,0,0));
-                let vec_ = vec_by_cat.get(cat).copied().unwrap_or((0,0,0,0));
+                let fts = fts_by_cat.get(cat).copied().unwrap_or((0, 0, 0, 0));
+                let vec_ = vec_by_cat.get(cat).copied().unwrap_or((0, 0, 0, 0));
                 if fts.0 > 0 && vec_.0 > 0 {
                     let d1 = vec_.1 as f64 / vec_.0 as f64 - fts.1 as f64 / fts.0 as f64;
                     let d5 = vec_.2 as f64 / vec_.0 as f64 - fts.2 as f64 / fts.0 as f64;
                     let d10 = vec_.3 as f64 / vec_.0 as f64 - fts.3 as f64 / fts.0 as f64;
-                    println!("  {:20} {:>+7.1}% {:>+7.1}% {:>+7.1}%",
-                        name, d1 * 100.0, d5 * 100.0, d10 * 100.0);
+                    println!(
+                        "  {:20} {:>+7.1}% {:>+7.1}% {:>+7.1}%",
+                        name,
+                        d1 * 100.0,
+                        d5 * 100.0,
+                        d10 * 100.0
+                    );
                 }
             }
             if fts_total.0 > 0 && vec_total.0 > 0 {
-                let d1 = vec_total.1 as f64 / vec_total.0 as f64 - fts_total.1 as f64 / fts_total.0 as f64;
-                let d5 = vec_total.2 as f64 / vec_total.0 as f64 - fts_total.2 as f64 / fts_total.0 as f64;
-                let d10 = vec_total.3 as f64 / vec_total.0 as f64 - fts_total.3 as f64 / fts_total.0 as f64;
+                let d1 = vec_total.1 as f64 / vec_total.0 as f64
+                    - fts_total.1 as f64 / fts_total.0 as f64;
+                let d5 = vec_total.2 as f64 / vec_total.0 as f64
+                    - fts_total.2 as f64 / fts_total.0 as f64;
+                let d10 = vec_total.3 as f64 / vec_total.0 as f64
+                    - fts_total.3 as f64 / fts_total.0 as f64;
                 println!("  {}", "-".repeat(48));
-                println!("  {:20} {:>+7.1}% {:>+7.1}% {:>+7.1}%",
-                    "OVERALL", d1 * 100.0, d5 * 100.0, d10 * 100.0);
+                println!(
+                    "  {:20} {:>+7.1}% {:>+7.1}% {:>+7.1}%",
+                    "OVERALL",
+                    d1 * 100.0,
+                    d5 * 100.0,
+                    d10 * 100.0
+                );
             }
         }
     }

@@ -29,6 +29,9 @@ pub enum HypatiaError {
     #[error("SQLite error: {}", redact_sql(.0))]
     Sqlite(#[from] rusqlite::Error),
 
+    #[cfg(feature = "postgres-backend")]
+    #[error("PostgreSQL error: {0}")]
+    Postgres(#[from] postgres::Error),
 
     #[error("JSE parse error: {0}")]
     Parse(String),
@@ -95,7 +98,10 @@ mod tests {
     #[test]
     fn storage_error_display_omits_sql() {
         let rendered = HypatiaError::from(StorageError::from(sql_input_error())).to_string();
-        assert_eq!(rendered, "storage error: SQLite error: near \"b\": syntax error");
+        assert_eq!(
+            rendered,
+            "storage error: SQLite error: near \"b\": syntax error"
+        );
         assert!(!rendered.contains("SELECT"));
         assert!(!rendered.contains("json_extract"));
     }

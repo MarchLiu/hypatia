@@ -1,10 +1,10 @@
-use crate::error::{HypatiaError, Result};
-use crate::model::{QueryOpts, QueryResult, QueryTarget, SearchOpts};
-use crate::storage::Storage;
 use super::ast::AstNode;
 use super::operators::{OpContext, OperatorResult};
 use super::parser::Parser;
 use super::sql_builder::SqlBuilder;
+use crate::error::{HypatiaError, Result};
+use crate::model::{QueryOpts, QueryResult, QueryTarget, SearchOpts};
+use crate::storage::Storage;
 
 pub struct Evaluator;
 
@@ -12,6 +12,9 @@ impl Evaluator {
     /// Parse a JSE JSON expression and evaluate it against storage.
     pub fn execute(json: &serde_json::Value, store: &dyn Storage) -> Result<QueryResult> {
         let ast = Parser::parse(json)?;
+        if store.sql_dialect() == super::SqlDialect::Postgres {
+            return super::postgres::execute(&ast, store);
+        }
         Self::eval(&ast, store)
     }
 
@@ -60,7 +63,9 @@ impl Evaluator {
                     // the resulting keys to build SQL IN conditions.
                     let search_opts = query_opts_to_search_opts(&opts, target);
                     let search_result = store.execute_search(&query, &search_opts)?;
-                    let keys: Vec<String> = search_result.rows.iter()
+                    let keys: Vec<String> = search_result
+                        .rows
+                        .iter()
                         .filter_map(|row| row.get("key").and_then(|v| v.as_str()).map(String::from))
                         .collect();
                     if keys.is_empty() {
@@ -76,8 +81,14 @@ impl Evaluator {
                     // to build SQL IN conditions (same pattern as FTS).
                     let search_opts = query_opts_to_search_opts(&opts, target);
                     let search_result = store.execute_similar(&query_text, &search_opts, target)?;
-                    let keys: Vec<String> = search_result.rows.iter()
-                        .filter_map(|row| row.get(target.key_column()).and_then(|v| v.as_str()).map(String::from))
+                    let keys: Vec<String> = search_result
+                        .rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.get(target.key_column())
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
                         .collect();
                     if keys.is_empty() {
                         builder.add_condition("1=0".to_string(), Vec::new());
@@ -86,7 +97,11 @@ impl Evaluator {
                         builder.add_condition(fragment, params);
                     }
                 }
-                OperatorResult::KHop { subject, predicate, depth } => {
+                OperatorResult::KHop {
+                    subject,
+                    predicate,
+                    depth,
+                } => {
                     // $k-hop: only valid inside $statement
                     if target != QueryTarget::Statement {
                         return Err(HypatiaError::Eval(
@@ -94,8 +109,12 @@ impl Evaluator {
                         ));
                     }
                     let khop_result = store.execute_khop(&subject, predicate.as_deref(), depth)?;
-                    let keys: Vec<String> = khop_result.rows.iter()
-                        .filter_map(|row| row.get("triple").and_then(|v| v.as_str()).map(String::from))
+                    let keys: Vec<String> = khop_result
+                        .rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.get("triple").and_then(|v| v.as_str()).map(String::from)
+                        })
                         .collect();
                     if keys.is_empty() {
                         builder.add_condition("1=0".to_string(), Vec::new());
@@ -123,7 +142,8 @@ impl Evaluator {
 
         if operands.is_empty() {
             return Err(HypatiaError::Eval(
-                "$not-summaried expects at least a tag argument (e.g. \"message\", \"summary-l1\")".to_string(),
+                "$not-summaried expects at least a tag argument (e.g. \"message\", \"summary-l1\")"
+                    .to_string(),
             ));
         }
 
@@ -155,27 +175,36 @@ impl Evaluator {
                 OperatorResult::FtsQuery { query } => {
                     let search_opts = query_opts_to_search_opts(&opts, QueryTarget::Knowledge);
                     let search_result = store.execute_search(&query, &search_opts)?;
-                    let keys: Vec<String> = search_result.rows.iter()
+                    let keys: Vec<String> = search_result
+                        .rows
+                        .iter()
                         .filter_map(|row| row.get("key").and_then(|v| v.as_str()).map(String::from))
                         .collect();
                     if keys.is_empty() {
                         conditions.push("1=0".to_string());
                     } else {
-                        let (fragment, params) = build_key_match_condition(QueryTarget::Knowledge, &keys);
+                        let (fragment, params) =
+                            build_key_match_condition(QueryTarget::Knowledge, &keys);
                         conditions.push(fragment);
                         cond_params.extend(params);
                     }
                 }
                 OperatorResult::VectorQuery { query_text } => {
                     let search_opts = query_opts_to_search_opts(&opts, QueryTarget::Knowledge);
-                    let search_result = store.execute_similar(&query_text, &search_opts, QueryTarget::Knowledge)?;
-                    let keys: Vec<String> = search_result.rows.iter()
-                        .filter_map(|row| row.get("name").and_then(|v| v.as_str()).map(String::from))
+                    let search_result =
+                        store.execute_similar(&query_text, &search_opts, QueryTarget::Knowledge)?;
+                    let keys: Vec<String> = search_result
+                        .rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.get("name").and_then(|v| v.as_str()).map(String::from)
+                        })
                         .collect();
                     if keys.is_empty() {
                         conditions.push("1=0".to_string());
                     } else {
-                        let (fragment, params) = build_key_match_condition(QueryTarget::Knowledge, &keys);
+                        let (fragment, params) =
+                            build_key_match_condition(QueryTarget::Knowledge, &keys);
                         conditions.push(fragment);
                         cond_params.extend(params);
                     }
@@ -222,27 +251,26 @@ impl Evaluator {
 
     fn eval_condition(ast: &AstNode, ctx: &OpContext) -> Result<OperatorResult> {
         match ast {
-            AstNode::Operator { operator, operands, metadata } => {
-                super::operators::evaluate_operator(
-                    operator,
-                    operands,
-                    metadata,
-                    ctx,
-                    &|node| Self::eval_condition(node, ctx),
-                )
-            }
-            AstNode::Quote(inner) => {
-                Ok(OperatorResult::Value(ast_to_value(inner)))
-            }
+            AstNode::Operator {
+                operator,
+                operands,
+                metadata,
+            } => super::operators::evaluate_operator(operator, operands, metadata, ctx, &|node| {
+                Self::eval_condition(node, ctx)
+            }),
+            AstNode::Quote(inner) => Ok(OperatorResult::Value(ast_to_value(inner))),
             AstNode::Literal(v) => Ok(OperatorResult::Value(v.clone())),
             _ => Err(HypatiaError::Eval(format!(
-                "unexpected node in condition context: {:?}", ast
+                "unexpected node in condition context: {:?}",
+                ast
             ))),
         }
     }
 }
 
-fn extract_query_opts(metadata: &serde_json::Map<String, serde_json::Value>) -> QueryOpts {
+pub(super) fn extract_query_opts(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> QueryOpts {
     let mut opts = QueryOpts::default();
     if let Some(serde_json::Value::String(catalog)) = metadata.get("catalog") {
         opts.catalog = Some(catalog.clone());
@@ -257,10 +285,13 @@ fn extract_query_opts(metadata: &serde_json::Map<String, serde_json::Value>) -> 
 }
 
 /// Convert QueryOpts (from the parent $knowledge/$statement) to SearchOpts for FTS execution.
-fn query_opts_to_search_opts(opts: &QueryOpts, target: QueryTarget) -> SearchOpts {
+pub(super) fn query_opts_to_search_opts(opts: &QueryOpts, target: QueryTarget) -> SearchOpts {
     SearchOpts {
         // Default catalog to the query target's table name if not explicitly set
-        catalog: opts.catalog.clone().or_else(|| Some(target.table_name().to_string())),
+        catalog: opts
+            .catalog
+            .clone()
+            .or_else(|| Some(target.table_name().to_string())),
         limit: opts.limit,
         offset: opts.offset,
     }
@@ -269,9 +300,13 @@ fn query_opts_to_search_opts(opts: &QueryOpts, target: QueryTarget) -> SearchOpt
 /// Build a SQL condition that matches keys from FTS results against the target table.
 /// For Knowledge: `name IN (?, ?, ...)`
 /// For Statement: `triple IN (?, ?, ...)`
-fn build_key_match_condition(target: QueryTarget, keys: &[String]) -> (String, Vec<serde_json::Value>) {
+fn build_key_match_condition(
+    target: QueryTarget,
+    keys: &[String],
+) -> (String, Vec<serde_json::Value>) {
     let pk_column = target.key_column();
-    let params: Vec<serde_json::Value> = keys.iter()
+    let params: Vec<serde_json::Value> = keys
+        .iter()
         .map(|k| serde_json::Value::String(k.clone()))
         .collect();
     let placeholders: Vec<&str> = keys.iter().map(|_| "?").collect();
@@ -280,16 +315,16 @@ fn build_key_match_condition(target: QueryTarget, keys: &[String]) -> (String, V
 }
 
 /// Convert an AST node back to a JSON value (for $quote).
-fn ast_to_value(node: &AstNode) -> serde_json::Value {
+pub(super) fn ast_to_value(node: &AstNode) -> serde_json::Value {
     match node {
         AstNode::Literal(v) => v.clone(),
         AstNode::Symbol(s) => serde_json::Value::String(s.clone()),
-        AstNode::Array(nodes) => {
-            serde_json::Value::Array(nodes.iter().map(ast_to_value).collect())
-        }
+        AstNode::Array(nodes) => serde_json::Value::Array(nodes.iter().map(ast_to_value).collect()),
         AstNode::Object(map) => serde_json::Value::Object(map.clone()),
         AstNode::Quote(_inner) => ast_to_value(_inner),
-        AstNode::Operator { operator, operands, .. } => {
+        AstNode::Operator {
+            operator, operands, ..
+        } => {
             let mut arr = vec![serde_json::Value::String(operator.clone())];
             arr.extend(operands.iter().map(ast_to_value));
             serde_json::Value::Array(arr)
@@ -320,7 +355,10 @@ mod tests {
             query_results: Vec<serde_json::Map<String, serde_json::Value>>,
             search_results: Vec<serde_json::Map<String, serde_json::Value>>,
         ) -> Self {
-            Self { query_results, search_results }
+            Self {
+                query_results,
+                search_results,
+            }
         }
     }
 
@@ -366,10 +404,8 @@ mod tests {
             m.insert("name".to_string(), json!("test"));
             m
         }]);
-        let result = Evaluator::execute(
-            &json!(["$knowledge", ["$eq", "name", "test"]]),
-            &mock,
-        ).unwrap();
+        let result =
+            Evaluator::execute(&json!(["$knowledge", ["$eq", "name", "test"]]), &mock).unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["name"], json!("test"));
     }
@@ -377,10 +413,7 @@ mod tests {
     #[test]
     fn eval_statement_query() {
         let mock = MockStorage::new(vec![]);
-        let result = Evaluator::execute(
-            &json!(["$statement"]),
-            &mock,
-        ).unwrap();
+        let result = Evaluator::execute(&json!(["$statement"]), &mock).unwrap();
         assert_eq!(result.rows.len(), 0);
     }
 
@@ -395,10 +428,8 @@ mod tests {
         query_row.insert("name".to_string(), json!("rust"));
 
         let mock = MockStorage::with_search_results(vec![query_row], vec![search_row]);
-        let result = Evaluator::execute(
-            &json!(["$knowledge", ["$search", "rust"]]),
-            &mock,
-        ).unwrap();
+        let result =
+            Evaluator::execute(&json!(["$knowledge", ["$search", "rust"]]), &mock).unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["name"], json!("rust"));
     }
@@ -415,10 +446,8 @@ mod tests {
         query_row.insert("triple".to_string(), json!("Alice,knows,Bob"));
 
         let mock = MockStorage::with_search_results(vec![query_row], vec![search_row]);
-        let result = Evaluator::execute(
-            &json!(["$statement", ["$search", "Alice"]]),
-            &mock,
-        ).unwrap();
+        let result =
+            Evaluator::execute(&json!(["$statement", ["$search", "Alice"]]), &mock).unwrap();
         assert_eq!(result.rows.len(), 1);
     }
 
@@ -426,20 +455,14 @@ mod tests {
     fn eval_search_not_top_level() {
         // $search can no longer be used as a top-level operator
         let mock = MockStorage::new(vec![]);
-        let result = Evaluator::execute(
-            &json!({"$search": "rust", "catalog": "knowledge"}),
-            &mock,
-        );
+        let result = Evaluator::execute(&json!({"$search": "rust", "catalog": "knowledge"}), &mock);
         assert!(result.is_err());
     }
 
     #[test]
     fn eval_invalid_top_level() {
         let mock = MockStorage::new(vec![]);
-        let result = Evaluator::execute(
-            &json!("not a query"),
-            &mock,
-        );
+        let result = Evaluator::execute(&json!("not a query"), &mock);
         assert!(result.is_err());
     }
 
@@ -457,7 +480,8 @@ mod tests {
         let result = Evaluator::execute(
             &json!(["$knowledge", ["$similar", "systems programming"]]),
             &mock,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["name"], json!("rust"));
     }
@@ -473,10 +497,9 @@ mod tests {
         query_row.insert("triple".to_string(), json!("Alice,knows,Bob"));
 
         let mock = MockStorage::with_search_results(vec![query_row], vec![similar_row]);
-        let result = Evaluator::execute(
-            &json!(["$statement", ["$similar", "relationships"]]),
-            &mock,
-        ).unwrap();
+        let result =
+            Evaluator::execute(&json!(["$statement", ["$similar", "relationships"]]), &mock)
+                .unwrap();
         assert_eq!(result.rows.len(), 1);
     }
 
@@ -494,7 +517,10 @@ mod tests {
     fn build_key_match_statement() {
         let (sql, params) = build_key_match_condition(
             QueryTarget::Statement,
-            &["Alice,knows,Bob".to_string(), "Charlie,likes,Rust".to_string()],
+            &[
+                "Alice,knows,Bob".to_string(),
+                "Charlie,likes,Rust".to_string(),
+            ],
         );
         assert_eq!(sql, "triple IN (?, ?)");
         assert_eq!(params.len(), 2);
@@ -504,14 +530,14 @@ mod tests {
     fn eval_not_summaried_basic() {
         let mut row = serde_json::Map::new();
         row.insert("name".to_string(), json!("msg-s1-001"));
-        row.insert("content".to_string(), json!(r#"{"tags":["message","user"]}"#));
+        row.insert(
+            "content".to_string(),
+            json!(r#"{"tags":["message","user"]}"#),
+        );
         row.insert("created_at".to_string(), json!("2026-01-01 00:00:00"));
 
         let mock = MockStorage::new(vec![row]);
-        let result = Evaluator::execute(
-            &json!(["$not-summaried", "message"]),
-            &mock,
-        ).unwrap();
+        let result = Evaluator::execute(&json!(["$not-summaried", "message"]), &mock).unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["name"], json!("msg-s1-001"));
     }
@@ -520,37 +546,49 @@ mod tests {
     fn eval_not_summaried_with_condition() {
         let mut row = serde_json::Map::new();
         row.insert("name".to_string(), json!("msg-s1-001"));
-        row.insert("content".to_string(), json!(r#"{"tags":["message","user"]}"#));
+        row.insert(
+            "content".to_string(),
+            json!(r#"{"tags":["message","user"]}"#),
+        );
         row.insert("created_at".to_string(), json!("2026-01-01 00:00:00"));
 
         let mock = MockStorage::new(vec![row]);
         let result = Evaluator::execute(
-            &json!(["$not-summaried", "message", ["$contains", "scopes", "my-project"]]),
+            &json!([
+                "$not-summaried",
+                "message",
+                ["$contains", "scopes", "my-project"]
+            ]),
             &mock,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
     }
 
     #[test]
     fn eval_not_summaried_empty_operands() {
         let mock = MockStorage::new(vec![]);
-        let result = Evaluator::execute(
-            &json!(["$not-summaried"]),
-            &mock,
-        );
+        let result = Evaluator::execute(&json!(["$not-summaried"]), &mock);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expects at least a tag"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expects at least a tag")
+        );
     }
 
     #[test]
     fn eval_not_summaried_bad_tag() {
         let mock = MockStorage::new(vec![]);
-        let result = Evaluator::execute(
-            &json!(["$not-summaried", 123]),
-            &mock,
-        );
+        let result = Evaluator::execute(&json!(["$not-summaried", 123]), &mock);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a tag string"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be a tag string")
+        );
     }
 
     /// Build the SQL fragment an operator emits under a qualifying context,
@@ -615,7 +653,12 @@ mod tests {
     /// a valid path that silently matched nothing.
     #[test]
     fn qualified_context_does_not_rewrite_column_names_inside_field_paths() {
-        for field in ["doc_created_at", "created_at_utc", "tr_start_ns", "my_tr_end"] {
+        for field in [
+            "doc_created_at",
+            "created_at_utc",
+            "tr_start_ns",
+            "my_tr_end",
+        ] {
             let (fragment, params) = qualified_fragment(json!(["$like", field, "%x%"]));
             assert_eq!(
                 fragment, "json_extract(knowledge.content, ?) LIKE ?",

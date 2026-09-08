@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use hypatia::model::{Content, QueryTarget, SearchOpts};
-use hypatia::storage::{sanitize_fts_query, ShelfManager, Storage};
+use hypatia::storage::{ShelfManager, Storage, sanitize_fts_query};
 
 // ── Helper: accept both string and integer for "answer" field ────────
 
@@ -241,11 +241,10 @@ fn run_longmemeval_benchmark() {
         panic!("Data file not found");
     });
     let reader = BufReader::new(file);
-    let instances: Vec<EvalInstance> =
-        serde_json::from_reader(reader).unwrap_or_else(|e| {
-            eprintln!("  ERROR: Failed to parse {data_path}: {e}");
-            panic!("Parse error");
-        });
+    let instances: Vec<EvalInstance> = serde_json::from_reader(reader).unwrap_or_else(|e| {
+        eprintln!("  ERROR: Failed to parse {data_path}: {e}");
+        panic!("Parse error");
+    });
 
     // Support subset via LONGMEMEVAL_MAX_QUESTIONS env var
     let max_questions: usize = env::var("LONGMEMEVAL_MAX_QUESTIONS")
@@ -297,8 +296,7 @@ fn run_longmemeval_benchmark() {
 
     // Hermetic home: never touch (or migrate!) the real ~/.hypatia shelf.
     let home = tempfile::tempdir().expect("create temp home");
-    let mut mgr = ShelfManager::with_home(home.path().to_path_buf())
-        .expect("create shelf manager");
+    let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).expect("create shelf manager");
     let shelf_name = mgr
         .connect(&shelf_path, Some("longmemeval"))
         .expect("connect shelf");
@@ -419,7 +417,10 @@ fn run_longmemeval_benchmark() {
             let result = shelf
                 .execute_search(&fts_query, &fts_opts)
                 .unwrap_or_else(|e| {
-                    eprintln!("    WARN: FTS search failed for '{:?}': {}", inst.question, e);
+                    eprintln!(
+                        "    WARN: FTS search failed for '{:?}': {}",
+                        inst.question, e
+                    );
                     hypatia::model::QueryResult::new(Vec::new())
                 });
             let lat = t.elapsed().as_micros() as u64;
@@ -545,17 +546,33 @@ fn run_longmemeval_benchmark() {
         let fts_r5 = compute_session_recall(&r.fts_retrieved_sessions, expected_sessions, 5);
         let fts_r10 = compute_session_recall(&r.fts_retrieved_sessions, expected_sessions, 10);
 
-        let fts_type = fts_by_type.entry(r.question_type.clone()).or_insert((0, 0, 0, 0));
+        let fts_type = fts_by_type
+            .entry(r.question_type.clone())
+            .or_insert((0, 0, 0, 0));
         fts_type.0 += 1;
-        if fts_r1 { fts_type.1 += 1; }
-        if fts_r5 { fts_type.2 += 1; }
-        if fts_r10 { fts_type.3 += 1; }
+        if fts_r1 {
+            fts_type.1 += 1;
+        }
+        if fts_r5 {
+            fts_type.2 += 1;
+        }
+        if fts_r10 {
+            fts_type.3 += 1;
+        }
 
-        let fts_ab = fts_by_ability.entry(r.ability.clone()).or_insert((0, 0, 0, 0));
+        let fts_ab = fts_by_ability
+            .entry(r.ability.clone())
+            .or_insert((0, 0, 0, 0));
         fts_ab.0 += 1;
-        if fts_r1 { fts_ab.1 += 1; }
-        if fts_r5 { fts_ab.2 += 1; }
-        if fts_r10 { fts_ab.3 += 1; }
+        if fts_r1 {
+            fts_ab.1 += 1;
+        }
+        if fts_r5 {
+            fts_ab.2 += 1;
+        }
+        if fts_r10 {
+            fts_ab.3 += 1;
+        }
 
         // Vector
         if let Some(ref vec_sessions) = r.vec_retrieved_sessions {
@@ -563,29 +580,51 @@ fn run_longmemeval_benchmark() {
             let vec_r5 = compute_session_recall(vec_sessions, expected_sessions, 5);
             let vec_r10 = compute_session_recall(vec_sessions, expected_sessions, 10);
 
-            let vec_type = vec_by_type.entry(r.question_type.clone()).or_insert((0, 0, 0, 0));
+            let vec_type = vec_by_type
+                .entry(r.question_type.clone())
+                .or_insert((0, 0, 0, 0));
             vec_type.0 += 1;
-            if vec_r1 { vec_type.1 += 1; }
-            if vec_r5 { vec_type.2 += 1; }
-            if vec_r10 { vec_type.3 += 1; }
+            if vec_r1 {
+                vec_type.1 += 1;
+            }
+            if vec_r5 {
+                vec_type.2 += 1;
+            }
+            if vec_r10 {
+                vec_type.3 += 1;
+            }
 
-            let vec_ab = vec_by_ability.entry(r.ability.clone()).or_insert((0, 0, 0, 0));
+            let vec_ab = vec_by_ability
+                .entry(r.ability.clone())
+                .or_insert((0, 0, 0, 0));
             vec_ab.0 += 1;
-            if vec_r1 { vec_ab.1 += 1; }
-            if vec_r5 { vec_ab.2 += 1; }
-            if vec_r10 { vec_ab.3 += 1; }
+            if vec_r1 {
+                vec_ab.1 += 1;
+            }
+            if vec_r5 {
+                vec_ab.2 += 1;
+            }
+            if vec_r10 {
+                vec_ab.3 += 1;
+            }
         }
     }
 
     fts_latencies.sort();
     vec_latencies.sort();
 
-    let fts_p50 = fts_latencies.get(fts_latencies.len() / 2).copied().unwrap_or(0);
+    let fts_p50 = fts_latencies
+        .get(fts_latencies.len() / 2)
+        .copied()
+        .unwrap_or(0);
     let fts_p99 = fts_latencies
         .get(fts_latencies.len() * 99 / 100)
         .copied()
         .unwrap_or(0);
-    let vec_p50 = vec_latencies.get(vec_latencies.len() / 2).copied().unwrap_or(0);
+    let vec_p50 = vec_latencies
+        .get(vec_latencies.len() / 2)
+        .copied()
+        .unwrap_or(0);
     let vec_p99 = vec_latencies
         .get(vec_latencies.len() * 99 / 100)
         .copied()
@@ -602,7 +641,10 @@ fn run_longmemeval_benchmark() {
 
     // By ability
     println!("  RETRIEVAL — By Ability (session-level, excl. abstention)");
-    println!("  {:25} {:>5} {:>8} {:>8} {:>8}", "Ability", "N", "R@1", "R@5", "R@10");
+    println!(
+        "  {:25} {:>5} {:>8} {:>8} {:>8}",
+        "Ability", "N", "R@1", "R@5", "R@10"
+    );
     println!("  {}", "─".repeat(58));
 
     let ability_order = [
@@ -693,6 +735,8 @@ fn run_longmemeval_benchmark() {
     }
     println!("{}", "═".repeat(70));
     println!("\n  Results saved to: {results_path}");
-    println!("  Next: python3 scripts/longmemeval_eval.py --results {results_path} --retrieval-only");
+    println!(
+        "  Next: python3 scripts/longmemeval_eval.py --results {results_path} --retrieval-only"
+    );
     println!();
 }

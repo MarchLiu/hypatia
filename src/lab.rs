@@ -8,6 +8,7 @@ use crate::service::{KnowledgeService, StatementService};
 use crate::storage::{ShelfManager, Storage};
 
 /// Statistics returned by backfill operation.
+#[derive(Debug)]
 pub struct BackfillStats {
     pub created: usize,
     pub skipped: usize,
@@ -42,6 +43,10 @@ impl Lab {
         self.shelf_manager.export(name, dest)
     }
 
+    pub fn import_shelf(&mut self, name: &str, source: &Path, reembed: bool) -> Result<()> {
+        self.shelf_manager.import(name, source, reembed)
+    }
+
     // --- JSE Query ---
 
     pub fn query(&mut self, shelf_name: &str, jse: &serde_json::Value) -> Result<QueryResult> {
@@ -53,7 +58,12 @@ impl Lab {
 
     // --- Knowledge CRUD ---
 
-    pub fn create_knowledge(&mut self, shelf: &str, name: &str, content: Content) -> Result<Knowledge> {
+    pub fn create_knowledge(
+        &mut self,
+        shelf: &str,
+        name: &str,
+        content: Content,
+    ) -> Result<Knowledge> {
         let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
@@ -65,10 +75,15 @@ impl Lab {
         let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
-        shelf_ref.store.get_knowledge(name)
+        shelf_ref.backend.get_knowledge(name)
     }
 
-    pub fn update_knowledge(&mut self, shelf: &str, name: &str, content: Content) -> Result<Knowledge> {
+    pub fn update_knowledge(
+        &mut self,
+        shelf: &str,
+        name: &str,
+        content: Content,
+    ) -> Result<Knowledge> {
         let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
@@ -105,7 +120,7 @@ impl Lab {
         let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
-        shelf_ref.store.get_statement(key)
+        shelf_ref.backend.get_statement(key)
     }
 
     pub fn delete_statement(&mut self, shelf: &str, key: &StatementKey) -> Result<()> {
@@ -145,12 +160,8 @@ impl Lab {
         };
 
         match target {
-            "knowledge" => {
-                shelf_ref.execute_similar(query, &opts, QueryTarget::Knowledge)
-            }
-            "statement" => {
-                shelf_ref.execute_similar(query, &opts, QueryTarget::Statement)
-            }
+            "knowledge" => shelf_ref.execute_similar(query, &opts, QueryTarget::Knowledge),
+            "statement" => shelf_ref.execute_similar(query, &opts, QueryTarget::Statement),
             "both" => {
                 let mut knowledge_rows = shelf_ref
                     .execute_similar(query, &opts, QueryTarget::Knowledge)?
@@ -188,11 +199,9 @@ impl Lab {
                 all_rows.truncate(limit as usize);
                 Ok(QueryResult::new(all_rows))
             }
-            _ => Err(crate::error::HypatiaError::Validation(
-                format!(
-                    "invalid target '{target}': must be 'knowledge', 'statement', or 'both'"
-                ),
-            )),
+            _ => Err(crate::error::HypatiaError::Validation(format!(
+                "invalid target '{target}': must be 'knowledge', 'statement', or 'both'"
+            ))),
         }
     }
 
@@ -201,7 +210,12 @@ impl Lab {
     /// Store a file in the shelf's archives/ directory.
     /// `dest_relative` is the target path relative to archives/ (e.g., "euclid/fig1.png").
     /// Returns the absolute path of the stored file.
-    pub fn store_archive(&self, shelf: &str, src: &Path, dest_relative: &str) -> Result<std::path::PathBuf> {
+    pub fn store_archive(
+        &self,
+        shelf: &str,
+        src: &Path,
+        dest_relative: &str,
+    ) -> Result<std::path::PathBuf> {
         let archives_dir = self.shelf_manager.archives_path(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
@@ -239,6 +253,14 @@ impl Lab {
     /// Generate embedding vectors for all entries that don't have one yet.
     /// Idempotent: entries that already have vectors are skipped.
     pub fn backfill_vectors(&mut self, shelf: &str) -> Result<BackfillStats> {
+        self.backfill_vectors_with_reembed(shelf, false)
+    }
+
+    pub fn backfill_vectors_with_reembed(
+        &mut self,
+        shelf: &str,
+        reembed: bool,
+    ) -> Result<BackfillStats> {
         let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
@@ -249,55 +271,163 @@ impl Lab {
             ));
         }
 
-        let mut stats = BackfillStats { created: 0, skipped: 0, errors: 0 };
-
-        // Backfill knowledge entries
-        let knowledge_missing = shelf_ref.store.knowledge_without_embeddings()?;
-        stats.skipped += shelf_ref.store.knowledge_with_embeddings()?.len();
-
-        for (name, content_json) in knowledge_missing {
-            let content = match Content::from_json_str(&content_json) {
-                Ok(c) => c,
-                Err(_) => { stats.errors += 1; continue; }
+        if !reembed
+            && !shelf_ref.backend.embeddings_identified()?
+            && shelf_ref.backend.embedding_row_count("knowledge")?
+                + shelf_ref.backend.embedding_row_count("statement")?
+                > 0
+        {
+            return Err(crate::error::HypatiaError::Config(
+                "legacy vector identity is unknown; run backfill --reembed explicitly".into(),
+            ));
+        }
+        if reembed {
+            if !shelf_ref.settings.embedding.model_identity_trusted {
+                return Err(crate::error::HypatiaError::Config(
+                    "re-embedding requires an identifiable configured model".into(),
+                ));
+            }
+            let metadata = crate::storage::transfer::EmbeddingMetadata {
+                model: shelf_ref.settings.embedding.model_identity().into(),
+                dimensions: shelf_ref.settings.embedding.dimensions(),
+                metric: "cosine".into(),
             };
+            shelf_ref.backend.reset_embeddings(&metadata)?;
+        }
+        let mut stats = BackfillStats {
+            created: 0,
+            skipped: 0,
+            errors: 0,
+        };
 
-            let text = content.embedding_text(&name);
-            match shelf_ref.embedder.embed(&text) {
-                Ok(vector) => {
-                    match shelf_ref.store.upsert_knowledge_embedding(&name, &vector) {
-                        Ok(_) => stats.created += 1,
-                        Err(_) => stats.errors += 1,
+        for catalog in ["knowledge", "statement"] {
+            stats.skipped += shelf_ref.backend.embedding_row_count(catalog)?;
+            let mut after: Option<String> = None;
+            loop {
+                let page = shelf_ref
+                    .backend
+                    .missing_embeddings(catalog, after.as_deref(), 128)?;
+                if page.is_empty() {
+                    break;
+                }
+                for (key, content, version) in page {
+                    after = Some(key.clone());
+                    match shelf_ref.embedder.embed(&content.embedding_text(&key)) {
+                        Ok(vector) => match shelf_ref
+                            .backend
+                            .install_embedding(catalog, &key, version, &vector)
+                        {
+                            Ok(true) => stats.created += 1,
+                            Ok(false) => stats.skipped += 1,
+                            Err(e) => {
+                                eprintln!("backfill {catalog}/{key}: {e}");
+                                stats.errors += 1;
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("backfill {catalog}/{key}: {e}");
+                            stats.errors += 1;
+                        }
                     }
                 }
-                Err(_) => stats.errors += 1,
             }
         }
-
-        // Backfill statement entries
-        let stmt_missing = shelf_ref.store.statements_without_embeddings()?;
-
-        for (triple, content_json) in stmt_missing {
-            let content = match Content::from_json_str(&content_json) {
-                Ok(c) => c,
-                Err(_) => { stats.errors += 1; continue; }
-            };
-
-            let text = content.embedding_text(&triple);
-            match shelf_ref.embedder.embed(&text) {
-                Ok(vector) => {
-                    match shelf_ref.store.upsert_statement_embedding(&triple, &vector) {
-                        Ok(_) => stats.created += 1,
-                        Err(_) => stats.errors += 1,
-                    }
-                }
-                Err(_) => stats.errors += 1,
-            }
-        }
-
-        // Rebuild ANN snapshots from the authoritative BLOBs and persist.
         shelf_ref.rebuild_vector_indexes()?;
 
         Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::*;
+    use crate::embedding::EmbeddingProvider;
+    struct Fixed {
+        fail: bool,
+    }
+    impl EmbeddingProvider for Fixed {
+        fn embed(&self, _: &str) -> Result<Vec<f32>> {
+            if self.fail {
+                Err(crate::error::HypatiaError::Embedding(
+                    "test network failure".into(),
+                ))
+            } else {
+                Ok(vec![1., 0., 0.])
+            }
+        }
+        fn dimensions(&self) -> usize {
+            3
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+    #[test]
+    fn saved_content_survives_provider_failure_and_existing_backfill_repairs_it() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("shelf.toml"),
+            "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n",
+        )
+        .unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: true });
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        assert_eq!(
+            lab.create_knowledge("test", "key", Content::new("saved"))
+                .unwrap()
+                .content
+                .data,
+            "saved"
+        );
+        let key = StatementKey::new("a", "r", "b");
+        lab.create_statement("test", &key, Content::new("edge"), None, None)
+            .unwrap();
+        assert_eq!(lab.backfill_vectors("test").unwrap().errors, 2);
+        lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
+        assert_eq!(lab.backfill_vectors("test").unwrap().created, 2);
+        assert_eq!(lab.backfill_vectors("test").unwrap().skipped, 2);
+        let legacy = crate::storage::SqliteStore::open(&dir.path().join("hypatia.sqlite")).unwrap();
+        legacy
+            .conn()
+            .execute("DELETE FROM meta WHERE k='embedding_metadata'", [])
+            .unwrap();
+        assert!(
+            lab.backfill_vectors("test")
+                .unwrap_err()
+                .to_string()
+                .contains("--reembed")
+        );
+        assert_eq!(
+            lab.backfill_vectors_with_reembed("test", true)
+                .unwrap()
+                .created,
+            2
+        );
+        lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: true });
+        lab.update_knowledge("test", "key", Content::new("new saved"))
+            .unwrap();
+        assert_eq!(
+            lab.get_knowledge("test", "key")
+                .unwrap()
+                .unwrap()
+                .content
+                .data,
+            "new saved"
+        );
+        assert_eq!(
+            lab.shelf_manager
+                .get("test")
+                .unwrap()
+                .backend
+                .embedding_row_count("knowledge")
+                .unwrap(),
+            0
+        );
     }
 }
 

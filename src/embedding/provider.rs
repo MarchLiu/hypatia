@@ -5,8 +5,8 @@ use ndarray::Array2;
 use ort::session::Session;
 use ort::value::TensorRef;
 
-use crate::error::HypatiaError;
 use super::config::{EmbeddingConfig, LocalConfig, PoolingStrategy, ProviderKind, RemoteConfig};
+use crate::error::HypatiaError;
 
 /// Trait for embedding providers (local ONNX or remote API).
 pub trait EmbeddingProvider {
@@ -49,8 +49,13 @@ pub struct OnnxProvider {
 
 #[allow(clippy::large_enum_variant)]
 enum OnnxInner {
-    Unavailable { reason: String },
-    Pending { model_path: std::path::PathBuf, tokenizer_path: std::path::PathBuf },
+    Unavailable {
+        reason: String,
+    },
+    Pending {
+        model_path: std::path::PathBuf,
+        tokenizer_path: std::path::PathBuf,
+    },
     Ready {
         session: Session,
         tokenizer: tokenizers::Tokenizer,
@@ -105,26 +110,29 @@ impl OnnxProvider {
             let mut inner = self.inner.borrow_mut();
             let old = std::mem::replace(
                 &mut *inner,
-                OnnxInner::Unavailable { reason: "loading...".to_string() },
+                OnnxInner::Unavailable {
+                    reason: "loading...".to_string(),
+                },
             );
 
             match old {
-                OnnxInner::Pending { model_path, tokenizer_path } => {
-                    match load_onnx_model(&model_path, &tokenizer_path) {
-                        Ok((session, tokenizer)) => {
-                            *inner = OnnxInner::Ready { session, tokenizer };
-                            Ok(())
-                        }
-                        Err(e) => {
-                            *inner = OnnxInner::Unavailable {
-                                reason: format!("failed to load model: {e}"),
-                            };
-                            Err(HypatiaError::Embedding(format!(
-                                "failed to load ONNX model: {e}"
-                            )))
-                        }
+                OnnxInner::Pending {
+                    model_path,
+                    tokenizer_path,
+                } => match load_onnx_model(&model_path, &tokenizer_path) {
+                    Ok((session, tokenizer)) => {
+                        *inner = OnnxInner::Ready { session, tokenizer };
+                        Ok(())
                     }
-                }
+                    Err(e) => {
+                        *inner = OnnxInner::Unavailable {
+                            reason: format!("failed to load model: {e}"),
+                        };
+                        Err(HypatiaError::Embedding(format!(
+                            "failed to load ONNX model: {e}"
+                        )))
+                    }
+                },
                 other => {
                     *inner = other;
                     Ok(())
@@ -142,9 +150,9 @@ impl EmbeddingProvider for OnnxProvider {
 
         let mut inner = self.inner.borrow_mut();
         match &mut *inner {
-            OnnxInner::Ready { session, tokenizer, .. } => {
-                run_onnx_inference(session, tokenizer, text, self.max_seq_length, self.pooling)
-            }
+            OnnxInner::Ready {
+                session, tokenizer, ..
+            } => run_onnx_inference(session, tokenizer, text, self.max_seq_length, self.pooling),
             _ => unreachable!("ensure_loaded should guarantee Ready state"),
         }
     }
@@ -203,16 +211,21 @@ fn run_onnx_inference(
     let input_ids_array = Array2::from_shape_vec((1, seq_len), input_ids_data)
         .map_err(|e| HypatiaError::Embedding(format!("failed to create input_ids array: {e}")))?;
 
-    let attention_mask_array = Array2::from_shape_vec((1, seq_len), attention_mask_data)
-        .map_err(|e| HypatiaError::Embedding(format!("failed to create attention_mask array: {e}")))?;
+    let attention_mask_array =
+        Array2::from_shape_vec((1, seq_len), attention_mask_data).map_err(|e| {
+            HypatiaError::Embedding(format!("failed to create attention_mask array: {e}"))
+        })?;
 
     let input_ids_tensor = TensorRef::from_array_view(input_ids_array.view())
         .map_err(|e| HypatiaError::Embedding(format!("failed to create input_ids tensor: {e}")))?;
 
-    let attention_mask_tensor = TensorRef::from_array_view(attention_mask_array.view())
-        .map_err(|e| HypatiaError::Embedding(format!("failed to create attention_mask tensor: {e}")))?;
+    let attention_mask_tensor =
+        TensorRef::from_array_view(attention_mask_array.view()).map_err(|e| {
+            HypatiaError::Embedding(format!("failed to create attention_mask tensor: {e}"))
+        })?;
 
-    let outputs = session.run(ort::inputs![input_ids_tensor, attention_mask_tensor])
+    let outputs = session
+        .run(ort::inputs![input_ids_tensor, attention_mask_tensor])
         .map_err(|e| HypatiaError::Embedding(format!("inference failed: {e}")))?;
 
     // Prefer sentence_embedding (index 1) if available, else token_embeddings (index 0)
@@ -341,15 +354,15 @@ impl RemoteApiProvider {
 
     fn api_key(&self) -> Result<String, HypatiaError> {
         std::env::var(&self.api_key_env).map_err(|_| {
-            HypatiaError::Embedding(format!(
-                "environment variable {} not set",
-                self.api_key_env
-            ))
+            HypatiaError::Embedding(format!("environment variable {} not set", self.api_key_env))
         })
     }
 
     /// Send an embedding request with timeout and retry.
-    fn request_with_retry(&self, input: &serde_json::Value) -> Result<serde_json::Value, HypatiaError> {
+    fn request_with_retry(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HypatiaError> {
         let api_key = self.api_key()?;
 
         let mut request_body = serde_json::json!({
@@ -365,9 +378,8 @@ impl RemoteApiProvider {
 
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
-                let delay = std::time::Duration::from_millis(
-                    RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1),
-                );
+                let delay =
+                    std::time::Duration::from_millis(RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1));
                 eprintln!(
                     "    [remote-embed] retry {attempt}/{MAX_RETRIES} after {}ms",
                     delay.as_millis()
@@ -394,15 +406,13 @@ impl RemoteApiProvider {
                             continue;
                         }
                         return Err(HypatiaError::Embedding(format!(
-                            "API returned {}: {msg}", status
+                            "API returned {}: {msg}",
+                            status
                         )));
                     }
-                    let body: serde_json::Value = response
-                        .body_mut()
-                        .read_json()
-                        .map_err(|e| HypatiaError::Embedding(format!(
-                            "failed to parse API response: {e}"
-                        )))?;
+                    let body: serde_json::Value = response.body_mut().read_json().map_err(|e| {
+                        HypatiaError::Embedding(format!("failed to parse API response: {e}"))
+                    })?;
                     return Ok(body);
                 }
                 Err(e) => {
@@ -420,15 +430,16 @@ impl RemoteApiProvider {
     }
 
     /// Parse a single embedding from the API response.
-    fn parse_embedding(response: &serde_json::Value, index: usize) -> Result<Vec<f32>, HypatiaError> {
+    fn parse_embedding(
+        response: &serde_json::Value,
+        index: usize,
+    ) -> Result<Vec<f32>, HypatiaError> {
         let embedding = response
             .get("data")
             .and_then(|d| d.get(index))
             .and_then(|d| d.get("embedding"))
             .and_then(|e| e.as_array())
-            .ok_or_else(|| {
-                HypatiaError::Embedding("unexpected API response format".into())
-            })?;
+            .ok_or_else(|| HypatiaError::Embedding("unexpected API response format".into()))?;
 
         let vector: Vec<f32> = embedding
             .iter()

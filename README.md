@@ -2,14 +2,14 @@
 
 "We can wander through the stacks of the Library of Alexandria, imagining the scrolls and the knowledge they contain. Its destruction is a warning: all we have is transient."——Alberto Manguel
 
-AI-oriented memory management system. Stores structured knowledge as a graph of **Knowledge** entries (nodes) and **Statement** triples (edges), queried via a custom JSON Search Expression (JSE) language. Built on SQLite FTS5 + DuckDB, with configurable embedding models (local ONNX or remote API) for semantic vector search.
+AI-oriented memory management system. Stores structured knowledge as a graph of **Knowledge** entries (nodes) and **Statement** triples (edges), queried via a custom JSON Search Expression (JSE) language. Uses SQLite + FTS5 + usearch by default, with an optional complete PostgreSQL + pgvector backend and configurable embedding models (local ONNX or remote API). See [PostgreSQL configuration and migration](docs/pgvector-backend.md).
 
 ## Features
 
 - **Knowledge Graph** -- Knowledge entries (named info points with tags) and Statement triples (subject-predicate-object with temporal ranges)
 - **JSE Query Engine** -- JSON-based query language compiling to parameterized SQL + FTS5, supporting `$and`, `$or`, `$not`, `$eq`, `$ne`, `$gt`, `$lt`, `$contains`, `$like`, `$content`, `$search`, `$quote`, `$triple`, `$k-hop`
-- **Dual-Database Storage** -- DuckDB for structured queries + vector search, SQLite FTS5 (Porter stemmer + multi-column BM25) for full-text search, auto-synchronized
-- **Configurable Vector Search** -- Local ONNX models (BGE-M3 default) or remote API (OpenAI-compatible) for semantic similarity search via DuckDB cosine distance
+- **Configurable Storage** -- SQLite + FTS5 + usearch, or PostgreSQL + JSONB + full-text search + pgvector, selected per shelf
+- **Configurable Vector Search** -- Local ONNX models (BGE-M3 default) or remote API (OpenAI-compatible) for semantic similarity search using cosine distance
 - **Synonyms** -- Per-entry synonym lists for knowledge, per-position (subject/predicate/object) synonyms for statements, indexed in FTS
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
@@ -193,7 +193,26 @@ Set the API key as an environment variable:
 export OPENAI_API_KEY="sk-..."
 ```
 
-### Configuration Reference
+### Storage Backend
+
+By default Hypatia uses SQLite + FTS5 + usearch. To use PostgreSQL + pgvector instead, build with `--features postgres-backend` and add `[storage]` to `shelf.toml`:
+
+```toml
+[storage]
+backend = "pgvector"
+
+[storage.postgres]
+url_env = "HYPATIA_POSTGRES_URL"
+schema = "hypatia_team_memory"
+
+[storage.vector]
+index = "hnsw"
+metric = "cosine"
+```
+
+See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migration, TLS, HNSW dimension limits, and shared archives.
+
+### Embedding Configuration Reference
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -221,7 +240,8 @@ export OPENAI_API_KEY="sk-..."
 | `hypatia statement-delete <subj> <pred> <obj>` | Delete a triple |
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
 | `hypatia similar <query> [--limit N]` | Vector similarity search |
-| `hypatia backfill` | Generate embeddings for all entries |
+| `hypatia backfill [--reembed] [-s <shelf>]` | Generate embeddings for entries missing vectors (or regenerate all) |
+| `hypatia import <source> [-s <shelf>] [--reembed]` | Import an exported snapshot into an empty shelf |
 | `hypatia archive-store <file> [-n <name>] [-s <shelf>]` | Store a file in archives with auto-metadata |
 | `hypatia archive-get <name> [-o <output>] [-s <shelf>]` | Get an archive file path or copy it |
 | `hypatia archive-list [-s <shelf>]` | List all archive files |
@@ -321,30 +341,37 @@ src/
 ├── embedding/      # Embedding providers (ONNX local + remote API)
 ├── engine/         # JSE parser, AST, evaluator, SQL builder
 ├── model/          # Knowledge, Statement, Content, Query types
-├── service/        # Business logic (dual-write to DuckDB + SQLite)
-├── storage/        # DuckDB store, SQLite FTS5 store, shelf manager
+├── service/        # Business logic (CRUD + embedding writeback)
+├── storage/        # SQLite store, optional PostgreSQL store, shelf manager
 ├── lab.rs          # Top-level API facade
 ├── error.rs        # Error types
 ├── lib.rs          # Module declarations
 └── main.rs         # Entry point
 ```
 
-Each **shelf** is a directory containing `data.duckdb` (structured data), `index.sqlite` (FTS5 index), optional `shelf.toml` (embedding config), embedding model files, and an `archives/` directory for attachments. The service layer keeps both databases in sync via dual-write.
+Each **shelf** is a directory containing configuration (`shelf.toml`), attachment archives (`archives/`), and optionally embedding model files. The actual data lives in either:
+
+- **SQLite backend (default)**: `hypatia.sqlite` (structured data + FTS5 + JSON index + embedding BLOBs) and `vectors/` (rebuildable usearch ANN cache).
+- **PostgreSQL backend**: a configured PostgreSQL schema with JSONB, tsvector, and pgvector. The shelf directory still holds `shelf.toml` and `archives/` locally.
+
+The service layer delegates to the configured backend via the `ShelfBackend` abstraction.
 
 ## Archive Files
 
 Hypatia supports storing archive files (images, PDFs, data, etc.) alongside knowledge entries. Files are stored in the shelf's `archives/` directory and referenced via the `archive://` convention in knowledge content.
 
 ```
-~/.hypatia/default/
-├── data.duckdb
-├── index.sqlite
+~/.hypatia/default/                 # SQLite backend (default)
+├── hypatia.sqlite
+├── vectors/
 ├── shelf.toml
 └── archives/
     └── euclid/
         ├── fig_1_1.png
         └── fig_1_2.svg
 ```
+
+PostgreSQL-backed shelves omit `hypatia.sqlite` and `vectors/`; the directory still contains `shelf.toml` and `archives/`.
 
 ### Commands
 
