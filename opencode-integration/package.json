@@ -1,0 +1,13 @@
+{
+  "name": "hypatia-memory-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OpenCode plugin that automatically logs conversations to hypatia knowledge graph",
+  "main": "index.ts",
+  "author": "刘鑫",
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opencode-ai/sdk": "*"
+  }
+}
