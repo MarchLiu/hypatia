@@ -68,10 +68,21 @@ impl VectorFileIndex {
         self.index.size()
     }
 
+    pub fn capacity(&self) -> usize {
+        self.index.capacity()
+    }
+
     /// Insert or replace a vector. usearch reuses the slot of a deleted key.
     pub fn upsert(&mut self, doc_id: i64, vector: &[f32]) -> Result<()> {
         if vector.len() != self.dimensions {
             return Ok(()); // dimension mismatch: skip
+        }
+        // usearch does not auto-expand; reserve more capacity when full.
+        if self.index.size() >= self.index.capacity() {
+            let new_capacity = (self.index.capacity() * 2).max(64);
+            self.index
+                .reserve(new_capacity)
+                .map_err(|e| StorageError::Vector(e.to_string()))?;
         }
         // remove first so re-adding the same key is legal
         let _ = self.index.remove(doc_id as u64);
@@ -180,5 +191,29 @@ mod tests {
         let results = index.search(&[0.0, 0.0, 1.0], 5).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 1);
+    }
+
+    #[test]
+    fn upsert_fails_when_capacity_exhausted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("t.usearch");
+        // build reserves max(items.len(), 64) = 64
+        let mut index = VectorFileIndex::build(
+            &path,
+            3,
+            &[(1i64, vec![1.0, 0.0, 0.0]), (2i64, vec![0.0, 1.0, 0.0])],
+        )
+        .unwrap();
+
+        // fill up to capacity with fresh keys
+        for i in 3..=64 {
+            index.upsert(i, &[0.0, 0.0, 1.0]).unwrap();
+        }
+        assert_eq!(index.size(), 64);
+
+        // after the fix, the next insertion auto-expands capacity and succeeds
+        index.upsert(65, &[0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(index.size(), 65);
+        assert!(index.capacity() >= 65);
     }
 }
