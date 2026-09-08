@@ -31,7 +31,9 @@ jobs:
         # ort 预编译 onnxruntime.dll 导入库依赖动态 UCRT (__imp_* 符号)，
         # 需覆盖 Rust 默认的静态 CRT 链接
         env:
-          RUSTFLAGS: "-C link-arg=/NODEFAULTLIB:libcmt -C link-arg=/NODEFAULTLIB:libucrt -C link-arg=/defaultlib:msvcrt.lib -C link-arg=/defaultlib:vcruntime.lib -C link-arg=/defaultlib:ucrt.lib"
+          RUSTFLAGS: "-C link-arg=/NODEFAULTLIB:libcmt -C link-arg=/NODEFAULTLIB:libucrt -C link-arg=/NODEFAULTLIB:libcpmt -C link-arg=/defaultlib:msvcrt.lib -C link-arg=/defaultlib:vcruntime.lib -C link-arg=/defaultlib:ucrt.lib -C link-arg=/defaultlib:msvcprt.lib"
+          CFLAGS_x86_64_pc_windows_msvc: "/MD"
+          CXXFLAGS_x86_64_pc_windows_msvc: "/MD"
         run: cargo build --release --target x86_64-pc-windows-msvc -p hypatia
       - name: Package
         shell: bash
