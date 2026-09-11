@@ -311,23 +311,31 @@ impl Lab {
                 let page = shelf_ref
                     .backend
                     .missing_embeddings(catalog, after.as_deref(), 128)?;
-                if page.is_empty() {
+                let Some((last, _, _)) = page.last() else {
                     break;
-                }
-                for (key, content, version) in page {
-                    after = Some(key.clone());
-                    match shelf_ref.embedder.embed(&content.embedding_text(&key)) {
-                        Ok(vector) => match shelf_ref
+                };
+                after = Some(last.clone());
+                // One batch per page: a single request (remote) or a few forward passes (local).
+                let texts: Vec<String> = page
+                    .iter()
+                    .map(|(key, content, _)| content.embedding_text(key))
+                    .collect();
+                let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+                let mut vectors = shelf_ref.embedder.embed_batch(&texts).into_iter();
+                for (key, _, version) in page {
+                    // A provider returning too few results must not silently drop rows.
+                    let vector = vectors.next().unwrap_or_else(|| {
+                        Err(crate::error::HypatiaError::Embedding(
+                            "provider returned too few vectors".into(),
+                        ))
+                    });
+                    match vector.and_then(|v| {
+                        shelf_ref
                             .backend
-                            .install_embedding(catalog, &key, version, &vector)
-                        {
-                            Ok(true) => stats.created += 1,
-                            Ok(false) => stats.skipped += 1,
-                            Err(e) => {
-                                eprintln!("backfill {catalog}/{key}: {e}");
-                                stats.errors += 1;
-                            }
-                        },
+                            .install_embedding(catalog, &key, version, &v)
+                    }) {
+                        Ok(true) => stats.created += 1,
+                        Ok(false) => stats.skipped += 1,
                         Err(e) => {
                             eprintln!("backfill {catalog}/{key}: {e}");
                             stats.errors += 1;
@@ -346,6 +354,61 @@ impl Lab {
 mod backfill_tests {
     use super::*;
     use crate::embedding::EmbeddingProvider;
+    /// Records every batch size; rejects texts containing "bad".
+    struct Batching {
+        batches: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+    }
+    impl EmbeddingProvider for Batching {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            if text.contains("bad") {
+                Err(crate::error::HypatiaError::Embedding("rejected".into()))
+            } else {
+                Ok(vec![1., 0., 0.])
+            }
+        }
+        fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>>> {
+            self.batches.borrow_mut().push(texts.len());
+            texts.iter().map(|t| self.embed(t)).collect()
+        }
+        fn dimensions(&self) -> usize {
+            3
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+    #[test]
+    fn backfill_embeds_a_page_per_batch_and_isolates_failures() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("shelf.toml"),
+            "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n",
+        )
+        .unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: true });
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        for i in 0..130 {
+            let data = if i == 7 {
+                "bad".to_string()
+            } else {
+                format!("entry {i}")
+            };
+            lab.create_knowledge("test", &format!("k{i:03}"), Content::new(&data))
+                .unwrap();
+        }
+        let batches = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Batching {
+            batches: batches.clone(),
+        });
+        let stats = lab.backfill_vectors("test").unwrap();
+        assert_eq!((stats.created, stats.errors), (129, 1));
+        assert_eq!(*batches.borrow(), [128, 2]);
+    }
     struct Fixed {
         fail: bool,
     }

@@ -125,6 +125,25 @@ mod model_tests {
         );
     }
 
+    #[test]
+    fn batched_inference_matches_single_inference() {
+        if !model_available() {
+            return;
+        }
+        let embedder = make_provider();
+        let texts = [
+            "short",
+            "",
+            "A considerably longer sentence about Rust, ownership and memory safety.",
+            "多语言的句子也应当一致",
+        ];
+        for (text, batched) in texts.iter().zip(embedder.embed_batch(&texts)) {
+            let alone = embedder.embed(text).unwrap();
+            let similarity = cosine_similarity(&alone, &batched.unwrap());
+            assert!(similarity > 0.9999, "{text:?}: {similarity}");
+        }
+    }
+
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
         let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
