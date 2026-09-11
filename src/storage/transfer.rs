@@ -9,6 +9,54 @@ pub struct EmbeddingMetadata {
     pub dimensions: usize,
     pub metric: String,
 }
+/// Stored vectors were built with `stored`, but the shelf now configures `configured`.
+/// The shelf still opens for CRUD, text search and JSE; vector reads and writes stay
+/// refused until an explicit `backfill --reembed` rebuilds every vector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentityMismatch {
+    pub shelf: String,
+    pub stored: EmbeddingMetadata,
+    pub configured: EmbeddingMetadata,
+}
+impl IdentityMismatch {
+    pub fn to_error(&self) -> HypatiaError {
+        HypatiaError::Config(self.to_string())
+    }
+    /// The command that recovers the shelf.
+    pub fn hint(&self) -> String {
+        format!(
+            "run `hypatia backfill --reembed -s {}` to rebuild vectors",
+            self.shelf
+        )
+    }
+}
+impl std::fmt::Display for IdentityMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "embedding model changed since vectors were built (stored {} / {} dims, configured {} / {} dims); {}",
+            abbreviate_identity(&self.stored.model),
+            self.stored.dimensions,
+            abbreviate_identity(&self.configured.model),
+            self.configured.dimensions,
+            self.hint()
+        )
+    }
+}
+/// Content hashes make identities unreadable; a 12-digit prefix still tells them apart.
+fn abbreviate_identity(identity: &str) -> String {
+    identity
+        .split(':')
+        .map(|part| {
+            if part.len() > 12 && part.bytes().all(|b| b.is_ascii_hexdigit()) {
+                format!("{}…", &part[..12])
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KnowledgeRecord {
     pub knowledge: Knowledge,

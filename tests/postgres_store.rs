@@ -7,6 +7,7 @@ use hypatia::{
     storage::{
         postgres_store::PgStore,
         settings::{PostgresSettings, ShelfSettings, VectorSettings},
+        transfer::EmbeddingMetadata,
     },
 };
 use postgres::{Client, NoTls};
@@ -270,12 +271,8 @@ fn metadata_validation_and_concurrent_initialization() {
         }
     });
     let a = f.open();
-    let mut changed = f.embedding.clone();
-    changed.remote.dimensions = 4;
-    assert!(PgStore::open(&f.config, &f.vector, &changed).is_err());
-    changed = f.embedding.clone();
-    changed.model_identity = "different-provider-model".into();
-    assert!(PgStore::open(&f.config, &f.vector, &changed).is_err());
+    // Identity changes are covered by identity_rebinds_without_vectors_and_degrades_with_them;
+    // what remains here is structural drift, which must still fail closed.
     let mut admin = f.admin();
     admin
         .batch_execute(&format!(
@@ -301,6 +298,108 @@ fn metadata_validation_and_concurrent_initialization() {
     let mut hnsw = f.embedding.clone();
     hnsw.remote.dimensions = 2001;
     assert!(PgStore::open(&f.config, &f.vector, &hnsw).is_err());
+}
+
+#[test]
+#[ignore = "requires a disposable PostgreSQL database with pgvector"]
+fn identity_rebinds_without_vectors_and_degrades_with_them() {
+    let f = Fixture::new("hnsw");
+    drop(f.open());
+    // A writer that opened before a concurrent rebind cannot install under the new identity.
+    let stale = f.open();
+    let raced = stale.insert_knowledge("race", &Content::new("r")).unwrap();
+    let mut other = f.embedding.clone();
+    other.model_identity = "another-model".into();
+    drop(PgStore::open(&f.config, &f.vector, &other).unwrap());
+    assert!(
+        !stale
+            .install_embedding("knowledge", "race", raced, &[1., 0., 0.])
+            .unwrap()
+    );
+    drop(stale);
+    drop(f.open());
+    // Without vectors, both model and dimensions rebind; HNSW follows the new column type.
+    let mut wider = f.embedding.clone();
+    wider.remote.dimensions = 4;
+    let rebound = PgStore::open(&f.config, &f.vector, &wider).unwrap();
+    assert!(rebound.stored_identity_mismatch().is_none());
+    let version = rebound.insert_knowledge("k", &Content::new("x")).unwrap();
+    assert!(
+        rebound
+            .install_embedding("knowledge", "k", version, &[1., 0., 0., 0.])
+            .unwrap()
+    );
+    drop(rebound);
+    // With vectors, a different identity opens degraded: CRUD works and the schema is
+    // validated against the stored vectors rather than the configured dimensions.
+    let mut store = f.open();
+    assert_eq!(store.stored_identity_mismatch().unwrap().dimensions, 4);
+    assert_eq!(store.get_knowledge("k").unwrap().unwrap().content.data, "x");
+    // An explicit reset rebinds to the configured identity and retypes the columns.
+    store
+        .reset_embeddings(&EmbeddingMetadata {
+            model: f.embedding.model_identity().into(),
+            dimensions: 3,
+            metric: "cosine".into(),
+        })
+        .unwrap();
+    assert!(store.stored_identity_mismatch().is_none());
+    let version = store.embedding_version("knowledge", "k").unwrap().unwrap();
+    assert!(
+        store
+            .install_embedding("knowledge", "k", version, &[1., 0., 0.])
+            .unwrap()
+    );
+    assert!(f.open().stored_identity_mismatch().is_none());
+    // A shelf can start without any usable model: the identity is a placeholder until one appears.
+    let unconfigured = Fixture::new("none");
+    let placeholder = ShelfSettings::parse(
+        "[embedding]\nprovider='local'\ndimensions=3",
+        std::path::Path::new("/nonexistent-hypatia-model-dir"),
+    )
+    .unwrap();
+    assert!(!placeholder.embedding.model_identity_trusted);
+    drop(
+        PgStore::open(
+            &unconfigured.config,
+            &unconfigured.vector,
+            &placeholder.embedding,
+        )
+        .unwrap(),
+    );
+    assert!(unconfigured.open().stored_identity_mismatch().is_none());
+    // Once a real identity is bound, a placeholder opener adopts it instead of flipping it back.
+    drop(
+        PgStore::open(
+            &unconfigured.config,
+            &unconfigured.vector,
+            &placeholder.embedding,
+        )
+        .unwrap(),
+    );
+    let model: String = unconfigured
+        .admin()
+        .query_one(
+            &format!(
+                "SELECT v FROM \"{}\".meta WHERE k='embedding_model'",
+                unconfigured.config.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(model, unconfigured.embedding.model_identity());
+    // A shelf whose identity record is gone refuses to open.
+    f.admin()
+        .batch_execute(&format!(
+            "DELETE FROM \"{}\".meta WHERE k='embedding_model'",
+            f.config.schema
+        ))
+        .unwrap();
+    let error = PgStore::open(&f.config, &f.vector, &f.embedding)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("identity is missing"), "{error}");
 }
 
 #[test]

@@ -265,6 +265,10 @@ impl Lab {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
 
+        // A changed model explains more than "no model": report it first.
+        if !reembed && let Some(m) = shelf_ref.backend.identity_mismatch() {
+            return Err(m.to_error());
+        }
         if !shelf_ref.embedder.is_available() {
             return Err(crate::error::HypatiaError::ModelUnavailable(
                 "no embedding model found; place embedding_model.onnx and tokenizer.json in the shelf directory".to_string(),
@@ -428,6 +432,119 @@ mod backfill_tests {
                 .unwrap(),
             0
         );
+    }
+    #[test]
+    fn changed_model_opens_degraded_until_reembed() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let write_model = |model: &str| {
+            std::fs::write(
+                dir.path().join("shelf.toml"),
+                format!("[embedding]\nmodel='{model}'\ndimensions=3\n"),
+            )
+            .unwrap()
+        };
+        let open = || {
+            let mut lab = Lab {
+                shelf_manager: ShelfManager::with_home(home.path().into()).unwrap(),
+            };
+            lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
+            lab
+        };
+        let mismatched = |lab: &Lab| {
+            lab.shelf_manager
+                .get("test")
+                .unwrap()
+                .backend
+                .identity_mismatch()
+                .is_some()
+        };
+        let vectors = |lab: &Lab| {
+            lab.shelf_manager
+                .get("test")
+                .unwrap()
+                .backend
+                .embedding_row_count("knowledge")
+                .unwrap()
+        };
+        write_model("model-a");
+        ShelfManager::with_home(home.path().into())
+            .unwrap()
+            .connect(dir.path(), Some("test"))
+            .unwrap();
+
+        // Without vectors a new model simply rebinds.
+        write_model("model-b");
+        let mut lab = open();
+        assert!(!mismatched(&lab));
+        lab.create_knowledge("test", "kept", Content::new("saved"))
+            .unwrap();
+        assert_eq!(vectors(&lab), 1);
+        drop(lab);
+
+        // With vectors a different model still opens: CRUD works, vectors are refused.
+        write_model("model-c");
+        let mut lab = open();
+        assert!(mismatched(&lab));
+        assert_eq!(
+            lab.get_knowledge("test", "kept")
+                .unwrap()
+                .unwrap()
+                .content
+                .data,
+            "saved"
+        );
+        lab.create_knowledge("test", "added", Content::new("while degraded"))
+            .unwrap();
+        assert_eq!(vectors(&lab), 1, "no vectors from a second model");
+        let refused = [
+            lab.similar("test", "saved", "knowledge", 5).err().unwrap(),
+            lab.query(
+                "test",
+                &serde_json::json!(["$knowledge", ["$similar", "saved"]]),
+            )
+            .err()
+            .unwrap(),
+            lab.backfill_vectors("test").err().unwrap(),
+        ];
+        for err in refused {
+            assert!(err.to_string().contains("--reembed"), "{err}");
+        }
+
+        // An explicit reembed rebuilds every vector under the new identity.
+        assert_eq!(
+            lab.backfill_vectors_with_reembed("test", true)
+                .unwrap()
+                .created,
+            2
+        );
+        assert!(!mismatched(&lab));
+        assert_eq!(
+            lab.similar("test", "saved", "knowledge", 5)
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
+        drop(lab);
+        assert!(!mismatched(&open()));
+    }
+    #[test]
+    fn vectors_are_never_written_under_an_unknown_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // No model name and no model files: the identity is only a placeholder.
+        std::fs::write(dir.path().join("shelf.toml"), "[embedding]\ndimensions=3\n").unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        lab.create_knowledge("test", "k", Content::new("x"))
+            .unwrap();
+        let backend = &lab.shelf_manager.get("test").unwrap().backend;
+        assert_eq!(backend.embedding_row_count("knowledge").unwrap(), 0);
     }
 }
 

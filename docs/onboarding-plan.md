@@ -281,7 +281,9 @@ F. 预编译分发：curl 安装脚本                      零依赖 · 漏斗�
 - identity 推迟到**第一条向量写入**时才冻结：没有向量时，配置变更没有东西可失效，应当免费。SQLite 在 `configure_embedding` 的 mismatch 分支里，向量行数为 0 就覆盖 metadata；PG 的打开期 `meta` 校验同理。
 - identity 不匹配时**降级打开**而非拒开：CRUD / FTS / JSE 照常；`similar` / `$similar` 报错并指向 `backfill --reembed`；写路径与普通 backfill 停止嵌入（避免混入另一个模型的向量）；只允许 `backfill --reembed`，且它能在原 shelf 上运行。
 - PG 补齐：`reset_embeddings` 更新 `meta.embedding_model`；维度变化需在向量全空时修改 `vector(dims)` 列类型并重建 HNSW 索引（SQLite 存 blob，无此问题）。
-- PG 第 0 层（§2.5 场景 5）：没有可信 identity 时也允许建库 —— `meta` 先写占位 identity，第一条向量写入时改绑；`vector(dims)` 列按配置维度（默认 1024）建，维度与后来的模型不一致时走上一条的改列流程（`src/storage/postgres_store.rs:117`、`:228`）。
+- PG 第 0 层（§2.5 场景 5）：没有可信 identity 时也允许建库 —— `meta` 先写占位 identity，之后第一个带可信 identity 的打开者（且尚无向量）改绑；`vector(dims)` 列按配置维度（默认 1024）建，维度与后来的模型不一致时走上一条的改列流程（`src/storage/postgres_store.rs:117`、`:228`）。
+- **写入向量以存储的 identity 为条件**（SQLite 比对 `meta.embedding_metadata`，PG 比对 `meta.embedding_model`）：另一进程并发改绑后，按旧配置运行的进程写入变为 no-op，条目保持 pending，不会混入另一个模型的向量。PG 改绑先无锁检查，确认没有向量后才加锁复查，因此降级 shelf 的打开不阻塞写入。
+- **没有可信 identity 的打开者采纳已存 identity，不改绑**：共享同一数据库的多台机器里，缺模型的那台不会把 identity（和列维度）来回翻转。PG 在没有任何向量时导出不携带 identity，占位 identity 不会阻碍导入。
 
 **C 的具体内容**：
 
@@ -355,6 +357,7 @@ F. 预编译分发：curl 安装脚本                      零依赖 · 漏斗�
 - 显式 `backfill` 在 errors > 0 时非零退出。
 - stderr 文案变化（warning 按原因分流、`similar` 不完整提示）。仓内调用方不受影响：DSH 插件只看退出码，skill 不引用这些文案。
 - identity 不匹配从「整个 shelf 打不开」放宽为「降级打开」；PG 可在零模型下建库。
+- 以占位 identity 新建的 PG shelf，旧版 binary 打不开（旧版要求可信 identity），直到新版以真实模型打开一次完成改绑。
 
 `Lab::similar` 改为 `&mut self` 不构成对外破坏：crate 未发布到 crates.io，只影响仓内 REPL 与测试。
 

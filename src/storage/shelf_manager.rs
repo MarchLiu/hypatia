@@ -68,6 +68,10 @@ impl Storage for OpenShelf {
         opts: &SearchOpts,
         target: QueryTarget,
     ) -> Result<QueryResult> {
+        // Refuse before embedding: the query vector could not be compared anyway.
+        if let Some(m) = self.backend.identity_mismatch() {
+            return Err(m.to_error());
+        }
         let vector = self.embedder.embed(query_text)?;
         let rows = self
             .backend
@@ -116,6 +120,14 @@ impl OpenShelf {
     }
     /// Content has committed. Embedding failures leave the row pending for backfill.
     pub fn embed_saved(&mut self, catalog: &str, key: &str, content: &Content, version: i64) {
+        // Skip before embedding: the vector would be refused, and embedding may load a model.
+        if let Some(m) = self.backend.identity_mismatch() {
+            eprintln!(
+                "warning: {catalog}/{key}: content saved; embedding skipped because the embedding model changed; {}",
+                m.hint()
+            );
+            return;
+        }
         let outcome = (|| -> Result<bool> {
             let Some(v) = self.embedder.maybe_embed(&content.embedding_text(key))? else {
                 return Ok(false);

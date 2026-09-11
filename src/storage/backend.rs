@@ -2,7 +2,7 @@
 use super::{
     SqliteStore, VectorFileIndex, open_or_migrate,
     settings::{BackendKind, ShelfSettings},
-    transfer::{EmbeddingMetadata, Snapshot, validate_vector},
+    transfer::{EmbeddingMetadata, IdentityMismatch, Snapshot, validate_vector},
 };
 use crate::{
     error::{HypatiaError, Result},
@@ -18,6 +18,11 @@ use std::{
 pub struct ShelfBackend {
     inner: Backend,
     dims: usize,
+    identity_trusted: bool,
+    /// The configured identity; vectors are only written while it is the stored one.
+    identity: EmbeddingMetadata,
+    /// Stored vectors belong to a different model than configured.
+    mismatch: Option<IdentityMismatch>,
 }
 enum Backend {
     Local(LocalBackend),
@@ -206,16 +211,18 @@ impl ShelfBackend {
     pub fn open(config: &ShelfConfig, settings: &ShelfSettings) -> Result<Self> {
         settings.validate()?;
         let dims = settings.embedding.dimensions();
+        let configured = EmbeddingMetadata {
+            model: settings.embedding.model_identity().into(),
+            dimensions: dims,
+            metric: "cosine".into(),
+        };
+        let mut stored = None;
         let inner = match settings.storage.backend {
             BackendKind::Sqlite => {
                 // Vector files are a disposable cache; disk failure must not disable CRUD.
                 let store = open_or_migrate(config)?;
                 if settings.embedding.model_identity_trusted {
-                    store.configure_embedding(&EmbeddingMetadata {
-                        model: settings.embedding.model_identity().into(),
-                        dimensions: dims,
-                        metric: "cosine".into(),
-                    })?;
+                    stored = store.configure_embedding(&configured)?;
                 }
                 store.conn().execute("INSERT OR IGNORE INTO meta(k,v) VALUES('cache_identity',lower(hex(randomblob(16))))",[])?;
                 let cache_identity: String = store.conn().query_row(
@@ -243,7 +250,7 @@ impl ShelfBackend {
             BackendKind::Pgvector => {
                 #[cfg(feature = "postgres-backend")]
                 {
-                    Backend::Postgres(super::postgres_store::PgStore::open(
+                    let pg = super::postgres_store::PgStore::open(
                         settings
                             .storage
                             .postgres
@@ -251,7 +258,9 @@ impl ShelfBackend {
                             .expect("validated PG config"),
                         &settings.storage.vector,
                         &settings.embedding,
-                    )?)
+                    )?;
+                    stored = pg.stored_identity_mismatch().cloned();
+                    Backend::Postgres(pg)
                 }
                 #[cfg(not(feature = "postgres-backend"))]
                 {
@@ -259,7 +268,17 @@ impl ShelfBackend {
                 }
             }
         };
-        Ok(Self { inner, dims })
+        Ok(Self {
+            inner,
+            dims,
+            identity_trusted: settings.embedding.model_identity_trusted,
+            mismatch: stored.map(|stored| IdentityMismatch {
+                shelf: config.id.name.clone(),
+                stored,
+                configured: configured.clone(),
+            }),
+            identity: configured,
+        })
     }
     pub fn is_local(&self) -> bool {
         matches!(self.inner, Backend::Local(_))
@@ -271,12 +290,19 @@ impl ShelfBackend {
             Backend::Postgres(pg) => Some(pg.schema()),
         }
     }
+    /// Stored vectors were built with a different model: vector reads and writes are refused.
+    pub fn identity_mismatch(&self) -> Option<&IdentityMismatch> {
+        self.mismatch.as_ref()
+    }
     pub fn vector_search(
         &self,
         target: QueryTarget,
         vector: &[f32],
         limit: i64,
     ) -> Result<Vec<(String, String, f64)>> {
+        if let Some(m) = &self.mismatch {
+            return Err(m.to_error());
+        }
         validate_vector(vector, self.dims)?;
         if limit < 0 {
             return Err(HypatiaError::Validation("limit must be nonnegative".into()));
@@ -300,13 +326,22 @@ impl ShelfBackend {
         version: i64,
         vector: &[f32],
     ) -> Result<bool> {
+        if let Some(m) = &self.mismatch {
+            return Err(m.to_error());
+        }
+        // An untrusted identity is only a placeholder; vectors written under it could never be matched.
+        if !self.identity_trusted {
+            return Err(HypatiaError::Config("embedding model identity is unknown; configure embedding.model or provide readable model files before writing vectors".into()));
+        }
         validate_vector(vector, self.dims)?;
         match &mut self.inner {
             Backend::Local(l) => {
                 if l.store.embedding_metadata()?.is_none() {
                     return Err(HypatiaError::Config("legacy vectors have unknown model identity; explicitly reembed before embedding writeback".into()));
                 }
-                let installed = l.store.install_embedding(catalog, key, version, vector)?;
+                let installed =
+                    l.store
+                        .install_embedding_as(&self.identity, catalog, key, version, vector)?;
                 if installed {
                     // The next search lazily loads or rebuilds a coherent generation.
                     l.cache_clock.set(-1);
@@ -325,16 +360,19 @@ impl ShelfBackend {
         }
     }
 
+    /// Explicit reembed: drops every vector and rebinds the identity to `metadata`.
     pub fn reset_embeddings(&mut self, metadata: &EmbeddingMetadata) -> Result<()> {
         match &mut self.inner {
             Backend::Local(l) => {
                 l.store.reset_embeddings(metadata)?;
                 l.cache_clock.set(-1);
-                Ok(())
             }
             #[cfg(feature = "postgres-backend")]
-            Backend::Postgres(pg) => pg.clear_all_embeddings(),
+            Backend::Postgres(pg) => pg.reset_embeddings(metadata)?,
         }
+        self.mismatch = None;
+        self.identity = metadata.clone();
+        Ok(())
     }
 
     pub fn rebuild_indexes(&mut self) -> Result<()> {
