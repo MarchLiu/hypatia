@@ -564,13 +564,14 @@ impl ShelfBackend {
             Backend::Postgres(pg) => pg.query_knowledge(sql, params),
         }
     }
+    /// Idempotent: `None` when the triple already exists and nothing was written.
     pub fn insert_statement(
         &self,
         key: &StatementKey,
         content: &Content,
         tr_start: Option<NaiveDateTime>,
         tr_end: Option<NaiveDateTime>,
-    ) -> Result<i64> {
+    ) -> Result<Option<i64>> {
         match &self.inner {
             Backend::Local(l) => l.store.insert_statement(key, content, tr_start, tr_end),
             #[cfg(feature = "postgres-backend")]

@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::engine::Evaluator;
 use crate::error::Result;
 use crate::model::*;
-use crate::service::{KnowledgeService, StatementService};
+use crate::service::{CreatedStatement, KnowledgeService, StatementService};
 use crate::storage::{ShelfManager, Storage};
 
 /// Statistics returned by backfill operation.
@@ -147,6 +147,7 @@ impl Lab {
 
     // --- Statement CRUD ---
 
+    /// Idempotent: an existing triple comes back unchanged with `created: false`.
     pub fn create_statement(
         &mut self,
         shelf: &str,
@@ -154,7 +155,7 @@ impl Lab {
         content: Content,
         tr_start: Option<NaiveDateTime>,
         tr_end: Option<NaiveDateTime>,
-    ) -> Result<Statement> {
+    ) -> Result<CreatedStatement> {
         let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;

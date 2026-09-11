@@ -84,7 +84,7 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
-    /// Create a statement (triple)
+    /// Create a statement (triple); exits 0 without changes if it already exists
     StatementCreate {
         head: String,
         relation: String,
@@ -441,9 +441,17 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             let content = Content::new(&data)
                 .with_synonyms(syn)
                 .with_scopes(scopes_vec);
-            let s = lab.create_statement(&shelf, &key, content, None, None)?;
+            let outcome = lab.create_statement(&shelf, &key, content, None, None)?;
+            // Exit 0 either way: an existing triple means the relationship is
+            // already recorded, and its stored content is left unchanged.
+            let verb = if outcome.created {
+                "Created statement"
+            } else {
+                "Statement already exists"
+            };
+            let s = &outcome.statement;
             println!(
-                "Created statement: ({}, {}, {})",
+                "{verb}: ({}, {}, {})",
                 s.key.head, s.key.relation, s.key.tail
             );
         }

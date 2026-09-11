@@ -4,4 +4,4 @@ pub mod statement;
 
 pub use knowledge::KnowledgeService;
 pub use search::SearchService;
-pub use statement::StatementService;
+pub use statement::{CreatedStatement, StatementService};

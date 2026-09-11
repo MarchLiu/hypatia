@@ -1,9 +1,9 @@
 # Agent 接口分层：CLI、MCP 与 Skill
 
-> 状态：**方案，尚未实施**（2026-09-10；2026-09-11 修订：对齐姊妹篇的 embedding 决策，补 H 的运行时选型、§5.3 的修法与实施顺序）
+> 状态：**实施中**（2026-09-10 方案；2026-09-11 修订：对齐姊妹篇的 embedding 决策，补 H 的运行时选型、§5.3 的修法与实施顺序；§5.3 已实施）
 > 背景：Agent 通过什么与 hypatia 对话 —— 三层分工、MCP 的范围与边界、skill 的不可替代性，以及明确不做的事
 > 姊妹篇：[降低上手成本方案](onboarding-plan.md)（上手漏斗与 embedding 生命周期）
-> 范围：本文只交付分析与设计建议，没有修改任何实现
+> 范围：分析与设计建议；实施进度见 §5 的实施顺序
 
 ## 1. 结论
 
@@ -122,7 +122,7 @@ MCP 三个 primitive 的控制权归属不同：
 
 ```
 0. 本文修订                                    已完成
-1. statement-create 幂等（§5.3）               零依赖 · 三条集成路径共同的地基
+1. statement-create 幂等（§5.3）               已完成
 2. skill 文本修正：漂移 #1、#2（§5.1）          零依赖 · 必须先于 G
 3. G. hypatia skill install --agent ...         零依赖
 4. H. hypatia mcp 子命令                        等 onboarding PR 合并后再做
@@ -166,13 +166,17 @@ G 的进阶形态（v2）：**判断层单一源，宿主适配层由 CLI 生成
 
 这对任何 Agent 集成都是硬伤：`hypatia` skill 的 `Always Enrich with Relationships` 原则要求每个知识点都挂三元组，而这个写入序列目前没有安全的重试语义。skill 走 CLI、DSH 插件走 CLI、将来的 MCP 走 `Lab`，三条路都经过同一个 `insert_statement`。
 
-**修法（本分支认领，实施顺序第 1 步）**：
+**修法（已实施）**：
 
 - 语义是 **if-not-exists，不是 upsert**：`statement` 表有 `content` 列，且 `StatementService::update` 已单独存在；同一三元组带不同 content 再次 create 应当 no-op 并报告已存在，而不是悄悄覆盖。
 - SQLite：`INSERT ... ON CONFLICT(triple) DO NOTHING`；PG 侧 `insert_statement` 同改。existed 时跳过 FTS doc 与 postings 的重写。
 - service 层用受影响行数区分 created / existed；CLI 输出 `already exists` 且 **exit 0**；MCP tool 返回 `created: false`。
 - 两个后端各加一个重复插入的测试。
 - 不动 schema、不动 export `Manifest`，老 binary 无影响；`insert_statement` 不在 onboarding 分支的改动范围内。
+- 已存在时 CLI 输出 `Statement already exists: (<head>, <relation>, <tail>)`，与 `Created statement: ...` 区分。`hypatia-dream` skill 及其 `dsh-hypatia/skills/` 镜像已同步：替换流程中目标三元组已存在时，只有它的 metadata 与源一致（上一轮 create 之后中断）才继续删源；否则跳过替换，因为源的 metadata 并没有被带过去，删掉就丢了。
+- 下游：DSH 插件 `runCreate` 的 `DUPLICATE` 分支对 statement 不再触发；插件所有调用点都丢弃返回值，行为不受影响。其 `cli-contract` 集成测试钉住了旧的 UNIQUE 报错，需随插件更新。
+- PG 上每次重复创建会让 `content_versions` 序列跳一个号：`DEFAULT nextval` 在冲突检查之前求值。行级 `content_version` 不变；序列值只用作 CAS 令牌，跳号无害。
+- `knowledge-create` 仍对重复名报错：knowledge 的名字只是标识，内容才是事实，重复创建可能意味着两份不同的内容撞名；statement 的三元组本身就是事实，重复即同一事实。
 
 ### 5.4 `content_version` 已存在但未暴露
 

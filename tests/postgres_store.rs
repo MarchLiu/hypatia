@@ -224,7 +224,8 @@ fn graph_native_parameters_payload_and_snapshots() {
     let ca = StatementKey::new("c", "r", "a");
     let token = a
         .insert_statement(&ab, &Content::new("edge"), Some(dt), None)
-        .unwrap();
+        .unwrap()
+        .expect("fresh triple is inserted");
     a.install_embedding("statement", &ab.to_csv_key(), token, &[0., 1., 0.])
         .unwrap();
     a.insert_statement(&bc, &Content::new("edge2"), None, None)

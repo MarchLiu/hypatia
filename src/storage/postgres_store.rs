@@ -526,13 +526,14 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             .map(knowledge_row)
             .transpose()
     }
+    /// Idempotent: returns `None` when the triple already exists; nothing is written.
     pub fn insert_statement(
         &self,
         key: &StatementKey,
         content: &Content,
         tr_start: Option<NaiveDateTime>,
         tr_end: Option<NaiveDateTime>,
-    ) -> Result<i64> {
+    ) -> Result<Option<i64>> {
         for value in [tr_start, tr_end].into_iter().flatten() {
             validate_timestamp(value)?;
         }
@@ -540,10 +541,13 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
         let triple = key.to_csv_key();
         let mut client = self.client.borrow_mut();
         let mut tx = client.transaction().map_err(pg_error)?;
-        let token=tx.query_one(&format!("INSERT INTO {}(triple,head,relation,tail,content,payload,tr_start,tr_end,tokens) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING content_version",self.table("statement")),&[&triple,&key.head,&key.relation,&key.tail,&raw,&payload,&tr_start,&tr_end,&tokens]).map_err(pg_error)?.get(0);
+        let Some(row)=tx.query_opt(&format!("INSERT INTO {}(triple,head,relation,tail,content,payload,tr_start,tr_end,tokens) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(triple) DO NOTHING RETURNING content_version",self.table("statement")),&[&triple,&key.head,&key.relation,&key.tail,&raw,&payload,&tr_start,&tr_end,&tokens]).map_err(pg_error)? else {
+            return Ok(None);
+        };
+        let token: i64 = row.get(0);
         self.upsert_doc(&mut tx, "statement", &triple, content)?;
         tx.commit().map_err(pg_error)?;
-        Ok(token)
+        Ok(Some(token))
     }
     pub fn update_statement(
         &self,
