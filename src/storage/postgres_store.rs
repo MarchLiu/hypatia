@@ -325,6 +325,8 @@ CREATE INDEX statement_relation_idx ON {statement}(relation);
 CREATE INDEX statement_tail_idx ON {statement}(tail);
 CREATE INDEX knowledge_missing_embedding_idx ON {knowledge}(name) WHERE embedding IS NULL;
 CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedding IS NULL;
+CREATE INDEX knowledge_pending_version_idx ON {knowledge}(content_version) WHERE embedding IS NULL;
+CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE embedding IS NULL;
 "#,versions=self.table("content_versions"),docs=self.table("docs"),knowledge=self.table("knowledge"),statement=self.table("statement"),ext=self.extension,dims=self.dimensions)).map_err(pg_error)?;
         tx.batch_execute(&crate::engine::postgres::schema_functions(&self.schema))
             .map_err(pg_error)?;
@@ -699,6 +701,75 @@ CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedd
             )
             .map_err(pg_error)?
             == 1)
+    }
+    /// Entries still waiting for a vector; served by the `*_missing_embedding_idx` indexes.
+    pub fn pending_count(&self, catalog: &str) -> Result<usize> {
+        let (table, _) = catalog_info(catalog)?;
+        let n: i64 = self
+            .client
+            .borrow_mut()
+            .query_one(
+                &format!(
+                    "SELECT count(*) FROM {} WHERE embedding IS NULL",
+                    self.table(table)
+                ),
+                &[],
+            )
+            .map_err(pg_error)?
+            .get(0);
+        Ok(n as usize)
+    }
+    /// Up to `limit` pending entries across both catalogs, most recently written first.
+    /// Returns (catalog, key, content, version).
+    pub fn newest_missing_embeddings(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, Content, i64)>> {
+        self.client
+            .borrow_mut()
+            .query(
+                &format!(
+                    "SELECT 'knowledge'::text,name,content,content_version FROM {} WHERE embedding IS NULL UNION ALL SELECT 'statement'::text,triple,content,content_version FROM {} WHERE embedding IS NULL ORDER BY 4 DESC LIMIT $1",
+                    self.table("knowledge"),
+                    self.table("statement")
+                ),
+                &[&limit],
+            )
+            .map_err(pg_error)?
+            .iter()
+            .map(|r| {
+                Ok((
+                    r.get(0),
+                    r.get(1),
+                    serde_json::from_value(r.get(2))?,
+                    r.get(3),
+                ))
+            })
+            .collect()
+    }
+    pub fn meta_value(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .client
+            .borrow_mut()
+            .query_opt(
+                &format!("SELECT v FROM {} WHERE k=$1", self.table("meta")),
+                &[&key],
+            )
+            .map_err(pg_error)?
+            .map(|r| r.get(0)))
+    }
+    pub fn set_meta_value(&self, key: &str, value: &str) -> Result<()> {
+        self.client
+            .borrow_mut()
+            .execute(
+                &format!(
+                    "INSERT INTO {}(k,v) VALUES($1,$2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                    self.table("meta")
+                ),
+                &[&key, &value],
+            )
+            .map_err(pg_error)?;
+        Ok(())
     }
     /// Explicit re-embedding reset: drops every vector and rebinds the identity to `metadata`.
     /// Every row receives a new token, including already-missing embeddings, so all

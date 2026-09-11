@@ -2,7 +2,11 @@
 use hypatia::{
     engine::Evaluator,
     model::{Content, QueryTarget, SearchOpts, StatementKey},
-    storage::{OpenShelf, ShelfManager, Storage},
+    service::KnowledgeService,
+    storage::{
+        OpenShelf, ShelfManager, Storage,
+        flush::{BlockedReason, FlushStats},
+    },
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -15,6 +19,154 @@ fn local(dir: &TempDir) -> OpenShelf {
     .unwrap();
     OpenShelf::open(dir.path(), Some("contract")).unwrap()
 }
+/// Embeds everything to the same vector; the flush test only cares which rows get one.
+struct Unit;
+impl hypatia::embedding::EmbeddingProvider for Unit {
+    fn embed(&self, _: &str) -> Result<Vec<f32>, hypatia::error::HypatiaError> {
+        Ok(vec![1., 0., 0.])
+    }
+    fn dimensions(&self) -> usize {
+        3
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn flushing_pays_embedding_debt_newest_first() {
+    let dir = TempDir::new().unwrap();
+    let mut shelf = local(&dir);
+    // The configured model is not installed, so every write leaves its entry pending.
+    for name in ["first", "second", "third"] {
+        KnowledgeService::new(&mut shelf)
+            .create(name, Content::new(name))
+            .unwrap();
+    }
+    let debt = shelf.embedding_debt().unwrap();
+    assert_eq!(debt.pending_knowledge, 3);
+    assert_eq!(
+        debt.blocked.map(|b| b.reason),
+        Some(BlockedReason::ProviderUnavailable)
+    );
+    assert!(debt.pending_since.is_some());
+    assert_eq!(shelf.flush_pending(128).unwrap().installed, 0);
+
+    shelf.embedder = Box::new(Unit);
+    let stats = shelf.flush_pending(2).unwrap();
+    assert_eq!((stats.installed, stats.failed), (2, 0));
+    let left: Vec<String> = shelf
+        .backend
+        .newest_missing_embeddings(10)
+        .unwrap()
+        .into_iter()
+        .map(|(_, key, _, _)| key)
+        .collect();
+    assert_eq!(left, ["first"], "the newest entries are paid first");
+    assert!(shelf.embedding_debt().unwrap().pending_since.is_some());
+
+    shelf.flush_pending(2).unwrap();
+    let debt = shelf.embedding_debt().unwrap();
+    assert_eq!(debt.pending_knowledge, 0);
+    assert_eq!(debt.pending_since, None, "a paid debt has no start time");
+}
+
+/// Never produces a vector, so every write stays pending.
+struct Failing;
+impl hypatia::embedding::EmbeddingProvider for Failing {
+    fn embed(&self, _: &str) -> Result<Vec<f32>, hypatia::error::HypatiaError> {
+        Err(hypatia::error::HypatiaError::Embedding(
+            "unreachable".into(),
+        ))
+    }
+    fn dimensions(&self) -> usize {
+        3
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_paid_debt_has_no_start_and_a_new_one_starts_fresh() {
+    let dir = TempDir::new().unwrap();
+    let mut shelf = local(&dir);
+    KnowledgeService::new(&mut shelf)
+        .create("owed", Content::new("x"))
+        .unwrap();
+    assert!(shelf.embedding_debt().unwrap().pending_since.is_some());
+    // An update that embeds pays the debt, although no bookkeeping ran.
+    shelf.embedder = Box::new(Unit);
+    KnowledgeService::new(&mut shelf)
+        .update("owed", Content::new("y"))
+        .unwrap();
+    assert_eq!(shelf.embedding_debt().unwrap().pending_since, None);
+    // The stale start left behind must not date the next debt.
+    let stale = "2000-01-01T00:00:00Z";
+    let mut state = shelf.backend.flush_state().unwrap();
+    state.pending_since = Some(stale.into());
+    shelf.backend.save_flush_state(&state).unwrap();
+    shelf.embedder = Box::new(Failing);
+    KnowledgeService::new(&mut shelf)
+        .create("new", Content::new("z"))
+        .unwrap();
+    let started = shelf.embedding_debt().unwrap().pending_since;
+    assert!(started.is_some() && started.as_deref() != Some(stale));
+    // Deleting the last pending entry pays the debt too.
+    KnowledgeService::new(&mut shelf).delete("new").unwrap();
+    assert_eq!(shelf.embedding_debt().unwrap().pending_since, None);
+}
+
+#[test]
+fn a_write_on_a_degraded_shelf_is_owed_a_vector() {
+    let dir = TempDir::new().unwrap();
+    let mut shelf = local(&dir);
+    shelf.embedder = Box::new(Unit);
+    KnowledgeService::new(&mut shelf)
+        .create("embedded", Content::new("x"))
+        .unwrap();
+    drop(shelf);
+    std::fs::write(
+        dir.path().join("shelf.toml"),
+        "[embedding]\nmodel='another-model'\ndimensions=3\n",
+    )
+    .unwrap();
+    let mut shelf = OpenShelf::open(dir.path(), Some("contract")).unwrap();
+    shelf.embedder = Box::new(Unit);
+    KnowledgeService::new(&mut shelf)
+        .create("later", Content::new("y"))
+        .unwrap();
+    let debt = shelf.embedding_debt().unwrap();
+    assert_eq!(debt.pending_knowledge, 1);
+    assert!(debt.pending_since.is_some());
+    assert_eq!(
+        debt.blocked.map(|b| b.reason),
+        Some(BlockedReason::IdentityMismatch)
+    );
+    // Blocked: nothing is embedded, not even to be thrown away.
+    assert_eq!(shelf.flush_pending(128).unwrap(), FlushStats::default());
+}
+
+#[test]
+fn a_model_change_keeps_the_debt_start() {
+    let dir = TempDir::new().unwrap();
+    let mut shelf = local(&dir);
+    KnowledgeService::new(&mut shelf)
+        .create("entry", Content::new("x"))
+        .unwrap();
+    let started = shelf.embedding_debt().unwrap().pending_since;
+    assert!(started.is_some());
+    drop(shelf);
+    // No vectors yet, so the new model simply rebinds; the entry is still owed a vector.
+    std::fs::write(
+        dir.path().join("shelf.toml"),
+        "[embedding]\nmodel='another-model'\ndimensions=3\n",
+    )
+    .unwrap();
+    let shelf = OpenShelf::open(dir.path(), Some("contract")).unwrap();
+    assert_eq!(shelf.embedding_debt().unwrap().pending_since, started);
+}
+
 fn contract(shelf: &mut OpenShelf) {
     let initial = Content::new(r#"{"n":12,"mixed":[1,"rust",null],"nested":{"x":true}}"#)
         .with_tags(vec!["rust".into()]);

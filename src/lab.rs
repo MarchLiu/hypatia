@@ -205,6 +205,14 @@ impl Lab {
         }
     }
 
+    /// The shelf's embedding debt: what is pending, since when, and why it may be stuck.
+    pub fn embedding_debt(&self, shelf: &str) -> Result<crate::storage::flush::EmbeddingDebt> {
+        let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        shelf_ref.embedding_debt()
+    }
+
     // --- Archive files ---
 
     /// Store a file in the shelf's archives/ directory.
@@ -345,6 +353,10 @@ impl Lab {
             }
         }
         shelf_ref.rebuild_vector_indexes()?;
+        // Bookkeeping only: the vectors are in, so a failure here must not fail the backfill.
+        if let Err(e) = shelf_ref.settle_pending() {
+            eprintln!("warning: could not update embedding bookkeeping: {e}");
+        }
 
         Ok(stats)
     }
@@ -408,6 +420,12 @@ mod backfill_tests {
         let stats = lab.backfill_vectors("test").unwrap();
         assert_eq!((stats.created, stats.errors), (129, 1));
         assert_eq!(*batches.borrow(), [128, 2]);
+        let debt = lab.embedding_debt("test").unwrap();
+        assert_eq!(debt.pending_knowledge, 1);
+        assert!(
+            debt.pending_since.is_some(),
+            "the failed entry is still owed"
+        );
     }
     struct Fixed {
         fail: bool,
@@ -582,6 +600,7 @@ mod backfill_tests {
             2
         );
         assert!(!mismatched(&lab));
+        assert_eq!(lab.embedding_debt("test").unwrap().pending_since, None);
         assert_eq!(
             lab.similar("test", "saved", "knowledge", 5)
                 .unwrap()

@@ -145,6 +145,9 @@ impl Repl {
         let json: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| crate::error::HypatiaError::Parse(format!("invalid JSON: {e}")))?;
         let result = self.lab.query("default", &json)?;
+        if super::commands::uses_similar(&json) {
+            super::commands::warn_if_incomplete(&self.lab, "default", "both");
+        }
         if result.rows.is_empty() {
             Ok("No results found.".to_string())
         } else {

@@ -1,6 +1,8 @@
 //! Complete shelf backend boundary. Local vector files never escape LocalBackend.
 use super::{
-    SqliteStore, VectorFileIndex, open_or_migrate,
+    SqliteStore, VectorFileIndex,
+    flush::{Blocked, BlockedReason, FLUSH_STATE_KEY, FlushState},
+    open_or_migrate,
     settings::{BackendKind, ShelfSettings},
     transfer::{EmbeddingMetadata, IdentityMismatch, Snapshot, validate_vector},
 };
@@ -357,6 +359,82 @@ impl ShelfBackend {
             Backend::Local(l) => Ok(l.store.embedding_metadata()?.is_some()),
             #[cfg(feature = "postgres-backend")]
             Backend::Postgres(_) => Ok(true),
+        }
+    }
+    pub fn pending_count(&self, catalog: &str) -> Result<usize> {
+        match &self.inner {
+            Backend::Local(l) => l.store.pending_count(catalog),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.pending_count(catalog),
+        }
+    }
+    /// Why no vector can be written right now, if so. Checked before embedding anything, so
+    /// a flush never computes vectors only to have them refused.
+    pub fn vectors_blocked(&self) -> Result<Option<Blocked>> {
+        let blocked = |reason: BlockedReason, message: String| -> Result<Option<Blocked>> {
+            Ok(Some(Blocked { reason, message }))
+        };
+        if let Some(m) = &self.mismatch {
+            return blocked(BlockedReason::IdentityMismatch, m.to_string());
+        }
+        if !self.identity_trusted {
+            return blocked(
+                BlockedReason::UnknownIdentity,
+                "embedding model identity is unknown; configure embedding.model or provide readable model files".into(),
+            );
+        }
+        // A trusted identity always binds while no vector exists, so no binding means
+        // vectors from before identity tracking.
+        let legacy = match &self.inner {
+            Backend::Local(l) => l.store.embedding_metadata()?.is_none(),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(_) => false,
+        };
+        if legacy {
+            return blocked(
+                BlockedReason::LegacyVectors,
+                "legacy vectors have unknown model identity; run `hypatia backfill --reembed`"
+                    .into(),
+            );
+        }
+        Ok(None)
+    }
+    /// Up to `limit` pending entries across both catalogs, most recently written first.
+    pub fn newest_missing_embeddings(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, Content, i64)>> {
+        match &self.inner {
+            Backend::Local(l) => l.store.newest_missing_embeddings(limit),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.newest_missing_embeddings(limit),
+        }
+    }
+    /// Embedding debt bookkeeping for the configured identity. The debt's start survives a
+    /// model change (entries lack vectors either way); the breaker and learned batch size
+    /// belong to the identity they were recorded under. Unreadable state reads as empty.
+    pub fn flush_state(&self) -> Result<FlushState> {
+        let json = match &self.inner {
+            Backend::Local(l) => l.store.meta_value(FLUSH_STATE_KEY)?,
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.meta_value(FLUSH_STATE_KEY)?,
+        };
+        let mut state = FlushState::for_identity(&self.identity.model);
+        if let Some(stored) = json.and_then(|json| serde_json::from_str::<FlushState>(&json).ok()) {
+            if stored.identity == state.identity {
+                state = stored;
+            } else {
+                state.pending_since = stored.pending_since;
+            }
+        }
+        Ok(state)
+    }
+    pub fn save_flush_state(&mut self, state: &FlushState) -> Result<()> {
+        let json = serde_json::to_string(state)?;
+        match &self.inner {
+            Backend::Local(l) => l.store.set_meta_value(FLUSH_STATE_KEY, &json),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.set_meta_value(FLUSH_STATE_KEY, &json),
         }
     }
 

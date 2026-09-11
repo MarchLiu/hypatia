@@ -135,6 +135,9 @@ enum Commands {
         /// Explicitly invalidate all vectors and regenerate with the configured model
         #[arg(long)]
         reembed: bool,
+        /// Report the embedding debt as JSON instead of paying it
+        #[arg(long, conflicts_with = "reembed")]
+        status: bool,
         /// Shelf to backfill
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -250,8 +253,12 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         Commands::Query { jse, shelf } => {
             let json: serde_json::Value = serde_json::from_str(&jse)
                 .map_err(|e| crate::error::HypatiaError::Parse(format!("invalid JSON: {e}")))?;
+            let semantic = uses_similar(&json);
             let result = lab.query(&shelf, &json)?;
             print_result(&result);
+            if semantic {
+                warn_if_incomplete(lab, &shelf, "both");
+            }
         }
         Commands::KnowledgeCreate {
             name,
@@ -408,6 +415,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         } => {
             let result = lab.similar(&shelf, &query, &target, limit)?;
             print_result(&result);
+            warn_if_incomplete(lab, &shelf, &target);
         }
         Commands::Export { name, dest } => {
             lab.export_shelf(&name, &dest)?;
@@ -424,12 +432,28 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 source.display()
             );
         }
-        Commands::Backfill { shelf, reembed } => {
+        Commands::Backfill {
+            shelf,
+            reembed,
+            status,
+        } => {
+            if status {
+                let debt = lab.embedding_debt(&shelf)?;
+                println!("{}", serde_json::to_string_pretty(&debt)?);
+                return Ok(());
+            }
             let stats = lab.backfill_vectors_with_reembed(&shelf, reembed)?;
             println!(
                 "Backfill complete: {} vectors created, {} skipped, {} errors",
                 stats.created, stats.skipped, stats.errors
             );
+            // Embedding is this command's only job: failed entries are a failure.
+            if stats.errors > 0 {
+                return Err(crate::error::HypatiaError::Embedding(format!(
+                    "{} entries could not be embedded and stay pending",
+                    stats.errors
+                )));
+            }
         }
         Commands::ArchiveStore { file, name, shelf } => {
             let file_name = file
@@ -632,6 +656,36 @@ fn execute_model_command(cmd: ModelCommands) -> crate::error::Result<()> {
     Ok(())
 }
 
+/// Semantic results cannot include entries that have no vector yet; say so on stderr.
+/// `target` is the searched catalog: "knowledge", "statement" or "both".
+pub(crate) fn warn_if_incomplete(lab: &Lab, shelf: &str, target: &str) {
+    let Ok(debt) = lab.embedding_debt(shelf) else {
+        return;
+    };
+    let pending = match target {
+        "knowledge" => debt.pending_knowledge,
+        "statement" => debt.pending_statement,
+        _ => debt.pending_knowledge + debt.pending_statement,
+    };
+    if pending > 0 {
+        eprintln!(
+            "note: {pending} entries are not embedded yet, so results may be incomplete; run `hypatia backfill -s {shelf}`"
+        );
+    }
+}
+
+/// Whether a JSE expression contains a `$similar` operator anywhere.
+pub(crate) fn uses_similar(jse: &serde_json::Value) -> bool {
+    match jse {
+        serde_json::Value::Array(items) => {
+            items.first().and_then(|op| op.as_str()) == Some("$similar")
+                || items.iter().any(uses_similar)
+        }
+        serde_json::Value::Object(fields) => fields.values().any(uses_similar),
+        _ => false,
+    }
+}
+
 fn print_result(result: &QueryResult) {
     if result.rows.is_empty() {
         println!("No results found.");
@@ -662,6 +716,23 @@ mod tests {
                 check_subcommand(sub2);
             }
         }
+    }
+
+    #[test]
+    fn similar_operators_are_found_anywhere_in_a_query() {
+        use serde_json::json;
+        assert!(uses_similar(&json!(["$knowledge", ["$similar", "x"]])));
+        assert!(uses_similar(&json!([
+            "$knowledge",
+            ["$and", ["$eq", "name", "a"], ["$similar", "x"]]
+        ])));
+        assert!(uses_similar(&json!({"any": ["$similar", "x"]})));
+        // The word as data is not the operator.
+        assert!(!uses_similar(&json!([
+            "$knowledge",
+            ["$eq", "name", "$similar"]
+        ])));
+        assert!(!uses_similar(&json!(["$knowledge", ["$search", "x"]])));
     }
 
     fn check_subcommand(cmd: &clap::Command) {

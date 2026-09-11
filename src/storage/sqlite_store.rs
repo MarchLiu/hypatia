@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS knowledge(
     content    TEXT NOT NULL,
     embedding  BLOB,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
-)";
+);
+CREATE INDEX IF NOT EXISTS knowledge_missing_embedding_idx ON knowledge(name) WHERE embedding IS NULL";
 
 const STATEMENT_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS statement(
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS statement(
 CREATE INDEX IF NOT EXISTS idx_stmt_head     ON statement(head);
 CREATE INDEX IF NOT EXISTS idx_stmt_relation ON statement(relation);
 CREATE INDEX IF NOT EXISTS idx_stmt_tail     ON statement(tail);
+CREATE INDEX IF NOT EXISTS statement_missing_embedding_idx ON statement(triple) WHERE embedding IS NULL;
 ";
 
 const DOCS_SCHEMA: &str = "\
@@ -361,6 +363,7 @@ impl SqliteStore {
                 ))?;
             }
             tx.execute_batch(&format!("
+                CREATE INDEX IF NOT EXISTS {table}_pending_version_idx ON {table}(content_version) WHERE embedding IS NULL;
                 CREATE TRIGGER IF NOT EXISTS {table}_version_insert AFTER INSERT ON {table} BEGIN
                   UPDATE meta SET v=CAST(v AS INTEGER)+1 WHERE k='content_clock';
                   UPDATE {table} SET content_version=(SELECT CAST(v AS INTEGER) FROM meta WHERE k='content_clock') WHERE {pk}=new.{pk};
@@ -790,6 +793,58 @@ impl SqliteStore {
             &format!("UPDATE {table} SET embedding=?1 WHERE {pk}=?2 AND content_version=?3 AND (SELECT v FROM meta WHERE k='embedding_metadata')=?4"),
             params![vector_to_blob(vector), key, version, serde_json::to_string(identity)?],
         )? == 1)
+    }
+
+    /// Entries still waiting for a vector; served by the `*_missing_embedding_idx` indexes.
+    pub fn pending_count(&self, catalog: &str) -> Result<usize> {
+        let (table, _) = catalog_table(catalog)?;
+        let n: i64 = self.conn.query_row(
+            &format!("SELECT count(*) FROM {table} WHERE embedding IS NULL"),
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Up to `limit` pending entries across both catalogs, most recently written first.
+    /// Returns (catalog, key, content, version).
+    pub fn newest_missing_embeddings(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, Content, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT 'knowledge', name, content, content_version FROM knowledge WHERE embedding IS NULL \
+             UNION ALL SELECT 'statement', triple, content, content_version FROM statement WHERE embedding IS NULL \
+             ORDER BY 4 DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (catalog, key, content, version) = r?;
+            Ok((catalog, key, Content::from_json_str(&content)?, version))
+        })
+        .collect()
+    }
+
+    pub fn meta_value(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT v FROM meta WHERE k=?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_meta_value(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            [key, value],
+        )?;
+        Ok(())
     }
 
     pub fn missing_embeddings(
@@ -1405,6 +1460,44 @@ mod tests {
         assert_eq!(
             store.configure_embedding(&identity("b", 3)).unwrap(),
             Some(identity("a", 3))
+        );
+    }
+
+    #[test]
+    fn pending_entries_are_counted_and_listed_newest_first() {
+        let (_dir, store) = setup();
+        store.configure_embedding(&identity("a", 3)).unwrap();
+        let old = store.insert_knowledge("old", &Content::new("x")).unwrap();
+        let key = crate::model::StatementKey::new("s", "p", "o");
+        store
+            .insert_statement(&key, &Content::new("y"), None, None)
+            .unwrap();
+        store.insert_knowledge("new", &Content::new("z")).unwrap();
+        assert_eq!(store.pending_count("knowledge").unwrap(), 2);
+        assert_eq!(store.pending_count("statement").unwrap(), 1);
+        let keys: Vec<String> = store
+            .newest_missing_embeddings(10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, key, _, _)| key)
+            .collect();
+        assert_eq!(keys, ["new", key.to_csv_key().as_str(), "old"]);
+        store
+            .install_embedding("knowledge", "old", old, &[1., 0., 0.])
+            .unwrap();
+        assert_eq!(store.pending_count("knowledge").unwrap(), 1);
+        assert_eq!(store.newest_missing_embeddings(1).unwrap()[0].1, "new");
+    }
+
+    #[test]
+    fn meta_values_round_trip() {
+        let (_dir, store) = setup();
+        assert_eq!(store.meta_value("flush").unwrap(), None);
+        store.set_meta_value("flush", "{}").unwrap();
+        store.set_meta_value("flush", "{\"a\":1}").unwrap();
+        assert_eq!(
+            store.meta_value("flush").unwrap().as_deref(),
+            Some("{\"a\":1}")
         );
     }
 

@@ -1,7 +1,12 @@
-use crate::embedding::{EmbeddingProvider, build_provider};
+use crate::embedding::{EmbeddingProvider, build_provider, config::ProviderKind};
 use crate::error::{HypatiaError, Result};
 use crate::model::{Content, QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
-use crate::storage::{ShelfRegistry, Storage, backend::ShelfBackend, settings::ShelfSettings};
+use crate::storage::{
+    ShelfRegistry, Storage,
+    backend::ShelfBackend,
+    flush::{Blocked, BlockedReason, EmbeddingDebt, FlushStats, Paused, now},
+    settings::ShelfSettings,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -126,6 +131,7 @@ impl OpenShelf {
                 "warning: {catalog}/{key}: content saved; embedding skipped because the embedding model changed; {}",
                 m.hint()
             );
+            self.note_pending();
             return;
         }
         let outcome = (|| -> Result<bool> {
@@ -135,7 +141,7 @@ impl OpenShelf {
             self.backend.install_embedding(catalog, key, version, &v)
         })();
         match outcome {
-            Ok(true) => {}
+            Ok(true) => return,
             Ok(false) => eprintln!(
                 "warning: {catalog}/{key}: content saved; embedding pending (model unavailable or content changed); run backfill"
             ),
@@ -143,6 +149,118 @@ impl OpenShelf {
                 "warning: {catalog}/{key}: content saved; embedding pending: {e}; run backfill"
             ),
         }
+        self.note_pending();
+    }
+    /// Records when the current embedding debt started. The clock restarts when this entry is
+    /// the whole debt: an older start belongs to a debt paid without bookkeeping (an update
+    /// that embedded, a delete). Best-effort: bookkeeping must never fail a committed write.
+    fn note_pending(&mut self) {
+        let _ = (|| -> Result<()> {
+            let pending = self.backend.pending_count("knowledge")?
+                + self.backend.pending_count("statement")?;
+            let mut state = self.backend.flush_state()?;
+            if state.pending_since.is_none() || pending <= 1 {
+                state.pending_since = Some(now());
+                self.backend.save_flush_state(&state)?;
+            }
+            Ok(())
+        })();
+    }
+    /// Brings `pending_since` in line with what is actually pending: cleared once the debt is
+    /// paid, started when pending entries predate the bookkeeping.
+    pub fn settle_pending(&mut self) -> Result<()> {
+        let pending =
+            self.backend.pending_count("knowledge")? + self.backend.pending_count("statement")?;
+        let mut state = self.backend.flush_state()?;
+        let changed = match (pending, &state.pending_since) {
+            (0, Some(_)) => {
+                state.pending_since = None;
+                true
+            }
+            (1.., None) => {
+                state.pending_since = Some(now());
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.backend.save_flush_state(&state)?;
+        }
+        Ok(())
+    }
+    /// Why vectors cannot be written right now: the backend refuses them, or the provider
+    /// cannot produce them.
+    pub fn vectors_blocked(&self) -> Result<Option<Blocked>> {
+        if let Some(blocked) = self.backend.vectors_blocked()? {
+            return Ok(Some(blocked));
+        }
+        if self.embedder.is_available() {
+            return Ok(None);
+        }
+        let embedding = &self.settings.embedding;
+        let message = match embedding.provider {
+            ProviderKind::Local => embedding
+                .local_unavailable
+                .clone()
+                .unwrap_or_else(|| "embedding model files are missing or failed to load".into()),
+            ProviderKind::Remote => format!(
+                "environment variable {} is not set",
+                embedding.remote.api_key_env
+            ),
+        };
+        Ok(Some(Blocked {
+            reason: BlockedReason::ProviderUnavailable,
+            message,
+        }))
+    }
+    /// Embeds up to `limit` pending entries, newest first, and only writes their vectors:
+    /// no index rebuild, so it is cheap enough for the write or read path.
+    pub fn flush_pending(&mut self, limit: usize) -> Result<FlushStats> {
+        let mut stats = FlushStats::default();
+        if self.vectors_blocked()?.is_some() {
+            return Ok(stats);
+        }
+        let rows = self.backend.newest_missing_embeddings(limit as i64)?;
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|(_, key, content, _)| content.embedding_text(key))
+            .collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut vectors = self.embedder.embed_batch(&texts).into_iter();
+        for (catalog, key, _, version) in rows {
+            let vector = vectors.next().unwrap_or_else(|| {
+                Err(HypatiaError::Embedding(
+                    "provider returned too few vectors".into(),
+                ))
+            });
+            match vector.and_then(|v| self.backend.install_embedding(&catalog, &key, version, &v)) {
+                Ok(true) => stats.installed += 1,
+                Ok(false) => stats.skipped += 1,
+                Err(e) => {
+                    stats.failed += 1;
+                    stats.error.get_or_insert_with(|| e.to_string());
+                }
+            }
+        }
+        // Bookkeeping only: the vectors are in, so a failure here must not fail the flush.
+        let _ = self.settle_pending();
+        Ok(stats)
+    }
+    /// The shelf's embedding debt, for `backfill --status` and agent interfaces.
+    pub fn embedding_debt(&self) -> Result<EmbeddingDebt> {
+        let pending_knowledge = self.backend.pending_count("knowledge")?;
+        let pending_statement = self.backend.pending_count("statement")?;
+        let state = self.backend.flush_state()?;
+        Ok(EmbeddingDebt {
+            pending_knowledge,
+            pending_statement,
+            // A paid debt has no start, whatever the bookkeeping last recorded.
+            pending_since: state
+                .pending_since
+                .filter(|_| pending_knowledge + pending_statement > 0),
+            blocked: self.vectors_blocked()?,
+            paused: state.breaker.as_ref().map(Paused::from),
+        })
     }
     pub fn save_vector_indexes(&mut self) -> Result<()> {
         self.backend.flush()

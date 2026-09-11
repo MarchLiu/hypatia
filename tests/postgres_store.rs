@@ -404,6 +404,44 @@ fn identity_rebinds_without_vectors_and_degrades_with_them() {
 
 #[test]
 #[ignore = "requires a disposable PostgreSQL database with pgvector"]
+fn pending_entries_and_meta_values() {
+    let f = Fixture::new("none");
+    let store = f.open();
+    let old = store.insert_knowledge("old", &Content::new("x")).unwrap();
+    let key = StatementKey::new("s", "p", "o");
+    store
+        .insert_statement(&key, &Content::new("y"), None, None)
+        .unwrap();
+    store.insert_knowledge("new", &Content::new("z")).unwrap();
+    assert_eq!(store.pending_count("knowledge").unwrap(), 2);
+    assert_eq!(store.pending_count("statement").unwrap(), 1);
+    let keys: Vec<String> = store
+        .newest_missing_embeddings(10)
+        .unwrap()
+        .into_iter()
+        .map(|(_, key, _, _)| key)
+        .collect();
+    assert_eq!(keys, ["new", key.to_csv_key().as_str(), "old"]);
+    assert!(
+        store
+            .install_embedding("knowledge", "old", old, &[1., 0., 0.])
+            .unwrap()
+    );
+    assert_eq!(store.pending_count("knowledge").unwrap(), 1);
+    assert_eq!(store.meta_value("flush").unwrap(), None);
+    store.set_meta_value("flush", "{}").unwrap();
+    store.set_meta_value("flush", "{\"a\":1}").unwrap();
+    assert_eq!(
+        store.meta_value("flush").unwrap().as_deref(),
+        Some("{\"a\":1}")
+    );
+    // Extra meta keys never disturb opening.
+    drop(store);
+    assert!(f.open().stored_identity_mismatch().is_none());
+}
+
+#[test]
+#[ignore = "requires a disposable PostgreSQL database with pgvector"]
 fn concurrent_embedding_install_cannot_survive_content_update() {
     let f = Fixture::new("none");
     let store = f.open();
