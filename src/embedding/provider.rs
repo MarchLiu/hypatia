@@ -473,14 +473,22 @@ impl EmbeddingProvider for RemoteApiProvider {
 
 // ── Null Provider (for when no embedding is configured) ────────────────
 
-/// A provider that is always unavailable.
-pub struct NullProvider;
+/// A provider that is always unavailable, and says why.
+pub struct NullProvider {
+    reason: String,
+}
+
+impl NullProvider {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
 
 impl EmbeddingProvider for NullProvider {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, HypatiaError> {
-        Err(HypatiaError::ModelUnavailable(
-            "no embedding provider configured".into(),
-        ))
+        Err(HypatiaError::ModelUnavailable(self.reason.clone()))
     }
 
     fn dimensions(&self) -> usize {
@@ -501,7 +509,16 @@ pub fn build_provider(config: &EmbeddingConfig) -> Box<dyn EmbeddingProvider> {
             if config.local_files_exist() {
                 Box::new(OnnxProvider::new(&config.local))
             } else {
-                Box::new(NullProvider)
+                let reason = config.local_unavailable.clone().unwrap_or_else(|| {
+                    let missing: Vec<String> =
+                        [&config.local.model_path, &config.local.tokenizer_path]
+                            .into_iter()
+                            .filter(|p| !p.exists())
+                            .map(|p| p.display().to_string())
+                            .collect();
+                    format!("embedding model files not found: {}", missing.join(", "))
+                });
+                Box::new(NullProvider::new(reason))
             }
         }
         ProviderKind::Remote => Box::new(RemoteApiProvider::new(&config.remote)),

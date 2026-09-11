@@ -14,21 +14,25 @@ AI-oriented memory management system. Stores structured knowledge as a graph of 
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
 - **Agent Integration** -- Claude Code skill for natural-language-to-CLI translation
-- **Cross-Platform** -- Build for 18+ targets (Linux, macOS, Windows, FreeBSD, NetBSD, illumos, Android)
+- **Cross-Platform** -- Prebuilt binaries on [GitHub Releases](https://github.com/tkliuxing/hypatia/releases); `scripts/build.sh` cross-compiles other targets
 
 ## Quick Start
 
+Hypatia works with zero downloads and zero configuration: full-text search, graph traversal and JSE queries are available as soon as the binary is installed. Semantic search is optional and can be enabled later.
+
+### 1. Install
+
+Download a prebuilt binary from [GitHub Releases](https://github.com/tkliuxing/hypatia/releases) (currently macOS Apple Silicon and Windows x64), or build from source:
+
 ```bash
-# Build
 cargo build --release
+```
 
-# Download embedding model (BGE-M3, recommended)
-mkdir -p ~/.hypatia/default
-hf download BAAI/bge-m3 --local-dir /tmp/bge-m3
-cp /tmp/bge-m3/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
-cp /tmp/bge-m3/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
-cp /tmp/bge-m3/onnx/tokenizer.json ~/.hypatia/default/tokenizer.json
+### 2. Store and query knowledge
 
+The first command creates the `default` shelf at `~/.hypatia/default`.
+
+```bash
 # Create knowledge
 hypatia knowledge-create "Rust" -d "systems programming language" -t "language,compiled"
 
@@ -38,10 +42,6 @@ hypatia statement-create "Rust" "is_a" "systems language"
 # Full-text search
 hypatia search "programming language"
 
-# Vector similarity search (requires embedding model)
-hypatia backfill    # generate embeddings for existing entries
-hypatia similar "programming language"  # semantic search
-
 # Structured query (JSE)
 hypatia query '["$knowledge", ["$eq", "name", "Rust"]]'
 hypatia query '["$statement", ["$triple", "Rust", "$*", "$*"]]'
@@ -50,6 +50,25 @@ hypatia query '["$knowledge", ["$search", "database migration"]]'
 # Interactive REPL
 hypatia repl
 ```
+
+Until an embedding model is configured, writes print an `embedding pending` note. It is expected and safe to ignore: the entry is saved and fully searchable by text and graph.
+
+### 3. Optional: enable semantic search
+
+`similar` needs an embedding model. Either configure a [remote OpenAI-compatible API](#remote-api-openai-compatible), or download BGE-M3 (about 2.3 GB) into the shelf directory:
+
+```bash
+mkdir -p ~/.hypatia/default
+hf download BAAI/bge-m3 --local-dir /tmp/bge-m3
+cp /tmp/bge-m3/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
+cp /tmp/bge-m3/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
+cp /tmp/bge-m3/onnx/tokenizer.json ~/.hypatia/default/tokenizer.json
+
+hypatia backfill                         # embed entries written before the model was installed
+hypatia similar "programming language"   # semantic search
+```
+
+Nothing written before enabling semantic search is lost: `backfill` generates vectors for existing entries.
 
 ## Embedding Models
 
