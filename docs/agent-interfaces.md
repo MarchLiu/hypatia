@@ -123,7 +123,7 @@ MCP 三个 primitive 的控制权归属不同：
 ```
 0. 本文修订                                    已完成
 1. statement-create 幂等（§5.3）               已完成
-2. skill 文本修正：漂移 #1、#2（§5.1）          零依赖 · 必须先于 G
+2. skill 文本修正：漂移 #1、#2（§5.1）          已完成
 3. G. hypatia skill install --agent ...         零依赖
 4. H. hypatia mcp 子命令                        等 onboarding PR 合并后再做
 ```
@@ -150,7 +150,10 @@ G 的进阶形态（v2）：**判断层单一源，宿主适配层由 CLI 生成
 
 处置：
 
-- 1–2：在实施顺序第 2 步修文本；长期靠 G v2 的生成消除。
+- 1–2：文本已修，`hypatia` 与 `hypatia-memory` 两份 skill 及其 `dsh-hypatia/skills/` 镜像同步。长期靠 G v2 的生成消除。
+  - #1 改为「先删后建」：`knowledge-delete` 不级联 statement（两个后端都没有外键），实测 `belongTo` 边在重建后保留。代价是 session 节点的 `created_at` 重置，对运营型节点无害。
+  - #2 实测：`--scopes ""` 存为无 scope，`["$has","scopes",""]` 查不到；`","` 存为 `[""]`，`"p,"` 存为 `["p",""]`。已改为尾逗号写法。原文会让 agent 写下的全局规则在全局查询里永久不可见。
+  - 备选（未做）：给 CLI 补 `knowledge-update`。`Lab::update_knowledge` 已存在，能原子替换并保留 `created_at`，但属于接口扩张，留待 H 或单独决定。
 - 3–4：MCP 的 schema 化之后不可能再发生；CLI 侧不动，改 flag 名是无收益的破坏。
 - 5：**暂缓**。改 exit code 会让 DSH 插件的 `runOk` 把「不存在」当失败去重试，在 §5.3 修好之前会撞上不幂等的 `statement-create`；改措辞会让它的正则失效。MCP 会替 MCP 宿主解决；skill 宿主的收益不足以抵消破坏面。
 
