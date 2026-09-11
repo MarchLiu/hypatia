@@ -20,7 +20,7 @@ uses Codex gets memory managed by Hypatia.
 codex-integration/
 ├── hooks/            # hook scripts (installed to ~/.codex/hooks/)
 ├── hooks.json        # hooks registry (installed to ~/.codex/hooks.json)
-├── install.sh        # installs hooks + skills into ~/.codex
+├── install.sh        # installs hooks into ~/.codex (skills: `hypatia skill install --agent codex`)
 └── README.md
 ```
 

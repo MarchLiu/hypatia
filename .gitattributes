@@ -1,0 +1,4 @@
+# Skills are compiled into the binary and installed byte-for-byte, and installs are
+# tracked by content hash, so keep them LF on every platform.
+skills/** text eol=lf
+dsh-hypatia/skills/** text eol=lf

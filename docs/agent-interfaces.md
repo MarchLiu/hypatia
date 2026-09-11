@@ -124,7 +124,7 @@ MCP 三个 primitive 的控制权归属不同：
 0. 本文修订                                    已完成
 1. statement-create 幂等（§5.3）               已完成
 2. skill 文本修正：漂移 #1、#2（§5.1）          已完成
-3. G. hypatia skill install --agent ...         零依赖
+3. G. hypatia skill install --agent ...         v1 已实现
 4. H. hypatia mcp 子命令                        等 onboarding PR 合并后再做
 ```
 
@@ -133,9 +133,13 @@ MCP 三个 primitive 的控制权归属不同：
 **G v1 的范围**：
 
 - 三份 skill 用 `include_str!` 内置进 binary —— 「零依赖」指装 skill 不需要 repo checkout，skill 版本等于 binary 版本。漂移 #1、#2 这类错误从此必须在编译前修掉。
-- `--agent claude|codex|opencode`，按各宿主的 skill 目录写入。Codex 与 OpenCode 的路径以 `skills/hypatia-memory/SKILL.md` 现有的集成章节为准。
-- `hypatia skill status`：对比已装版本与内置版本，让「装过但过时」可见。
-- **未决**：DSH 变体是否纳入。它在 `feat/dsh-hypatia-auto-memory` 分支上未合并，且实现的是协议的降级子集（见附）。
+- `--agent claude|codex|opencode`，写入各宿主的用户级 skill 目录；`--dir` 可装到任意目录。原计划「以 hypatia-memory 的集成章节为准」不成立：那几节讲的是 hooks 与插件，不是 skill 目录。各宿主目录按其官方文档与源码核实（2026-09）：claude → `~/.claude/skills`（不认未文档化的 `CLAUDE_CONFIG_DIR`）；codex → `~/.agents/skills`（`$CODEX_HOME/skills` 已废弃，仅兼容读取）；opencode → `~/.config/opencode/skills` 或 `$OPENCODE_CONFIG_DIR/skills`。OpenCode 还会读前两处，同名 skill 只留一份；Codex 仍兼容读取废弃的 `$CODEX_HOME/skills`。`install` 与 `status` 对这些位置里「存在但非最新」的同名副本逐个告警，不依赖宿主的扫描顺序。
+- `hypatia skill status`：对比已装副本与内置版本，让「装过但过时」可见。状态分五种：missing、current、outdated（hypatia 装的旧版，可直接升级）、modified（装后被改过）、unmanaged（内容不同且非 hypatia 所装）。后两种不加 `--force` 不覆盖，且 `install` 以非零退出。
+- 安装记录按内容哈希存在 `~/.hypatia/skill-installs.json`，不在宿主目录里放标记文件，免得宿主把它当资源加载。
+- `skill` 子命令在 `Lab::new()` 之前分发，装 skill 不打开、也不创建任何 shelf。
+- **已定：不做 `--agent dsh`**。`dsh-hypatia` 插件自己把内置 skill 注册为 runtime skill，优先于用户级 `~/.dsh/skills`，往那里装的副本会被遮蔽。`dsh-hypatia-auto-memory` 的 DSH 变体属于插件自身，也不归 G。
+- **G 只装 skill 文件，不装 hooks**。hypatia-memory 靠宿主 hooks 触发，装完后 CLI 会提示；hooks 仍由 `codex-integration/install.sh` 与 `opencode-integration/` 负责，它们依赖 repo checkout。把 hooks 也收进 CLI 是后续可选项。
+- 顺带修正：`codex-integration/README.md` 声称 `install.sh` 会装 skills，脚本实际只装 hooks。
 - 宿主适配层生成留 v2。
 
 G 的进阶形态（v2）：**判断层单一源，宿主适配层由 CLI 生成**。现在主仓 `hypatia-memory` 与 DSH 变体是两份手写、会漂移的文档（两者对协议的实现差了整整一个分层 cascade）。若适配是生成的，这类漂移也会变成不可能。

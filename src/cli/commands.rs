@@ -190,6 +190,9 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
+    /// Install or check the bundled agent skills
+    #[command(subcommand)]
+    Skill(super::skill::SkillCommands),
     /// Enter interactive REPL mode
     Repl,
 }
@@ -249,6 +252,7 @@ impl Commands {
             | Self::ArchiveGet { .. }
             | Self::ArchiveList { .. }
             | Self::Model(_)
+            | Self::Skill(_)
             | Self::Repl => None,
         }
     }
@@ -256,6 +260,11 @@ impl Commands {
 
 pub fn run() -> crate::error::Result<()> {
     let cli = Cli::parse();
+    // Skill management touches no shelf: dispatch it before Lab::new(), which
+    // opens every registered shelf and creates the default one on first run.
+    if let Some(Commands::Skill(cmd)) = cli.command {
+        return super::skill::execute(cmd);
+    }
     let mut lab = Lab::new()?;
 
     match cli.command {
@@ -643,6 +652,8 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         }
         Commands::Model(cmd) => execute_model_command(lab, cmd)?,
         Commands::Repl => unreachable!(),
+        // Normally dispatched before Lab::new(); still correct if routed here.
+        Commands::Skill(cmd) => super::skill::execute(cmd)?,
     }
     Ok(())
 }

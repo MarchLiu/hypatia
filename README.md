@@ -13,7 +13,7 @@ AI-oriented memory management system. Stores structured knowledge as a graph of 
 - **Synonyms** -- Per-entry synonym lists for knowledge, per-position (subject/predicate/object) synonyms for statements, indexed in FTS
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
-- **Agent Integration** -- Claude Code skill for natural-language-to-CLI translation
+- **Agent Integration** -- Bundled agent skills for Claude Code, Codex and OpenCode, installed with `hypatia skill install` (see [Agent Skills](#agent-skills))
 - **Cross-Platform** -- Prebuilt binaries on [GitHub Releases](https://github.com/MarchLiu/hypatia/releases) with a one-line install script; `scripts/build.sh` cross-compiles other targets
 
 ## Quick Start
@@ -251,7 +251,7 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia knowledge-create <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>]` | Create a knowledge entry |
 | `hypatia knowledge-get <name>` | Get a knowledge entry |
 | `hypatia knowledge-delete <name>` | Delete a knowledge entry |
-| `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple |
+| `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple; exits 0 without changes if it already exists |
 | `hypatia statement-delete <subj> <pred> <obj>` | Delete a triple |
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
 | `hypatia similar <query> [--limit N]` | Vector similarity search |
@@ -265,6 +265,8 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia archive-list [-s <shelf>]` | List all archive files |
 | `hypatia query '<jse-json>'` | Execute a JSE query |
 | `hypatia export <name> <dest>` | Export a shelf |
+| `hypatia skill install --agent <host> [--dir <dir>] [--skill <name>] [--force]` | Install the bundled agent skills (hosts: `claude`, `codex`, `opencode`) |
+| `hypatia skill status --agent <host> [--dir <dir>]` | Show whether installed skills match the bundled ones |
 | `hypatia repl` | Interactive REPL |
 
 ## JSE Query Language
@@ -350,6 +352,30 @@ hypatia query '["$statement", ["$k-hop", "Alice", "$*", 2]]'
 # K-hop: follow "knows" edges from Alice, 3 hops deep
 hypatia query '["$statement", ["$k-hop", "Alice", "knows", 3]]'
 ```
+
+## Agent Skills
+
+The binary carries three agent skills: `hypatia` translates natural language into CLI calls, `hypatia-memory` is the automatic memory protocol, and `hypatia-dream` consolidates the graph at the end of a work period. Install them into an agent's user-level skills directory:
+
+```bash
+hypatia skill install --agent claude                  # or codex, opencode; repeat --agent for several
+hypatia skill install --dir ./my-skills               # any directory: <DIR>/<name>/SKILL.md
+hypatia skill install --agent claude --skill hypatia  # one skill only
+hypatia skill status --agent claude                   # where each skill lives and whether it is current
+```
+
+| `--agent` | Directory |
+|---|---|
+| `claude` | `~/.claude/skills` |
+| `codex` | `~/.agents/skills`, the cross-agent location Codex now uses. Its older `~/.codex/skills` is deprecated. |
+| `opencode` | `~/.config/opencode/skills`, or `$OPENCODE_CONFIG_DIR/skills`. OpenCode also loads the two directories above. |
+
+- OpenCode also loads the Claude Code and cross-agent directories, and Codex still reads its deprecated `~/.codex/skills`. `install` and `status` warn when a same-name copy there is not current, since it could shadow the managed one.
+- An installed copy always matches the binary that wrote it. After upgrading hypatia, run `install` again: copies it wrote earlier are updated in place.
+- A copy you edited, or one hypatia did not install, is left alone and reported, and `install` exits non-zero. Add `--force` to overwrite it.
+- Start a new agent session to pick up newly installed skills.
+- `hypatia-memory` is triggered by host hooks, not by the skill file alone. The Codex and OpenCode hook installers are in `codex-integration/` and `opencode-integration/`.
+- DSH users get these skills from the `dsh-hypatia` plugin and need no install.
 
 ## Architecture
 
