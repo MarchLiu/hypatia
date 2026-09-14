@@ -547,32 +547,41 @@ impl SqliteStore {
 
     // ── Statement CRUD ───────────────────────────────────────────────
 
+    /// Idempotent: returns `None` when the triple already exists, in which case
+    /// nothing is written (row, FTS doc and `content_version` stay as they were).
     pub fn insert_statement(
         &self,
         key: &StatementKey,
         content: &Content,
         tr_start: Option<NaiveDateTime>,
         tr_end: Option<NaiveDateTime>,
-    ) -> Result<i64> {
+    ) -> Result<Option<i64>> {
         let json = content.to_json_string();
         let triple = key.to_csv_key();
         let tr_start_str = tr_start.as_ref().map(format_timestamp);
         let tr_end_str = tr_end.as_ref().map(format_timestamp);
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO statement (triple, head, relation, tail, content, tr_start, tr_end)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                triple,
-                key.head,
-                key.relation,
-                key.tail,
-                json,
-                tr_start_str,
-                tr_end_str
-            ],
-        )
-        .map_err(StorageError::from)?;
+        // `AFTER INSERT` triggers do not fire on DO NOTHING, so a duplicate
+        // leaves the content clock untouched as well.
+        let inserted = tx
+            .execute(
+                "INSERT INTO statement (triple, head, relation, tail, content, tr_start, tr_end)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(triple) DO NOTHING",
+                params![
+                    triple,
+                    key.head,
+                    key.relation,
+                    key.tail,
+                    json,
+                    tr_start_str,
+                    tr_end_str
+                ],
+            )
+            .map_err(StorageError::from)?;
+        if inserted == 0 {
+            return Ok(None);
+        }
         let doc_id =
             self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(content, &triple))?;
         replace_postings_in(&tx, doc_id, &json)?;
@@ -582,7 +591,7 @@ impl SqliteStore {
             |r| r.get(0),
         )?;
         tx.commit()?;
-        Ok(version)
+        Ok(Some(version))
     }
 
     pub fn get_statement(&self, key: &StatementKey) -> Result<Option<Statement>> {
@@ -1503,7 +1512,8 @@ mod tests {
         let key = crate::model::StatementKey::new("s", "p", "o");
         let version = store
             .insert_statement(&key, &Content::new("x"), None, None)
-            .unwrap();
+            .unwrap()
+            .expect("fresh triple is inserted");
         assert!(
             store
                 .install_embedding("statement", &key.to_csv_key(), version, &[1., 0., 0.])
@@ -1650,6 +1660,42 @@ mod tests {
             .unwrap();
         store.delete_statement(&key).unwrap();
         assert!(store.get_statement(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn statement_insert_is_idempotent() {
+        let (_dir, store) = setup();
+        let key = StatementKey::new("A", "rel", "B");
+        let version_of = |store: &SqliteStore| -> i64 {
+            store
+                .conn()
+                .query_row(
+                    "SELECT content_version FROM statement WHERE triple='A,rel,B'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let first = store
+            .insert_statement(&key, &Content::new("original"), None, None)
+            .unwrap();
+        assert_eq!(first, Some(version_of(&store)));
+
+        let again = store
+            .insert_statement(&key, &Content::new("changed"), None, None)
+            .unwrap();
+        assert_eq!(again, None);
+        assert_eq!(first, Some(version_of(&store)));
+        let loaded = store.get_statement(&key).unwrap().unwrap();
+        assert_eq!(loaded.content.data, "original");
+        // The FTS doc was not rewritten either: `docs_upsert_in` updates in
+        // place, so a row count would not catch an overwrite.
+        let opts = SearchOpts {
+            catalog: Some("statement".into()),
+            ..SearchOpts::default()
+        };
+        assert_eq!(store.search("original", &opts).unwrap().len(), 1);
+        assert!(store.search("changed", &opts).unwrap().is_empty());
     }
 
     #[test]

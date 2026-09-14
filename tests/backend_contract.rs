@@ -665,6 +665,29 @@ fn contract(shelf: &mut OpenShelf) {
         .backend
         .insert_statement(&b, &Content::new("cycle"), None, None)
         .unwrap();
+    // Statement create is idempotent on both backends: a duplicate triple is a
+    // no-op that keeps the stored content and time range, not an error.
+    assert_eq!(
+        shelf
+            .backend
+            .insert_statement(&a, &Content::new("changed"), None, None)
+            .unwrap(),
+        None
+    );
+    let kept = shelf.backend.get_statement(&a).unwrap().unwrap();
+    assert_eq!(kept.content.data, "edge");
+    // The FTS doc was not rewritten with the duplicate's content.
+    let statements = SearchOpts {
+        catalog: Some("statement".into()),
+        ..SearchOpts::default()
+    };
+    assert!(
+        shelf
+            .execute_search("changed", &statements)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     assert_eq!(
         shelf.backend.get_statement(&a).unwrap().unwrap().tr_start,
         Some(date)
@@ -1019,4 +1042,88 @@ fn postgres_automatic_flush_transitions() {
         .unwrap()
         .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
         .unwrap();
+}
+
+/// Counts `embed` calls so a test can prove a code path never reached the provider.
+struct CountingEmbedder(std::rc::Rc<std::cell::Cell<usize>>);
+impl hypatia::embedding::EmbeddingProvider for CountingEmbedder {
+    fn embed(&self, _: &str) -> Result<Vec<f32>, hypatia::error::HypatiaError> {
+        self.0.set(self.0.get() + 1);
+        Ok(vec![1., 0., 0.])
+    }
+    fn dimensions(&self) -> usize {
+        3
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn duplicate_statement_create_never_reaches_the_embedder() {
+    let dir = TempDir::new().unwrap();
+    let mut shelf = local(&dir);
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    shelf.embedder = Box::new(CountingEmbedder(calls.clone()));
+    let key = StatementKey::new("x", "rel", "y");
+
+    let mut svc = hypatia::service::StatementService::new(&mut shelf);
+    assert!(
+        svc.create(&key, Content::new("original"), None, None)
+            .unwrap()
+            .created
+    );
+    // Deferred embedding may make the first create skip the provider too, so
+    // pin the delta: the duplicate must add no calls, whatever the first did.
+    let before = calls.get();
+    let again = svc
+        .create(&key, Content::new("changed"), None, None)
+        .unwrap();
+    assert!(!again.created);
+    assert_eq!(again.statement.content.data, "original");
+    assert_eq!(calls.get(), before);
+}
+
+#[test]
+fn knowledge_patch_that_changes_nothing_keeps_the_version() {
+    use hypatia::service::{KnowledgePatch, KnowledgeService};
+    let dir = TempDir::new().unwrap();
+    let mut shelf = local(&dir);
+    let version = shelf
+        .backend
+        .insert_knowledge("k", &Content::new("same").with_tags(vec!["t".into()]))
+        .unwrap();
+    let noop = KnowledgePatch {
+        data: Some("same".into()),
+        ..Default::default()
+    };
+    assert!(
+        !KnowledgeService::new(&mut shelf)
+            .patch("k", &noop)
+            .unwrap()
+            .changed
+    );
+    // Installing against the original version still succeeds, so the no-op wrote nothing.
+    assert!(
+        shelf
+            .backend
+            .install_embedding("knowledge", "k", version, &[1., 0., 0.])
+            .unwrap()
+    );
+
+    let real = KnowledgePatch {
+        data: Some("new".into()),
+        ..Default::default()
+    };
+    let updated = KnowledgeService::new(&mut shelf).patch("k", &real).unwrap();
+    assert!(updated.changed);
+    assert_eq!(updated.knowledge.content.data, "new");
+    assert_eq!(updated.knowledge.content.tags, ["t"]);
+    // A real change moves the version, so the old one can no longer install a vector.
+    assert!(
+        !shelf
+            .backend
+            .install_embedding("knowledge", "k", version, &[1., 0., 0.])
+            .unwrap()
+    );
 }

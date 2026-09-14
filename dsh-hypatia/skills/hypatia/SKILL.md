@@ -55,16 +55,16 @@ hypatia knowledge-create "Euclid Prop 1" -d "equilateral triangle" --figures "ar
 
 ### Scopes
 
-Use `--scopes` to assign project or global scope to knowledge and statements. Empty string `""` means global. Comma-separated.
+Use `--scopes` to assign project or global scope to knowledge and statements. The value is comma-separated. **Global scope is stored as an empty-string entry, and only a trailing comma writes it**: `--scopes ","` is global only, and `--scopes "my-project,"` is both. `--scopes ""` stores no scope at all, so global lookups such as `["$has", "scopes", ""]` will never find the entry.
 
 ```bash
 # Project-scoped only
 hypatia knowledge-create "API convention" -d "REST endpoints use kebab-case" --tags "rule" --scopes "my-project"
 
-# Global scope (empty string)
-hypatia knowledge-create "prefer immutable" -d "always create new objects" --tags "rule" --scopes ""
+# Global scope only (trailing comma; `--scopes ""` would store no scope)
+hypatia knowledge-create "prefer immutable" -d "always create new objects" --tags "rule" --scopes ","
 
-# Both project and global
+# Both project and global (trailing comma)
 hypatia knowledge-create "no mock DB" -d "never mock database in tests" --tags "taboo" --scopes "my-project,"
 ```
 
@@ -93,6 +93,20 @@ hypatia knowledge-get <name>
 | User says | Command |
 |---|---|
 | "show me knowledge about Rust" / "get Rust entry" | `hypatia knowledge-get "Rust"` |
+
+### Update
+
+```
+hypatia knowledge-update <name> [-d "<data>"] [-t "<tags>"] [--synonyms "<csv>"] [--figures "<refs>"] [--scopes "<scopes>"]
+```
+
+Only the fields you pass change. An omitted field keeps its stored value, and exactly `""` clears a field, such as `-t ""`; for tags, `","` or `" "` would store blank tags instead. `--scopes` replaces the stored scopes and is parsed as on create: end the list with a comma, such as `"q,"`, to include the global scope, or the entry drops out of global lookups. The entry keeps its `created_at`. Its old vector is discarded, and a new one is generated on the next flush, as after `knowledge-create`. Updating an entry that does not exist is an error. An update that changes nothing prints `Knowledge unchanged: <name>` and writes nothing.
+
+| User says | Command |
+|---|---|
+| "update Rust's description to mention memory safety" | `hypatia knowledge-update "Rust" -d "systems programming language with memory safety"` |
+| "retag Go as language and google" | `hypatia knowledge-update "Go" -t "language,google"` |
+| "remove all tags from Python" | `hypatia knowledge-update "Python" -t ""` |
 
 ### Delete
 

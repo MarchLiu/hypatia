@@ -166,7 +166,7 @@ hypatia knowledge-create "session-<SESSION_ID>" \
   --scopes "<PROJECT>"
 ```
 
-- Create or update `session-<SESSION_ID>` when new summary text arrives (prefer `knowledge-update` if entry exists).
+- Create `session-<SESSION_ID>` the first time a summary arrives; `knowledge-create` fails on an existing name. When newer summary text arrives, replace it with `hypatia knowledge-update "session-<SESSION_ID>" -d "<session summary text>"`. Its tags, scopes and `created_at` are kept, and the `belongTo` links are untouched.
 - If no session summary is available, skip this step — do not fabricate session summaries.
 
 ### Step 3: Link message to session
@@ -421,13 +421,13 @@ When the user explicitly asks to remember or forget:
 
 1. Identify what to remember
 2. Classify as `rule`, `taboo`, or general `memory`
-3. Determine scopes
+3. Determine scopes: `"<PROJECT>"` for this project only, or `"<PROJECT>,"` with a trailing comma to also make it global
 4. Create:
    ```bash
    hypatia knowledge-create "<name>" \
      -d "<content>" \
      --tags "memory,<type>" \
-     --scopes "<PROJECT>,<optional-global>"
+     --scopes "<SCOPES>"
    ```
 5. Create `is_a` statement and relationship statements
 
@@ -480,7 +480,7 @@ When the user explicitly asks to remember or forget:
 7. **Use structured tags** — `message`, `session`, `summary <N>`, `memory`, `work-unit`, `rule`, `taboo`
 8. **Don't interrupt the user** — memory operations are background tasks
 9. **Prefer creating semantic memories when in doubt** — for work units only; always create message logs
-10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules use `""`
+10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules add a trailing comma (`"<PROJECT>,"`, or `","` for global only), because `--scopes ""` stores no scope
 
 ## Graph Schema Reference
 

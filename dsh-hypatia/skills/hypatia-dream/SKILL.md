@@ -152,6 +152,11 @@ hypatia query '{"$statement":[["$triple","<HEAD>","<RELATION>","<TAIL>"]],"limit
 
 Skip a stale plan, an addition that already exists, and a replacement whose source triple no longer matches the reviewed evidence.
 
+A replacement whose new triple already exists needs one more check, because `statement-create` never overwrites an existing triple. Compare that triple's `data`, `synonyms`, and `scopes` with the source triple's. Treat an absent field and an empty list or object as equal, and compare `scopes` as a set.
+
+- If they are equal, an earlier run created it and stopped before the delete. Mark the replacement **delete-only** and count it as replaced. Do not delete anything yet: step 4 runs the delete after step 2's backup.
+- If they differ, skip the replacement. List it under No Change with the reason `target already exists with different metadata; a person must decide`, do not delete the source, and leave both triples out of step 5's verification.
+
 2. If the run plans any replacement, export the shelf to a timestamped backup directory before the first replacement step and report the destination. `export` creates the destination directory itself, so do not pre-create it, and pass the shelf name as the first argument:
 
 ```bash
@@ -164,9 +169,9 @@ hypatia export "<SHELF>" "<BACKUP_DIR>"
 hypatia statement-create "<HEAD>" "<RELATION>" "<TAIL>" -s "<SHELF>"
 ```
 
-`statement.triple` is unique, so creating a triple that already exists fails with `UNIQUE constraint failed: statement.triple`. That means the relationship is already recorded: treat it as a no-op, count it as skipped, and continue. It is not a run failure.
+`statement-create` is idempotent. Creating a triple that already exists exits 0 and prints `Statement already exists: (<HEAD>, <RELATION>, <TAIL>)` instead of `Created statement: ...`, and leaves the stored triple and its metadata unchanged. That means the relationship is already recorded: count it as skipped and continue. It is not a run failure.
 
-4. For a replacement, **create the new triple first, verify it, and only then delete the source triple.** A replacement changes at least one of `head`, `relation`, and `tail`, so the two triples have different primary keys and can coexist for the moment in between. This ordering has no window in which the old relationship is already gone and the new one does not yet exist. Never delete first.
+4. For a replacement, **create the new triple first, verify it, and only then delete the source triple.** A replacement changes at least one of `head`, `relation`, and `tail`, so the two triples have different primary keys and can coexist for the moment in between. This ordering has no window in which the old relationship is already gone and the new one does not yet exist. Never delete first. For a delete-only replacement from step 1, skip the create and run only the `statement-delete`.
 
 ```bash
 hypatia statement-create "<NEW_HEAD>" "<NEW_RELATION>" "<NEW_TAIL>" \
@@ -176,9 +181,9 @@ hypatia statement-delete "<OLD_HEAD>" "<OLD_RELATION>" "<OLD_TAIL>" -s "<SHELF>"
 
 Carry the source metadata across exactly, and omit any flag whose source value is empty — `--synonyms ""` is a hard parse error, not an empty value. `--synonyms` takes the positional form `{"head":[...],"relation":[...],"tail":[...]}`. `--scopes` is comma-separated and a trailing comma means global scope, so source scopes `["project-a",""]` are reproduced as `--scopes "project-a,"` and `[""]` as `--scopes ","`.
 
-If the create fails, nothing has been lost: report it and leave the source triple untouched. If the create succeeds but the delete fails, stop and report both triples as present — the graph is consistent but now carries a duplicate relationship, and a person must decide.
+If the create fails, nothing has been lost: report it and leave the source triple untouched. If the create prints `Statement already exists`, the new triple appeared after step 1's re-query and may not carry the source metadata. Do not delete the source yet: apply step 1's already-exists check to it now. If the create succeeds but the delete fails, stop and report both triples as present — the graph is consistent but now carries a duplicate relationship, and a person must decide.
 
-5. Re-query each created triple and every intended removal with the same `$triple` form. A created triple must come back; a removed triple must return `No results found.` Note that `statement-delete` exits non-zero with `not found` when the triple is already gone; that is an already-applied removal rather than a failure, but confirm it by query before continuing. If any verification fails, stop, report the partial outcome and the backup location, and do not create a watermark.
+5. Re-query each created triple and every intended removal with the same `$triple` form. For a delete-only replacement, also re-query its target: it must still come back. A created triple must come back; a removed triple must return `No results found.` Note that `statement-delete` exits non-zero with `not found` when the triple is already gone; that is an already-applied removal rather than a failure, but confirm it by query before continuing. If any verification fails, stop, report the partial outcome and the backup location, and do not create a watermark.
 
 After all intended changes verify, write one run marker in the same shelf:
 
@@ -228,7 +233,7 @@ Return the report in this structure, in the user's language:
 
 ### No Change
 - Item: ...
-  Reason: duplicate, insufficient evidence, protected system relation, or metadata/temporal safety restriction.
+  Reason: duplicate, insufficient evidence, protected system relation, metadata/temporal safety restriction, or target already exists with different metadata.
 
 ## Outcome
 - Planned or applied additions: `<count>`

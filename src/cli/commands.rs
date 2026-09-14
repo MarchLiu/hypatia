@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use crate::lab::{Lab, uses_similar};
 use crate::model::{Content, QueryResult, SearchOpts, StatementKey, Synonyms};
+use crate::service::KnowledgePatch;
 
 #[derive(Parser)]
 #[command(name = "hypatia", about = "AI-oriented memory management", version)]
@@ -64,6 +65,28 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
+    /// Update a knowledge entry: omitted fields keep their values, an empty value clears one
+    KnowledgeUpdate {
+        name: String,
+        /// New content data
+        #[arg(short, long)]
+        data: Option<String>,
+        /// New tags (comma-separated); "" clears them
+        #[arg(short, long)]
+        tags: Option<String>,
+        /// New synonyms (comma-separated); "" clears them
+        #[arg(long)]
+        synonyms: Option<String>,
+        /// New figure references (comma-separated); "" clears them
+        #[arg(short, long)]
+        figures: Option<String>,
+        /// New scopes (comma-separated, trailing comma adds global); "" clears them
+        #[arg(long)]
+        scopes: Option<String>,
+        /// Shelf name
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
     /// Get a knowledge entry
     KnowledgeGet {
         name: String,
@@ -84,7 +107,7 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
-    /// Create a statement (triple)
+    /// Create a statement (triple); exits 0 without changes if it already exists
     StatementCreate {
         head: String,
         relation: String,
@@ -190,6 +213,11 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
+    /// Serve the knowledge graph to an agent over MCP (stdio)
+    Mcp,
+    /// Install or check the bundled agent skills
+    #[command(subcommand)]
+    Skill(super::skill::SkillCommands),
     /// Enter interactive REPL mode
     Repl,
 }
@@ -231,6 +259,7 @@ impl Commands {
         match self {
             Self::Query { shelf, .. }
             | Self::KnowledgeCreate { shelf, .. }
+            | Self::KnowledgeUpdate { shelf, .. }
             | Self::KnowledgeGet { shelf, .. }
             | Self::KnowledgeDelete { shelf, .. }
             | Self::StatementDelete { shelf, .. }
@@ -249,6 +278,8 @@ impl Commands {
             | Self::ArchiveGet { .. }
             | Self::ArchiveList { .. }
             | Self::Model(_)
+            | Self::Mcp
+            | Self::Skill(_)
             | Self::Repl => None,
         }
     }
@@ -256,6 +287,11 @@ impl Commands {
 
 pub fn run() -> crate::error::Result<()> {
     let cli = Cli::parse();
+    // Skill management touches no shelf: dispatch it before Lab::new(), which
+    // opens every registered shelf and creates the default one on first run.
+    if let Some(Commands::Skill(cmd)) = cli.command {
+        return super::skill::execute(cmd);
+    }
     let mut lab = Lab::new()?;
 
     match cli.command {
@@ -263,11 +299,28 @@ pub fn run() -> crate::error::Result<()> {
             let mut repl = super::repl::Repl::new(lab)?;
             repl.run()
         }
+        Some(Commands::Mcp) => super::mcp::serve(lab),
         Some(cmd) => execute_command(&mut lab, cmd),
     }
 }
 
 fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
+    // Reject an update with nothing to change before paying any embedding debt.
+    if let Commands::KnowledgeUpdate {
+        data: None,
+        tags: None,
+        synonyms: None,
+        figures: None,
+        scopes: None,
+        ..
+    } = &cmd
+    {
+        return Err(crate::error::HypatiaError::Validation(
+            "nothing to update: pass at least one of --data, --tags, --synonyms, --figures, \
+             --scopes"
+                .into(),
+        ));
+    }
     if let Some(shelf) = cmd.shelf() {
         // Best-effort: the command itself reports a shelf that is missing or broken.
         let _ = lab.flush_if_overdue(shelf);
@@ -324,58 +377,36 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             scopes,
             shelf,
         } => {
-            let tags_vec: Vec<String> = if tags.is_empty() {
-                Vec::new()
-            } else {
-                tags.split(',').map(|s| s.trim().to_string()).collect()
-            };
-            let syn = if synonyms.is_empty() {
-                None
-            } else {
-                let list: Vec<String> = synonyms
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if list.is_empty() {
-                    None
-                } else {
-                    Some(Synonyms::Flat(list))
-                }
-            };
-            let figures_vec: Vec<String> = if figures.is_empty() {
-                Vec::new()
-            } else {
-                figures
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            };
-            let scopes_vec: Vec<String> = if scopes.is_empty() {
-                Vec::new()
-            } else {
-                scopes
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            };
-            // Treat trailing comma as implicit global scope
-            let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
-                let mut v = scopes_vec;
-                v.push(String::new());
-                v
-            } else {
-                scopes_vec
-            };
             let content = Content::new(&data)
-                .with_tags(tags_vec)
-                .with_synonyms(syn)
-                .with_figures(figures_vec)
-                .with_scopes(scopes_vec);
+                .with_tags(parse_tags(&tags))
+                .with_synonyms(parse_flat_synonyms(&synonyms))
+                .with_figures(parse_list(&figures))
+                .with_scopes(parse_scopes(&scopes));
             let k = lab.create_knowledge(&shelf, &name, content)?;
             println!("Created knowledge: {}", k.name);
+        }
+        Commands::KnowledgeUpdate {
+            name,
+            data,
+            tags,
+            synonyms,
+            figures,
+            scopes,
+            shelf,
+        } => {
+            let patch = KnowledgePatch {
+                data,
+                tags: tags.as_deref().map(parse_tags),
+                synonyms: synonyms.as_deref().map(parse_flat_synonyms),
+                figures: figures.as_deref().map(parse_list),
+                scopes: scopes.as_deref().map(parse_scopes),
+            };
+            let updated = lab.patch_knowledge(&shelf, &name, &patch)?;
+            if updated.changed {
+                println!("Updated knowledge: {}", updated.knowledge.name);
+            } else {
+                println!("Knowledge unchanged: {}", updated.knowledge.name);
+            }
         }
         Commands::KnowledgeGet { name, shelf } => match lab.get_knowledge(&shelf, &name)? {
             Some(k) => {
@@ -422,28 +453,21 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 }
                 None => None,
             };
-            let scopes_vec: Vec<String> = if scopes.is_empty() {
-                Vec::new()
-            } else {
-                scopes
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            };
-            let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
-                let mut v = scopes_vec;
-                v.push(String::new());
-                v
-            } else {
-                scopes_vec
-            };
+            let scopes_vec = parse_scopes(&scopes);
             let content = Content::new(&data)
                 .with_synonyms(syn)
                 .with_scopes(scopes_vec);
-            let s = lab.create_statement(&shelf, &key, content, None, None)?;
+            let outcome = lab.create_statement(&shelf, &key, content, None, None)?;
+            // Exit 0 either way: an existing triple means the relationship is
+            // already recorded, and its stored content is left unchanged.
+            let verb = if outcome.created {
+                "Created statement"
+            } else {
+                "Statement already exists"
+            };
+            let s = &outcome.statement;
             println!(
-                "Created statement: ({}, {}, {})",
+                "{verb}: ({}, {}, {})",
                 s.key.head, s.key.relation, s.key.tail
             );
         }
@@ -511,72 +535,13 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             }
         }
         Commands::ArchiveStore { file, name, shelf } => {
-            let file_name = file
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unnamed".to_string());
-            let dest_relative = name.unwrap_or(file_name);
-
-            // Store the file
-            let abs_path = lab.store_archive(&shelf, &file, &dest_relative)?;
-
-            // Determine MIME type from extension
-            let ext = std::path::Path::new(&dest_relative)
-                .extension()
-                .map(|e| e.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            let mime_type = match ext.as_str() {
-                "png" => "image/png",
-                "jpg" | "jpeg" => "image/jpeg",
-                "gif" => "image/gif",
-                "svg" => "image/svg+xml",
-                "webp" => "image/webp",
-                "pdf" => "application/pdf",
-                "mp4" => "video/mp4",
-                "mp3" => "audio/mpeg",
-                "wav" => "audio/wav",
-                _ => "application/octet-stream",
-            };
-            let category = if mime_type.starts_with("image/") {
-                "image"
-            } else if mime_type.starts_with("video/") {
-                "video"
-            } else if mime_type.starts_with("audio/") {
-                "audio"
-            } else {
-                "file"
-            };
-
-            // Get file size
-            let size_bytes = std::fs::metadata(&abs_path)?.len();
-
-            // Create knowledge with metadata
-            let meta_data = serde_json::json!({
-                "filename": dest_relative,
-                "size_bytes": size_bytes,
-                "mime_type": mime_type
-            })
-            .to_string();
-
-            let content = Content::new(&meta_data)
-                .with_format(crate::model::Format::Json)
-                .with_tags(vec![
-                    "archive".to_string(),
-                    category.to_string(),
-                    ext.clone(),
-                ])
-                .with_figures(vec![format!("archive://{}", dest_relative)]);
-
-            let k = lab.create_knowledge(&shelf, &dest_relative, content)?;
-
-            // Create statement: <name> is_a archive
-            let key = StatementKey::new(&dest_relative, "is_a", "archive");
-            let stmt_content = Content::new("").with_tags(vec!["archive".to_string()]);
-            let _ = lab.create_statement(&shelf, &key, stmt_content, None, None);
-
-            println!("Stored: archive://{}", dest_relative);
-            println!("Knowledge: {}", k.name);
-            println!("MIME: {}, Size: {} bytes", mime_type, size_bytes);
+            let archived = super::archive::store(lab, &shelf, &file, name)?;
+            println!("Stored: {}", archived.uri);
+            println!("Knowledge: {}", archived.knowledge);
+            println!(
+                "MIME: {}, Size: {} bytes",
+                archived.mime_type, archived.size_bytes
+            );
         }
         Commands::ArchiveGet {
             name,
@@ -606,21 +571,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             }
         }
         Commands::SessionCurrent { scope, shelf } => {
-            let mut conditions = vec![serde_json::json!([
-                "$contains",
-                "scopes",
-                scope.as_deref().unwrap_or("")
-            ])];
-            if let Some(ref s) = scope {
-                if !s.is_empty() {
-                    conditions = vec![serde_json::json!(["$contains", "scopes", s])];
-                }
-            }
-            let jse = serde_json::json!([
-                "$not-summaried",
-                "message",
-                conditions.into_iter().next().unwrap()
-            ]);
+            let jse = session_current_query(scope.as_deref());
             let result = lab.query(&shelf, &jse)?;
             if result.rows.is_empty() {
                 println!("No unsummarized messages.");
@@ -635,6 +586,13 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         }
         Commands::Model(cmd) => execute_model_command(lab, cmd)?,
         Commands::Repl => unreachable!(),
+        Commands::Mcp => {
+            return Err(crate::error::HypatiaError::Validation(
+                "`hypatia mcp` runs as a server of its own".into(),
+            ));
+        }
+        // Normally dispatched before Lab::new(); still correct if routed here.
+        Commands::Skill(cmd) => super::skill::execute(cmd)?,
     }
     Ok(())
 }
@@ -750,11 +708,104 @@ fn print_result(result: &QueryResult) {
     }
 }
 
+/// The JSE query behind `session-current`: messages in `scope` (default: the global scope)
+/// that no summary covers yet.
+pub(super) fn session_current_query(scope: Option<&str>) -> serde_json::Value {
+    serde_json::json!([
+        "$not-summaried",
+        "message",
+        ["$contains", "scopes", scope.unwrap_or("")]
+    ])
+}
+
+/// Comma-separated tags, split exactly as `knowledge-create` always has.
+fn parse_tags(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split(',').map(|s| s.trim().to_string()).collect()
+    }
+}
+
+/// A comma-separated list with blank items dropped; `""` gives an empty list.
+fn parse_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Comma-separated knowledge synonyms; `""` gives none.
+fn parse_flat_synonyms(raw: &str) -> Option<Synonyms> {
+    let list = parse_list(raw);
+    if list.is_empty() {
+        None
+    } else {
+        Some(Synonyms::Flat(list))
+    }
+}
+
+/// Comma-separated scopes. A trailing comma adds the empty-string global scope, so `","`
+/// is global only and `"p,"` is project plus global; `""` stores no scope at all.
+fn parse_scopes(raw: &str) -> Vec<String> {
+    let mut scopes = parse_list(raw);
+    if raw.ends_with(',') && !scopes.contains(&String::new()) {
+        scopes.push(String::new());
+    }
+    scopes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
     use std::collections::HashMap;
+
+    #[test]
+    fn scope_and_list_parsing_matches_the_documented_cli_behaviour() {
+        assert!(parse_scopes("").is_empty());
+        assert_eq!(parse_scopes(","), [""]);
+        assert_eq!(parse_scopes("p"), ["p"]);
+        assert_eq!(parse_scopes("p,"), ["p", ""]);
+        assert_eq!(parse_scopes(" a , b "), ["a", "b"]);
+        assert_eq!(parse_list("x,,y"), ["x", "y"]);
+        assert_eq!(parse_tags("a,b"), ["a", "b"]);
+        // Tags have never dropped blank items, unlike the other lists; keep create unchanged.
+        assert_eq!(parse_tags(","), ["", ""]);
+        assert_eq!(parse_tags("a,,b"), ["a", "", "b"]);
+        assert_eq!(parse_tags(" "), [""]);
+        assert!(parse_list(",").is_empty());
+        // Only a comma at the very end marks global scope.
+        assert_eq!(parse_scopes("p, "), ["p"]);
+        assert_eq!(parse_flat_synonyms(""), None);
+        assert_eq!(
+            parse_flat_synonyms("q, r"),
+            Some(Synonyms::Flat(vec!["q".into(), "r".into()]))
+        );
+    }
+
+    #[test]
+    fn session_current_query_defaults_to_the_global_scope() {
+        let q = |scope| session_current_query(scope)[2][2].clone();
+        assert_eq!(q(None), "");
+        assert_eq!(q(Some("")), "");
+        assert_eq!(q(Some("proj")), "proj");
+    }
+
+    #[test]
+    fn mcp_touches_no_shelf_debt_itself() {
+        let cli = Cli::try_parse_from(["hypatia", "mcp"]).unwrap();
+        assert_eq!(cli.command.unwrap().shelf(), None);
+    }
+
+    #[test]
+    fn knowledge_update_settles_the_debt_of_its_shelf() {
+        let cli =
+            Cli::try_parse_from(["hypatia", "knowledge-update", "k", "-d", "x", "-s", "work"])
+                .unwrap();
+        let cmd = cli.command.unwrap();
+        assert_eq!(cmd.shelf(), Some("work"));
+    }
 
     /// Check every subcommand for duplicate short flags.
     /// Catches issues like -s being used for both --shelf and --synonyms.

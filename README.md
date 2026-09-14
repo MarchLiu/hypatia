@@ -13,7 +13,7 @@ AI-oriented memory management system. Stores structured knowledge as a graph of 
 - **Synonyms** -- Per-entry synonym lists for knowledge, per-position (subject/predicate/object) synonyms for statements, indexed in FTS
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
-- **Agent Integration** -- Claude Code skill for natural-language-to-CLI translation
+- **Agent Integration** -- Bundled agent skills for Claude Code, Codex and OpenCode, installed with `hypatia skill install` (see [Agent Skills](#agent-skills))
 - **Cross-Platform** -- Prebuilt binaries on [GitHub Releases](https://github.com/MarchLiu/hypatia/releases) with a one-line install script; `scripts/build.sh` cross-compiles other targets
 
 ## Quick Start
@@ -250,8 +250,9 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia list` | List connected shelves |
 | `hypatia knowledge-create <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>]` | Create a knowledge entry |
 | `hypatia knowledge-get <name>` | Get a knowledge entry |
+| `hypatia knowledge-update <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>] [--scopes <scopes>]` | Update a knowledge entry; omitted fields are kept, an empty value clears one |
 | `hypatia knowledge-delete <name>` | Delete a knowledge entry |
-| `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple |
+| `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple; exits 0 without changes if it already exists |
 | `hypatia statement-delete <subj> <pred> <obj>` | Delete a triple |
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
 | `hypatia similar <query> [--limit N]` | Vector similarity search |
@@ -265,6 +266,9 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia archive-list [-s <shelf>]` | List all archive files |
 | `hypatia query '<jse-json>'` | Execute a JSE query |
 | `hypatia export <name> <dest>` | Export a shelf |
+| `hypatia skill install --agent <host> [--dir <dir>] [--skill <name>] [--force]` | Install the bundled agent skills (hosts: `claude`, `codex`, `opencode`) |
+| `hypatia skill status --agent <host> [--dir <dir>]` | Show whether installed skills match the bundled ones |
+| `hypatia mcp` | Serve the knowledge graph to an agent over MCP (stdio) |
 | `hypatia repl` | Interactive REPL |
 
 ## JSE Query Language
@@ -350,6 +354,48 @@ hypatia query '["$statement", ["$k-hop", "Alice", "$*", 2]]'
 # K-hop: follow "knows" edges from Alice, 3 hops deep
 hypatia query '["$statement", ["$k-hop", "Alice", "knows", 3]]'
 ```
+
+## Agent Skills
+
+The binary carries three agent skills: `hypatia` turns natural language into CLI calls, `hypatia-memory` is the automatic memory protocol, and `hypatia-dream` consolidates the graph at the end of a work period.
+
+```bash
+hypatia skill install --agent claude                  # or codex, opencode; comma-separate several
+hypatia skill install --dir ./my-skills               # any directory: <DIR>/<name>/SKILL.md
+hypatia skill status --agent claude                   # where each skill is, and whether it is current
+```
+
+| `--agent` | Directory |
+|---|---|
+| `claude` | `~/.claude/skills` |
+| `codex` | `~/.agents/skills` |
+| `opencode` | `~/.config/opencode/skills`, or `$OPENCODE_CONFIG_DIR/skills` |
+
+- Run `install` again after upgrading hypatia. Copies it installed are updated; a copy you edited, or one hypatia did not install, is kept unless you pass `--force`.
+- `install` and `status` also warn about stale copies of a skill in other directories the host reads.
+- `hypatia-memory` needs host hooks to trigger. The Codex and OpenCode hook installers are in `codex-integration/` and `opencode-integration/`.
+- DSH users get these skills from the `dsh-hypatia` plugin.
+
+## MCP Server
+
+`hypatia mcp` serves the knowledge graph to an agent over the Model Context Protocol (stdio).
+
+```bash
+claude mcp add hypatia -- hypatia mcp
+```
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.hypatia]
+command = "hypatia"
+args = ["mcp"]
+```
+
+- Tools: `query`, `search`, `similar`, `session_current`, knowledge and statement create/read/update/delete, archives, `list_shelves`, `shelf_status`, and a bounded `backfill`. `connect`, `init`, `model install`, `export` and `import` stay in the CLI.
+- Resources: `hypatia://{shelf}/status`, `hypatia://{shelf}/knowledge/{name}` and `hypatia://{shelf}/statement/{head}/{relation}/{tail}`.
+- Writes return the shelf's embedding debt, so an agent knows when new entries are not yet found by `similar`.
+- The local model is loaded only for the request that needs it and released afterwards. The server reads shelf configuration once at start: restart it after `model install`, `connect` or `init`.
+- The skills still decide when to remember and how to link; install them with `hypatia skill install`.
 
 ## Architecture
 
