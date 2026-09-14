@@ -32,6 +32,10 @@ pub trait EmbeddingProvider {
     /// Whether the provider is available for use.
     fn is_available(&self) -> bool;
 
+    /// Drop whatever a loaded model holds, so a long-lived process keeps no model between
+    /// requests. The next embedding loads it again. A no-op for providers that load nothing.
+    fn release(&self) {}
+
     /// Try to embed, returning Ok(None) if unavailable.
     fn maybe_embed(&self, text: &str) -> Result<Option<Vec<f32>>, HypatiaError> {
         if !self.is_available() {
@@ -67,6 +71,9 @@ enum OnnxInner {
     Ready {
         session: Session,
         tokenizer: tokenizers::Tokenizer,
+        // Kept so `release` can return to `Pending`.
+        model_path: std::path::PathBuf,
+        tokenizer_path: std::path::PathBuf,
     },
 }
 
@@ -129,7 +136,12 @@ impl OnnxProvider {
                     tokenizer_path,
                 } => match load_onnx_model(&model_path, &tokenizer_path) {
                     Ok((session, tokenizer)) => {
-                        *inner = OnnxInner::Ready { session, tokenizer };
+                        *inner = OnnxInner::Ready {
+                            session,
+                            tokenizer,
+                            model_path,
+                            tokenizer_path,
+                        };
                         Ok(())
                     }
                     Err(e) => {
@@ -153,6 +165,25 @@ impl OnnxProvider {
 }
 
 impl EmbeddingProvider for OnnxProvider {
+    fn release(&self) {
+        let mut inner = self.inner.borrow_mut();
+        let pending = match &*inner {
+            OnnxInner::Ready {
+                model_path,
+                tokenizer_path,
+                ..
+            } => Some(OnnxInner::Pending {
+                model_path: model_path.clone(),
+                tokenizer_path: tokenizer_path.clone(),
+            }),
+            _ => None,
+        };
+        if let Some(pending) = pending {
+            // Dropping the session frees the model.
+            *inner = pending;
+        }
+    }
+
     fn embed(&self, text: &str) -> Result<Vec<f32>, HypatiaError> {
         self.ensure_loaded()?;
 
@@ -170,7 +201,10 @@ impl EmbeddingProvider for OnnxProvider {
             return texts.iter().map(|_| Err(same_error(&e))).collect();
         }
         let mut inner = self.inner.borrow_mut();
-        let OnnxInner::Ready { session, tokenizer } = &mut *inner else {
+        let OnnxInner::Ready {
+            session, tokenizer, ..
+        } = &mut *inner
+        else {
             unreachable!("ensure_loaded should guarantee Ready state");
         };
         if !accepts_batches(session) {

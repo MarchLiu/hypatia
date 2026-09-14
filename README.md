@@ -268,6 +268,7 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia export <name> <dest>` | Export a shelf |
 | `hypatia skill install --agent <host> [--dir <dir>] [--skill <name>] [--force]` | Install the bundled agent skills (hosts: `claude`, `codex`, `opencode`) |
 | `hypatia skill status --agent <host> [--dir <dir>]` | Show whether installed skills match the bundled ones |
+| `hypatia mcp` | Serve the knowledge graph to an agent over MCP (stdio) |
 | `hypatia repl` | Interactive REPL |
 
 ## JSE Query Language
@@ -377,6 +378,28 @@ hypatia skill status --agent claude                   # where each skill lives a
 - Start a new agent session to pick up newly installed skills.
 - `hypatia-memory` is triggered by host hooks, not by the skill file alone. The Codex and OpenCode hook installers are in `codex-integration/` and `opencode-integration/`.
 - DSH users get these skills from the `dsh-hypatia` plugin and need no install.
+
+## MCP Server
+
+`hypatia mcp` serves the knowledge graph to an agent over the Model Context Protocol, using the stdio transport.
+
+```bash
+claude mcp add hypatia -- hypatia mcp
+```
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.hypatia]
+command = "hypatia"
+args = ["mcp"]
+```
+
+- Tools cover the data plane: `query`, `search`, `similar`, `session_current`, knowledge and statement create/read/update/delete, archives, `list_shelves`, `shelf_status`, and a bounded `backfill`. Every tool that works on a shelf takes an optional `shelf`, which defaults to `default`.
+- Connecting shelves, `init`, `model install`, `export` and `import` stay in the CLI. The server reads shelf configuration once at start, so restart it after running any of them.
+- Writes return the shelf's embedding debt, so an agent can tell when fresh entries are not yet found by `similar`.
+- Resources: `hypatia://{shelf}/status`, `hypatia://{shelf}/knowledge/{name}` and `hypatia://{shelf}/statement/{head}/{relation}/{tail}`, with each segment percent-encoded.
+- The server drops the local model after every request, so several agent sessions do not each keep a full copy loaded. Measured with bge-m3 on macOS, an idle server's physical footprint is about 50 to 540 MB instead of 1.5 GB (its RSS stays near 0.9 GB, because the allocator keeps freed pages for the next load), and each semantic call pays about 1.8 s to reload the model.
+- The skills still decide when to remember and how to link; install them with `hypatia skill install`.
 
 ## Architecture
 

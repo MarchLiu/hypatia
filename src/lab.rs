@@ -421,9 +421,21 @@ impl Lab {
         let archives_dir = self.shelf_manager.archives_path(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
-        let dest = archives_dir.join(dest_relative);
+        let dest = archives_dir.join(checked_archive_path(dest_relative)?);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
+            // The name is clean, but a symlink already inside the archives could still lead out.
+            let outside = !parent
+                .canonicalize()?
+                .starts_with(archives_dir.canonicalize()?)
+                || dest
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_symlink());
+            if outside {
+                return Err(crate::error::HypatiaError::Validation(format!(
+                    "archive name leads outside the shelf's archives: '{dest_relative}'"
+                )));
+            }
         }
         std::fs::copy(src, &dest)?;
         Ok(dest)
@@ -432,8 +444,12 @@ impl Lab {
     /// Get the absolute path for an archive file by its relative path.
     pub fn get_archive_path(&self, shelf: &str, relative_path: &str) -> Option<std::path::PathBuf> {
         let archives_dir = self.shelf_manager.archives_path(shelf)?;
-        let full = archives_dir.join(relative_path);
-        if full.exists() { Some(full) } else { None }
+        let full = archives_dir.join(checked_archive_path(relative_path).ok()?);
+        let inside = full
+            .canonicalize()
+            .ok()?
+            .starts_with(archives_dir.canonicalize().ok()?);
+        inside.then_some(full)
     }
 
     /// List all archive files in the shelf's archives/ directory (relative paths).
@@ -456,6 +472,53 @@ impl Lab {
     /// Idempotent: entries that already have vectors are skipped.
     pub fn backfill_vectors(&mut self, shelf: &str) -> Result<BackfillStats> {
         self.backfill_vectors_with_reembed(shelf, false)
+    }
+
+    /// Embeds at most `limit` pending entries of a shelf, newest first, for callers that must
+    /// not hold the process for a whole backfill: the MCP server answers one request at a
+    /// time. Checks what `backfill` checks first, and records the attempt as it does.
+    pub fn backfill_batch(
+        &mut self,
+        shelf: &str,
+        limit: usize,
+    ) -> Result<crate::storage::flush::FlushStats> {
+        let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        if let Some(off) = shelf_ref.semantic_search_off_error() {
+            return Err(off);
+        }
+        if let Some(mismatch) = shelf_ref.backend.identity_mismatch() {
+            return Err(mismatch.to_error());
+        }
+        // `flush_pending` returns empty stats while vectors are blocked. Say why instead: a caller
+        // told to call again while debt remains would otherwise loop.
+        if !shelf_ref.embedder.is_available() {
+            // The model is there but failed to load earlier in this process: embedding says why.
+            return Err(shelf_ref.embedder.embed("").err().unwrap_or_else(|| {
+                crate::error::HypatiaError::ModelUnavailable(
+                    "the embedding model is unavailable".to_string(),
+                )
+            }));
+        }
+        if let Some(blocked) = shelf_ref.vectors_blocked()? {
+            return Err(crate::error::HypatiaError::Config(blocked.message));
+        }
+        let stats = shelf_ref.flush_pending(limit)?;
+        if stats.installed + stats.skipped + stats.failed > 0 {
+            // Bookkeeping only: the vectors are in, so a failure here must not fail the batch.
+            if let Err(e) = shelf_ref.record_backfill(stats.installed, stats.failed) {
+                eprintln!("warning: backfill bookkeeping failed: {e}");
+            }
+        }
+        Ok(stats)
+    }
+
+    /// Drops every loaded local model, so a long-lived process holds none between requests.
+    pub fn release_embedders(&mut self) {
+        for shelf in self.shelf_manager.open_shelves_mut() {
+            shelf.embedder.release();
+        }
     }
 
     pub fn backfill_vectors_with_reembed(
@@ -585,6 +648,24 @@ fn write_atomically(path: &Path, text: &str) -> Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(&target).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// An archive name must stay inside the shelf's archives directory: plain path components
+/// only, with no `.`, `..`, root or drive prefix, which is also the rule export enforces on
+/// archive references. Names used to be joined unchecked, so `/Users/me/.zshrc` or `../../x`
+/// wrote outside the shelf; over MCP a name is model output.
+fn checked_archive_path(relative: &str) -> Result<&Path> {
+    use std::path::Component;
+    let path = Path::new(relative);
+    let inside = path.components().all(|c| matches!(c, Component::Normal(_)))
+        && path.components().next().is_some();
+    if inside {
+        Ok(path)
+    } else {
+        Err(crate::error::HypatiaError::Validation(format!(
+            "archive name must be a relative path inside the shelf's archives: '{relative}'"
+        )))
+    }
 }
 
 /// Whether a JSE expression contains a `$similar` operator anywhere.
@@ -774,6 +855,104 @@ mod backfill_tests {
             true
         }
     }
+    /// A provider whose model failed to load; counts `release` calls.
+    struct Released {
+        releases: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl EmbeddingProvider for Released {
+        fn embed(&self, _: &str) -> Result<Vec<f32>> {
+            Err(crate::error::HypatiaError::ModelUnavailable(
+                "model failed to load".into(),
+            ))
+        }
+        fn dimensions(&self) -> usize {
+            3
+        }
+        fn is_available(&self) -> bool {
+            false
+        }
+        fn release(&self) {
+            self.releases.set(self.releases.get() + 1);
+        }
+    }
+
+    fn contract_lab(dir: &tempfile::TempDir, home: &tempfile::TempDir) -> Lab {
+        std::fs::write(
+            dir.path().join("shelf.toml"),
+            "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n",
+        )
+        .unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        Lab {
+            shelf_manager: manager,
+        }
+    }
+
+    #[test]
+    fn a_blocked_backfill_batch_says_why_instead_of_reporting_nothing() {
+        let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut lab = contract_lab(&dir, &home);
+        let releases = std::rc::Rc::new(std::cell::Cell::new(0));
+        lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Released {
+            releases: releases.clone(),
+        });
+        lab.create_knowledge("test", "k", Content::new("x"))
+            .unwrap();
+        let err = lab.backfill_batch("test", 8).unwrap_err().to_string();
+        assert!(err.contains("model unavailable"), "{err}");
+        lab.release_embedders();
+        assert_eq!(releases.get(), 1);
+    }
+
+    #[test]
+    fn a_backfill_batch_embeds_at_most_its_limit() {
+        let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut lab = contract_lab(&dir, &home);
+        lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
+        for name in ["a", "b", "c"] {
+            lab.create_knowledge("test", name, Content::new(name))
+                .unwrap();
+        }
+        let pending = lab.embedding_debt("test").unwrap().pending_knowledge;
+        let stats = lab.backfill_batch("test", 2).unwrap();
+        assert_eq!(stats.installed, pending.min(2));
+        assert_eq!(
+            lab.embedding_debt("test").unwrap().pending_knowledge,
+            pending - stats.installed
+        );
+    }
+
+    #[test]
+    fn archive_names_cannot_leave_the_archives_directory() {
+        let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let lab = contract_lab(&dir, &home);
+        let src = home.path().join("src.txt");
+        std::fs::write(&src, "x").unwrap();
+        for bad in [
+            "../escape.txt",
+            "/tmp/abs.txt",
+            "",
+            ".",
+            "a/../../b",
+            "./notes/a.txt",
+        ] {
+            assert!(lab.store_archive("test", &src, bad).is_err(), "{bad}");
+            assert!(lab.get_archive_path("test", bad).is_none(), "{bad}");
+        }
+        let stored = lab.store_archive("test", &src, "notes/a.txt").unwrap();
+        assert!(stored.ends_with("notes/a.txt") && stored.exists());
+        assert!(lab.get_archive_path("test", "notes/a.txt").is_some());
+        #[cfg(unix)]
+        {
+            let archives = lab.shelf_manager.archives_path("test").unwrap();
+            std::os::unix::fs::symlink(home.path(), archives.join("link")).unwrap();
+            assert!(lab.store_archive("test", &src, "link/out.txt").is_err());
+            assert!(!home.path().join("out.txt").exists());
+            assert!(lab.get_archive_path("test", "link/src.txt").is_none());
+        }
+    }
+
     #[test]
     fn saved_content_survives_provider_failure_and_existing_backfill_repairs_it() {
         let home = tempfile::tempdir().unwrap();

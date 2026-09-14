@@ -39,13 +39,15 @@
 若要做，建议卡死为：
 
 - 作为 **`hypatia mcp` 子命令**，不是独立 binary —— 单一安装、单一版本，任何 Agent 配一行 `command: hypatia, args: [mcp]`。
-- **运行时：同步、手写 stdio JSON-RPC，不引入 tokio。** 代码库是全同步的（`ureq`、同步 `postgres`、`rusqlite`，零 `async fn`）；官方 Rust SDK `rmcp` 基于 tokio，引入它意味着给同步代码库塞一个 runtime，且每次调 `Lab` 都要 `spawn_blocking` 包一层。只做 tools 与 resources 时协议面很小：`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`resources/list`、`resources/templates/list`、`resources/read`。stdin 逐行读、逐条处理的同步循环即可，与 §4.1「不引入 server 基础设施」一致。
-- **tools 只覆盖数据面**，贴着现有子命令，**零「智能记忆」端点**（理由见 §4.2）：`query`、`search`、`similar`、`session_current`、`knowledge_create` / `knowledge_get` / `knowledge_update` / `knowledge_delete`、`statement_create` / `statement_delete`、`archive_store` / `archive_get` / `archive_list`、`list_shelves`、`backfill`（限批，见下）。
+- **运行时：同步、手写 stdio JSON-RPC，不引入 tokio。** 代码库是全同步的（`ureq`、同步 `postgres`、`rusqlite`，零 `async fn`）；官方 Rust SDK `rmcp` 基于 tokio，引入它意味着给同步代码库塞一个 runtime，且每次调 `Lab` 都要 `spawn_blocking` 包一层。只做 tools 与 resources 时协议面很小：`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`resources/list`、`resources/templates/list`、`resources/read`。stdin 逐行读、逐条处理的同步循环即可，与 §4.1「不引入 server 基础设施」一致。协议版本（2026-09 核实）：采用带 `initialize` 握手的版本，支持 2025-11-25、2025-06-18、2025-03-26、2024-11-05，客户端请求其中之一就原样返回，否则返回 2025-11-25；批量请求自 2025-06-18 起已移除，一律拒绝；resource 不存在返回 -32002；参数校验错误按 2025-11-25 归为 tool 的 `isError`，让模型能自行纠正。2026-07-28 版取消了握手、改为每个请求自带版本，而 Claude Code 与 Codex 仍用握手，暂不实现。
+- **tools 只覆盖数据面**，贴着现有子命令，**零「智能记忆」端点**（理由见 §4.2）：`query`、`search`、`similar`、`session_current`、`knowledge_create` / `knowledge_get` / `knowledge_update` / `knowledge_delete`、`statement_create` / `statement_delete`、`archive_store` / `archive_get` / `archive_list`、`list_shelves`、`shelf_status`、`backfill`（限批，见下）。`shelf_status` 与状态 resource 返回同一份文档：模型能否自主读取 resource 因宿主而异，工具则总能调用。
 - **管理面留在 CLI，不做成 tool**（2026-09-14 定）：`connect` / `disconnect` / `init` 会写 `~/.hypatia/shelves.json`，而长驻进程写回的是启动时读到的旧表，会冲掉其他会话期间的注册（§3.5）；`model install` 是 GB 级下载，会长时间占住同步循环；`export` / `import` 是整库文件操作。这些是人在终端里做一次的事，不是 agent 在对话中反复调用的事。
+- **配置只在启动时读一次**：shelf 注册表、`shelf.toml` 与模型可用性在 server 启动时确定，`model install`、`connect`、`init` 之后要重启 server；启动时下发给宿主的说明里已写明。
+- **archive 名必须是 archives 目录内的相对路径**：`Lab` 层只接受普通路径段，拒绝 `.`、`..`、绝对路径与盘符前缀（与导出校验 archive 引用的规则一致），并按真实路径复查，挡住 archives 目录内已有符号链接的出逃；CLI 一并受益。此前名字不经检查就拼接，经 MCP 等于把任意写路径交给模型输出。`file` 参数仍可指向用户可读的任意本地文件。
 - **暴露 `knowledge_update`**（2026-09-14 定）：CLI 同时新增 `knowledge-update`，两者共用 `Lab::patch_knowledge` 的字段合并语义：未给出的字段保持原值，给出的字段替换，空值清空该字段；内容无变化时不写库，版本号与向量都不动。先读后写之间若有其他会话改了同一条目，写回的是整条内容，那次改动会丢失，即使改的是本次没有给出的字段；窗口只有两条 SQL、不含模型调用，同一条目被并发更新也少见，所以不做版本比对。
-- **resources** 用 resource template（`hypatia://{shelf}/knowledge/{name}`、`hypatia://{shelf}/statement/{triple}`）；`resources/list` 只枚举 shelf 与 shelf 状态，不枚举条目 —— 大库会把列表撑爆。
+- **resources** 用 resource template（`hypatia://{shelf}/status`、`hypatia://{shelf}/knowledge/{name}`、`hypatia://{shelf}/statement/{head}/{relation}/{tail}`，每段百分号编码）；`resources/list` 只枚举 shelf 与 shelf 状态，不枚举条目 —— 大库会把列表撑爆。
 - 薄薄盖在 `src/lab.rs` 的 facade 上，不复制业务逻辑。`src/cli/repl.rs` 已证明 `Lab` 可跨命令长期持有。
-- **本地模型用完即释放**（2026-09-14 定）。加载本就是惰性的，只有 flush 与 `similar` 会触发；v1 在每个 tool call 结束时释放本次加载的本地模型，常驻内存与 CLI 相当，不做空闲计时。实测每个进程加载 bge-m3 后约占 1.5 GB 私有内存，进程之间不共享（§3.5），N 个会话常驻就是 N 份。代价是每次需要本地模型的调用多付一次加载，实测连同进程启动约 1.8 s；远程 provider 不受影响。实现上给 `EmbeddingProvider` 加一个默认空实现的释放方法，本地 provider 回到待加载状态，由 MCP 层在调用结束时对各 shelf 调用；CLI 进程本就用完即退，无需调用。provider 仍是 shelf 作用域，因为配置在每个 shelf 各自的 `shelf.toml`，一个 server 会挂多个 shelf。
+- **本地模型用完即释放**（2026-09-14 定）。加载本就是惰性的，只有 flush 与 `similar` 会触发；v1 在每个 tool call 与 resource 读取结束时释放本地模型，不做空闲计时。实测每个进程加载 bge-m3 后约占 1.5 GB 私有内存，进程之间不共享（§3.5），常驻 N 个会话就是 N 份。释放后的实测（bge-m3，macOS，2026-09-14）：调用中 physical footprint 峰值 1.5 GB；释放后空闲时约 50 MB 到 540 MB，并非归零，因为分配器留住了部分已释放的内存供下次加载复用；连续 12 次调用后 RSS 稳定在约 870 MB，不再增长，没有泄漏。代价是每次需要本地模型的调用都要重新加载，实测每次约 1.7 到 1.9 s；远程 provider 不受影响。实现上给 `EmbeddingProvider` 加一个默认空实现的释放方法，本地 provider 回到待加载状态，由 MCP 层在调用结束时对各 shelf 调用；CLI 进程本就用完即退，无需调用。provider 仍是 shelf 作用域，因为配置在每个 shelf 各自的 `shelf.toml`，一个 server 会挂多个 shelf。
 - 写工具**不阻塞在 embedding 上**，返回 **shelf 级的欠账快照**，而不是每次写入的 `done | pending | failed`。姊妹篇 §3.5 已指出：延迟默认化后，逐条状态几乎永远是 `pending`，没有信息量。快照直接序列化上游的 `Lab::embedding_debt`，字段示意：
 
   ```json
@@ -59,7 +61,7 @@
   `blocked` 说明此刻为什么写不了向量：模型不可用、向量属于另一个模型、没有可识别的模型身份，或向量早于身份追踪。`paused` 说明自动补齐因失败暂停，并标明是否要改配置。`passed_over` 是自动补齐会跳过、只有显式 backfill 才会重试的条目数。这是 MCP 相对 CLI 的**真增量**：CLI 侧只能靠 stderr 与 `backfill --status` 看见同一份状态。
 - **shelf 状态 resource** 直接序列化上游的 `Lab::shelf_status`：名字、路径、是否 PG、embedder、`semantic_search_off`（语义检索为何关闭、如何打开）、`attention`（有模型却写不了向量的原因与处置）、欠账快照。它就是 `hypatia init` 报告的那份状态，MCP 不另起字段。
 - **错误走结构化的 tool 错误**，不照搬 CLI 的「exit 0 加一行文本」：条目不存在、语义检索关闭（上游 `execute_similar` 返回 `ModelUnavailable`，消息里带下一步）都作为 tool 错误返回，agent 不需要匹配措辞。§5.1 的漂移 #5 在 MCP 侧由此消除。
-- **`backfill` tool 限批**：每次调用最多补一批，返回本批结果与剩余欠账，由调用方决定是否继续。`Lab::backfill_vectors` 一次补完整个 shelf、没有批量参数，本地模型下可能跑几分钟，期间同步循环无法响应同一会话的其他请求，写事务也会让别的会话等锁（§3.5）。需要在 `Lab` 的 impl 末尾新增一个限批方法；显式 backfill 的完整重试语义（姊妹篇 §3.3）仍在 Lab 内，MCP 不另写。`--reembed` 属于管理面，不暴露。
+- **`backfill` tool 限批**：每次调用最多补一批（默认 64 条，上限 512），返回本批结果与剩余欠账，由调用方决定是否继续。`Lab::backfill_vectors` 一次补完整个 shelf、没有批量参数，本地模型下可能跑几分钟，期间同步循环无法响应同一会话的其他请求，写事务也会让别的会话等锁（§3.5）。需要在 `Lab` 的 impl 末尾新增一个限批方法；显式 backfill 的完整重试语义（姊妹篇 §3.3）仍在 Lab 内，MCP 不另写。`--reembed` 属于管理面，不暴露。默认值取 64，是因为 Codex 的工具调用默认 60 s 超时。向量被锁定（模型不可用、身份不匹配等）时直接报错说明原因，不返回全零。批次按从新到旧取待补条目，若最新一批总是失败会挡住更早的欠账；v1 不做游标分页，一批一条也没补上时，工具描述要求 agent 停下，改用终端里按键分页的完整 `hypatia backfill`。
 - **入口先还逾期欠账**：写入阈值检查在 `OpenShelf` 内，`similar` 之前的补齐在 `Lab` 内，走 `Lab` 即命中；但远程时间上限不在 `Lab` 内部，而是由 CLI 在命令入口显式调用 `Lab::flush_if_overdue`。每个针对 shelf 的 tool call 入口同样调用一次，尽力而为、忽略其错误，与 CLI 和 REPL 一致。
 - **依赖已满足**：姊妹篇已合并为上游 main 的 f9b897d，本分支已 rebase 其上，上文引用的接口均已在代码中核实。
 
@@ -83,7 +85,7 @@ MCP 三个 primitive 的控制权归属不同：
 2. skill 变短，判断层信噪比提高，`Search Decision Tree` 这类真正有价值的内容被遵守的概率上升。
 3. skill 不再需要写 Shell Escaping、Binary Location、沙箱 workaround 这类宿主细节，跨 Agent 分叉压力下降（不会归零）。
 
-**不再是收益的**：性能。写侧延迟已由姊妹篇拿走，实测写入从约 830 ms 降到约 15 ms。读侧模型常驻原本是剩下的一项，但多会话并发写入时向量缓存总是冷的，模型又改为用完即释放（§3.5），这一项也放弃了，换来 N 个会话不会常驻 N 份模型。
+**不再是收益的**：性能。写侧延迟已由姊妹篇拿走，实测写入从约 830 ms 降到约 15 ms。读侧模型常驻原本是剩下的一项，但多会话并发写入时向量缓存总是冷的，模型又改为用完即释放（§3.5），这一项也放弃了，换来空闲会话不再常驻整份模型：实测空闲占用从约 1.5 GB 降到 0.5 GB 左右。
 
 ### 3.4 安装：更统一，但不更普适
 
@@ -112,7 +114,7 @@ stdio 本身不是并发瓶颈：宿主为每条 stdio 连接拉起一个 server
 | 单连接内的并发请求 | JSON-RPC 允许多个请求同时在途、按 id 配对。同步循环逐条处理，协议允许，结果正确；慢调用会挡住后面的调用，取消通知打断不了正在执行的调用 | backfill 限批；GB 级下载不做成 tool |
 | SQLite | WAL，`busy_timeout` 5 s，多进程读写安全：写串行，读不阻塞。某进程持写锁超过 5 s 时，其他会话的写入会失败 | 同上，避免长写事务 |
 | 本地向量缓存 | 按 `meta` 里的内容时钟编版本，缓存文件名带时钟，保存用唯一临时文件加改名，多进程下正确。但任何写入都会推进时钟，其他进程下次检索要加载或全量重建缓存 | 不把读侧常驻当收益 |
-| 嵌入模型内存 | 每个进程各自加载。实测单进程峰值私有内存 1513 MB，三进程并发时每个 1512 MB，进程间不共享；同一进程内不同 shelf 也各有一份 | 用完即释放 |
+| 嵌入模型内存 | 每个进程各自加载。实测单进程峰值私有内存 1513 MB，三进程并发时每个 1512 MB，进程间不共享；同一进程内不同 shelf 也各有一份 | 用完即释放；实测释放后空闲 footprint 约 0.05 到 0.54 GB，并非归零 |
 | 推理线程 | 会话未设线程数，ONNX Runtime 默认按物理核数开线程池。三进程各写一条时耗时与单进程相当（约 1.9 s 对 1.86 s）；多进程同时批量推理会超额占核，这一点是推断，未实测 | 后续可限线程数，不在 H 内 |
 | shelf 注册表 | 只在进程启动时读一次。connect / disconnect 把启动时的旧表整份、非原子地写回，会冲掉其他会话期间的注册，并发写还可能写出损坏的文件 | connect / disconnect / init 不做成 tool |
 | 延迟 embedding | 两个进程可能同时补同一批，向量写入按内容版本做比对，结果正确，只是重复计算 | 无需处置 |
@@ -148,7 +150,7 @@ stdio 本身不是并发瓶颈：宿主为每条 stdio 连接拉起一个 server
 1. statement-create 幂等（§5.3）               已完成
 2. skill 文本修正：漂移 #1、#2（§5.1）          已完成
 3. G. hypatia skill install --agent ...         v1 已实现
-4. H. hypatia mcp 子命令                        进行中：2026-09-14 修订本文，下一步实现
+4. H. hypatia mcp 子命令                        v1 已实现
 ```
 
 排序理由：1 是所有集成路径共同经过的写路径缺陷，且成本几十行；2 必须先于 G，不能把已知错误的文本编进 binary；G 是本分支的名义交付物，但主要惠及新用户；H 绝对价值最大；原先被姊妹篇阻塞，现已解除，但其性能收益已不复存在（§3.3）。
@@ -158,7 +160,7 @@ stdio 本身不是并发瓶颈：宿主为每条 stdio 连接拉起一个 server
 - 管理面不做成 tool，其中 connect / disconnect 明确不暴露（§3.1、§3.5）。
 - 本地模型每次 tool call 用完即释放，不做空闲计时（§3.1）。
 - backfill 限批（§3.1）。
-- 暴露 `knowledge_update`；CLI 的 `knowledge-update` 已实施，MCP 工具随 H 实施（§3.1）。
+- 暴露 `knowledge_update`；CLI 的 `knowledge-update` 与 MCP 工具均已实施（§3.1）。
 - 不在 H 内：hypatia-memory 摘要级联按会话分区，ONNX 线程数限制，同一进程内多个 shelf 共享模型（§3.5）。
 
 **G v1 的范围**：

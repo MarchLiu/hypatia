@@ -213,6 +213,8 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
+    /// Serve the knowledge graph to an agent over MCP (stdio)
+    Mcp,
     /// Install or check the bundled agent skills
     #[command(subcommand)]
     Skill(super::skill::SkillCommands),
@@ -276,6 +278,7 @@ impl Commands {
             | Self::ArchiveGet { .. }
             | Self::ArchiveList { .. }
             | Self::Model(_)
+            | Self::Mcp
             | Self::Skill(_)
             | Self::Repl => None,
         }
@@ -296,6 +299,7 @@ pub fn run() -> crate::error::Result<()> {
             let mut repl = super::repl::Repl::new(lab)?;
             repl.run()
         }
+        Some(Commands::Mcp) => super::mcp::serve(lab),
         Some(cmd) => execute_command(&mut lab, cmd),
     }
 }
@@ -531,72 +535,13 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             }
         }
         Commands::ArchiveStore { file, name, shelf } => {
-            let file_name = file
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unnamed".to_string());
-            let dest_relative = name.unwrap_or(file_name);
-
-            // Store the file
-            let abs_path = lab.store_archive(&shelf, &file, &dest_relative)?;
-
-            // Determine MIME type from extension
-            let ext = std::path::Path::new(&dest_relative)
-                .extension()
-                .map(|e| e.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            let mime_type = match ext.as_str() {
-                "png" => "image/png",
-                "jpg" | "jpeg" => "image/jpeg",
-                "gif" => "image/gif",
-                "svg" => "image/svg+xml",
-                "webp" => "image/webp",
-                "pdf" => "application/pdf",
-                "mp4" => "video/mp4",
-                "mp3" => "audio/mpeg",
-                "wav" => "audio/wav",
-                _ => "application/octet-stream",
-            };
-            let category = if mime_type.starts_with("image/") {
-                "image"
-            } else if mime_type.starts_with("video/") {
-                "video"
-            } else if mime_type.starts_with("audio/") {
-                "audio"
-            } else {
-                "file"
-            };
-
-            // Get file size
-            let size_bytes = std::fs::metadata(&abs_path)?.len();
-
-            // Create knowledge with metadata
-            let meta_data = serde_json::json!({
-                "filename": dest_relative,
-                "size_bytes": size_bytes,
-                "mime_type": mime_type
-            })
-            .to_string();
-
-            let content = Content::new(&meta_data)
-                .with_format(crate::model::Format::Json)
-                .with_tags(vec![
-                    "archive".to_string(),
-                    category.to_string(),
-                    ext.clone(),
-                ])
-                .with_figures(vec![format!("archive://{}", dest_relative)]);
-
-            let k = lab.create_knowledge(&shelf, &dest_relative, content)?;
-
-            // Create statement: <name> is_a archive
-            let key = StatementKey::new(&dest_relative, "is_a", "archive");
-            let stmt_content = Content::new("").with_tags(vec!["archive".to_string()]);
-            let _ = lab.create_statement(&shelf, &key, stmt_content, None, None);
-
-            println!("Stored: archive://{}", dest_relative);
-            println!("Knowledge: {}", k.name);
-            println!("MIME: {}, Size: {} bytes", mime_type, size_bytes);
+            let archived = super::archive::store(lab, &shelf, &file, name)?;
+            println!("Stored: {}", archived.uri);
+            println!("Knowledge: {}", archived.knowledge);
+            println!(
+                "MIME: {}, Size: {} bytes",
+                archived.mime_type, archived.size_bytes
+            );
         }
         Commands::ArchiveGet {
             name,
@@ -626,21 +571,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             }
         }
         Commands::SessionCurrent { scope, shelf } => {
-            let mut conditions = vec![serde_json::json!([
-                "$contains",
-                "scopes",
-                scope.as_deref().unwrap_or("")
-            ])];
-            if let Some(ref s) = scope {
-                if !s.is_empty() {
-                    conditions = vec![serde_json::json!(["$contains", "scopes", s])];
-                }
-            }
-            let jse = serde_json::json!([
-                "$not-summaried",
-                "message",
-                conditions.into_iter().next().unwrap()
-            ]);
+            let jse = session_current_query(scope.as_deref());
             let result = lab.query(&shelf, &jse)?;
             if result.rows.is_empty() {
                 println!("No unsummarized messages.");
@@ -655,6 +586,11 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         }
         Commands::Model(cmd) => execute_model_command(lab, cmd)?,
         Commands::Repl => unreachable!(),
+        Commands::Mcp => {
+            return Err(crate::error::HypatiaError::Validation(
+                "`hypatia mcp` runs as a server of its own".into(),
+            ));
+        }
         // Normally dispatched before Lab::new(); still correct if routed here.
         Commands::Skill(cmd) => super::skill::execute(cmd)?,
     }
@@ -772,6 +708,16 @@ fn print_result(result: &QueryResult) {
     }
 }
 
+/// The JSE query behind `session-current`: messages in `scope` (default: the global scope)
+/// that no summary covers yet.
+pub(super) fn session_current_query(scope: Option<&str>) -> serde_json::Value {
+    serde_json::json!([
+        "$not-summaried",
+        "message",
+        ["$contains", "scopes", scope.unwrap_or("")]
+    ])
+}
+
 /// Comma-separated tags, split exactly as `knowledge-create` always has.
 fn parse_tags(raw: &str) -> Vec<String> {
     if raw.is_empty() {
@@ -836,6 +782,20 @@ mod tests {
             parse_flat_synonyms("q, r"),
             Some(Synonyms::Flat(vec!["q".into(), "r".into()]))
         );
+    }
+
+    #[test]
+    fn session_current_query_defaults_to_the_global_scope() {
+        let q = |scope| session_current_query(scope)[2][2].clone();
+        assert_eq!(q(None), "");
+        assert_eq!(q(Some("")), "");
+        assert_eq!(q(Some("proj")), "proj");
+    }
+
+    #[test]
+    fn mcp_touches_no_shelf_debt_itself() {
+        let cli = Cli::try_parse_from(["hypatia", "mcp"]).unwrap();
+        assert_eq!(cli.command.unwrap().shelf(), None);
     }
 
     #[test]

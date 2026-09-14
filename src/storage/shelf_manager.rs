@@ -799,6 +799,11 @@ impl ShelfManager {
         self.shelves.get_mut(name)
     }
 
+    /// Every connected shelf.
+    pub fn open_shelves_mut(&mut self) -> impl Iterator<Item = &mut OpenShelf> {
+        self.shelves.values_mut()
+    }
+
     /// Opens a registered shelf again, so a changed shelf.toml takes effect.
     pub fn reopen(&mut self, name: &str) -> Result<()> {
         let path = self
