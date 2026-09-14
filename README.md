@@ -14,7 +14,7 @@ AI-oriented memory management system. Stores structured knowledge as a graph of 
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
 - **Agent Integration** -- Claude Code skill for natural-language-to-CLI translation
-- **Cross-Platform** -- Prebuilt binaries on [GitHub Releases](https://github.com/tkliuxing/hypatia/releases); `scripts/build.sh` cross-compiles other targets
+- **Cross-Platform** -- Prebuilt binaries on [GitHub Releases](https://github.com/MarchLiu/hypatia/releases) with a one-line install script; `scripts/build.sh` cross-compiles other targets
 
 ## Quick Start
 
@@ -22,7 +22,15 @@ Hypatia works with zero downloads and zero configuration: full-text search, grap
 
 ### 1. Install
 
-Download a prebuilt binary from [GitHub Releases](https://github.com/tkliuxing/hypatia/releases) (currently macOS Apple Silicon and Windows x64), or build from source:
+On macOS (Apple Silicon) or Linux (x86_64 with AVX2, or aarch64; glibc 2.35 or newer and OpenSSL 3), install the prebuilt binary into `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MarchLiu/hypatia/main/scripts/install.sh | sh
+```
+
+It verifies the download when the release publishes a checksum (releases from now on do), and checks that the binary runs before replacing an installed one. `HYPATIA_VERSION` picks a release tag and `HYPATIA_INSTALL_DIR` another directory. Windows x64 binaries are on [GitHub Releases](https://github.com/MarchLiu/hypatia/releases).
+
+Or build from source (Intel Macs, musl-based Linux and x86_64 CPUs without AVX2 have no prebuilt ONNX Runtime either; build it yourself and point `ORT_LIB_PATH` at it, see [ort's linking guide](https://ort.pyke.io/setup/linking)):
 
 ```bash
 cargo build --release

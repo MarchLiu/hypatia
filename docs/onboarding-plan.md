@@ -335,6 +335,14 @@ E 实现时定下的细节：
 - curl 安装脚本：探测平台 → 从 GitHub Releases 下载对应产物 → 放入 `~/.local/bin`。curl 下载不带 quarantine 属性，避开 Gatekeeper 对未签名 macOS 二进制的拦截；脚本内检查 AVX2（x86-64）与 libc++（Linux）。
 - 现有产物格式不统一（`.gz` 与 `.tar.gz`），脚本需兼容，或在 workflow 里统一。补齐 Intel Mac 与 Linux（glibc x86_64 / aarch64）产物需要一个 release matrix workflow。发布动作由维护者执行，本分支只提供脚本与 workflow 文件。
 
+F 实现时定下的细节：
+
+- 产物统一为 `hypatia-<target>.tar.gz`（内含 `hypatia`）加同名 `.sha256`。新的 `.github/workflows/release.yml` 与 `build-windows.yml` 一样手动触发（参数：ref、可选的 release tag），构建 aarch64-apple-darwin（macos-14）、x86_64-unknown-linux-gnu（ubuntu-22.04，要求 glibc ≤ 2.35）、aarch64-unknown-linux-gnu（ubuntu-22.04-arm，公开仓库免费）。Windows x64 仍由 `build-windows.yml` 构建，它本来就打 `.tar.gz`。构建带 `postgres-backend`（v4.0.0 的 macOS 二进制就带，不带会让升级的 PG 用户失去后端），因此 Linux 版还需要 OpenSSL 3。上传是所有构建成功之后的单独 job；发布流程为先推送 tag（draft release 不会创建 tag，而构建要 checkout 它）、为它建 draft release、跑 workflow、再发布，因为脚本取的是 latest release，先发布会让缺产物的平台装不上。
+- **不做 Intel Mac**：ort 2.0.0-rc.12 的预编译 ONNX Runtime 清单（ort-sys `build/download/dist.txt`）里没有 x86_64-apple-darwin，要出这个产物得从源码编 ONNX Runtime，超出本分支。脚本对 Intel Mac 明确报错并指向源码构建；Rosetta 下运行的 shell（`sysctl.proc_translated=1`）仍装 arm64 版。
+- Linux 版依赖的是 **libstdc++** 而不是上文说的 libc++：ort-sys 对非 Apple、非 Android、非 MSVC 目标链接 `stdc++`。所以脚本不按库名检查，而是在替换之前先跑一次下载下来的 `hypatia --version`，跑不起来（glibc 太旧、缺库）就带着报错退出，已装的二进制不动。另外先查 musl，再查 x86-64 的 AVX2：ort 自己在运行时会对没有 AVX2 的 CPU 警告预编译库将因非法指令崩溃（ort `src/environment.rs`），而 `--version` 不加载 ONNX Runtime，查不出来。这些被拒绝的平台上单独 `cargo build` hypatia 也不行（ort 会取同一套预编译库，或该 target 根本没有），提示改为自编 ONNX Runtime 并用 `ORT_LIB_PATH` 链接。
+- `scripts/install.sh` 用 POSIX sh（dash 测过）：`HYPATIA_VERSION`、`HYPATIA_INSTALL_DIR`（默认 `~/.local/bin`）、`HYPATIA_REPO`、`HYPATIA_DOWNLOAD_URL`（镜像）。先取 `.tar.gz`，没有再取早期的裸 `.gz`；`.tar.gz` 必须有一致的 `.sha256`，只有早期无校验的裸 `.gz` 例外；只有 HTTP 404 算「没有这个文件」，网络错误与其他状态码直接报错；latest release 缺产物时提示用 `HYPATIA_VERSION` 指定版本；先放进目标目录里的临时文件并在那里跑 `--version`（避开 noexec 的 /tmp），再 `mv` 一步替换，目录不可写时提示 `HYPATIA_INSTALL_DIR`；目录不在 PATH 时给出提示，最后提示 `hypatia init`。
+- 默认仓库是 Releases 所在的 MarchLiu/hypatia。A 在 README 里写的 Releases 链接指向 fork（fork 没有 Release），这里一并改正。
+
 **关于顺序**：F 是漏斗第一道门 —— 受众是「想给自己的 Agent 加记忆」的人，多数不装 Rust 工具链。它排在最后不是因为不重要，而是完整覆盖依赖维护者配合发布；在此之前，A 把 Releases 链接放上 README 第一屏，已能覆盖 macOS arm64 与 Windows x64 用户。
 
 ## 5. 顺带发现的缺陷
