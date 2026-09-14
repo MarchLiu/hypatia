@@ -1,8 +1,10 @@
 //! Complete shelf backend boundary. Local vector files never escape LocalBackend.
 use super::{
-    SqliteStore, VectorFileIndex, open_or_migrate,
+    SqliteStore, VectorFileIndex,
+    flush::{Blocked, BlockedReason, FLUSH_STATE_KEY, FlushState},
+    open_or_migrate,
     settings::{BackendKind, ShelfSettings},
-    transfer::{EmbeddingMetadata, Snapshot, validate_vector},
+    transfer::{EmbeddingMetadata, IdentityMismatch, Snapshot, validate_vector},
 };
 use crate::{
     error::{HypatiaError, Result},
@@ -18,6 +20,13 @@ use std::{
 pub struct ShelfBackend {
     inner: Backend,
     dims: usize,
+    identity_trusted: bool,
+    /// The configured identity; vectors are only written while it is the stored one.
+    identity: EmbeddingMetadata,
+    /// Stored vectors belong to a different model than configured.
+    mismatch: Option<IdentityMismatch>,
+    /// The shelf's name, for hints that name a command.
+    shelf: String,
 }
 enum Backend {
     Local(LocalBackend),
@@ -206,16 +215,18 @@ impl ShelfBackend {
     pub fn open(config: &ShelfConfig, settings: &ShelfSettings) -> Result<Self> {
         settings.validate()?;
         let dims = settings.embedding.dimensions();
+        let configured = EmbeddingMetadata {
+            model: settings.embedding.model_identity().into(),
+            dimensions: dims,
+            metric: "cosine".into(),
+        };
+        let mut stored = None;
         let inner = match settings.storage.backend {
             BackendKind::Sqlite => {
                 // Vector files are a disposable cache; disk failure must not disable CRUD.
                 let store = open_or_migrate(config)?;
                 if settings.embedding.model_identity_trusted {
-                    store.configure_embedding(&EmbeddingMetadata {
-                        model: settings.embedding.model_identity().into(),
-                        dimensions: dims,
-                        metric: "cosine".into(),
-                    })?;
+                    stored = store.configure_embedding(&configured)?;
                 }
                 store.conn().execute("INSERT OR IGNORE INTO meta(k,v) VALUES('cache_identity',lower(hex(randomblob(16))))",[])?;
                 let cache_identity: String = store.conn().query_row(
@@ -243,7 +254,7 @@ impl ShelfBackend {
             BackendKind::Pgvector => {
                 #[cfg(feature = "postgres-backend")]
                 {
-                    Backend::Postgres(super::postgres_store::PgStore::open(
+                    let pg = super::postgres_store::PgStore::open(
                         settings
                             .storage
                             .postgres
@@ -251,7 +262,9 @@ impl ShelfBackend {
                             .expect("validated PG config"),
                         &settings.storage.vector,
                         &settings.embedding,
-                    )?)
+                    )?;
+                    stored = pg.stored_identity_mismatch().cloned();
+                    Backend::Postgres(pg)
                 }
                 #[cfg(not(feature = "postgres-backend"))]
                 {
@@ -259,7 +272,18 @@ impl ShelfBackend {
                 }
             }
         };
-        Ok(Self { inner, dims })
+        Ok(Self {
+            inner,
+            dims,
+            identity_trusted: settings.embedding.model_identity_trusted,
+            shelf: config.id.name.clone(),
+            mismatch: stored.map(|stored| IdentityMismatch {
+                shelf: config.id.name.clone(),
+                stored,
+                configured: configured.clone(),
+            }),
+            identity: configured,
+        })
     }
     pub fn is_local(&self) -> bool {
         matches!(self.inner, Backend::Local(_))
@@ -271,12 +295,19 @@ impl ShelfBackend {
             Backend::Postgres(pg) => Some(pg.schema()),
         }
     }
+    /// Stored vectors were built with a different model: vector reads and writes are refused.
+    pub fn identity_mismatch(&self) -> Option<&IdentityMismatch> {
+        self.mismatch.as_ref()
+    }
     pub fn vector_search(
         &self,
         target: QueryTarget,
         vector: &[f32],
         limit: i64,
     ) -> Result<Vec<(String, String, f64)>> {
+        if let Some(m) = &self.mismatch {
+            return Err(m.to_error());
+        }
         validate_vector(vector, self.dims)?;
         if limit < 0 {
             return Err(HypatiaError::Validation("limit must be nonnegative".into()));
@@ -300,13 +331,22 @@ impl ShelfBackend {
         version: i64,
         vector: &[f32],
     ) -> Result<bool> {
+        if let Some(m) = &self.mismatch {
+            return Err(m.to_error());
+        }
+        // An untrusted identity is only a placeholder; vectors written under it could never be matched.
+        if !self.identity_trusted {
+            return Err(HypatiaError::Config("embedding model identity is unknown; configure embedding.model or provide readable model files before writing vectors".into()));
+        }
         validate_vector(vector, self.dims)?;
         match &mut self.inner {
             Backend::Local(l) => {
                 if l.store.embedding_metadata()?.is_none() {
                     return Err(HypatiaError::Config("legacy vectors have unknown model identity; explicitly reembed before embedding writeback".into()));
                 }
-                let installed = l.store.install_embedding(catalog, key, version, vector)?;
+                let installed =
+                    l.store
+                        .install_embedding_as(&self.identity, catalog, key, version, vector)?;
                 if installed {
                     // The next search lazily loads or rebuilds a coherent generation.
                     l.cache_clock.set(-1);
@@ -324,17 +364,135 @@ impl ShelfBackend {
             Backend::Postgres(_) => Ok(true),
         }
     }
+    pub fn pending_count(&self, catalog: &str) -> Result<usize> {
+        match &self.inner {
+            Backend::Local(l) => l.store.pending_count(catalog),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.pending_count(catalog),
+        }
+    }
+    /// Whether this version of an entry still lacks a vector.
+    pub fn is_pending(&self, catalog: &str, key: &str, version: i64) -> Result<bool> {
+        match &self.inner {
+            Backend::Local(l) => l.store.is_pending(catalog, key, version),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.is_pending(catalog, key, version),
+        }
+    }
+    /// Pending entries across both catalogs, counted no further than `limit` in each, so the
+    /// cost never grows with the debt.
+    pub fn pending_up_to(&self, limit: usize) -> Result<usize> {
+        match &self.inner {
+            Backend::Local(l) => l.store.pending_up_to(limit as i64),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.pending_up_to(limit as i64),
+        }
+    }
+    /// Why no vector can be written right now, if so. Checked before embedding anything, so
+    /// a flush never computes vectors only to have them refused.
+    pub fn vectors_blocked(&self) -> Result<Option<Blocked>> {
+        let blocked = |reason: BlockedReason, message: String| -> Result<Option<Blocked>> {
+            Ok(Some(Blocked { reason, message }))
+        };
+        if let Some(m) = &self.mismatch {
+            return blocked(BlockedReason::IdentityMismatch, m.to_string());
+        }
+        if !self.identity_trusted {
+            return blocked(
+                BlockedReason::UnknownIdentity,
+                "embedding model identity is unknown; configure embedding.model or provide readable model files".into(),
+            );
+        }
+        // A trusted identity always binds while no vector exists, so no binding means
+        // vectors from before identity tracking.
+        let legacy = match &self.inner {
+            Backend::Local(l) => l.store.embedding_metadata()?.is_none(),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(_) => false,
+        };
+        if legacy {
+            return blocked(
+                BlockedReason::LegacyVectors,
+                format!(
+                    "legacy vectors have unknown model identity; run `hypatia backfill --reembed -s {}`",
+                    self.shelf
+                ),
+            );
+        }
+        Ok(None)
+    }
+    /// Up to `limit` pending entries across both catalogs, most recently written first.
+    pub fn newest_missing_embeddings(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, Content, i64)>> {
+        match &self.inner {
+            Backend::Local(l) => l.store.newest_missing_embeddings(limit),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.newest_missing_embeddings(limit),
+        }
+    }
+    /// Embedding debt bookkeeping for the configured identity. The debt's start survives a
+    /// model change (entries lack vectors either way); the breaker and learned batch size
+    /// belong to the identity they were recorded under. Unreadable state reads as empty.
+    pub fn flush_state(&self) -> Result<FlushState> {
+        let json = match &self.inner {
+            Backend::Local(l) => l.store.meta_value(FLUSH_STATE_KEY)?,
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.meta_value(FLUSH_STATE_KEY)?,
+        };
+        Ok(Self::read_flush_state(&self.identity.model, json))
+    }
+    /// Reads, changes and writes the flush state as one step, so concurrent processes never
+    /// lose each other's updates. Writes only if `change` changed something.
+    pub fn update_flush_state(
+        &mut self,
+        change: impl FnOnce(&mut FlushState),
+    ) -> Result<FlushState> {
+        let mut updated = FlushState::default();
+        let identity = &self.identity.model;
+        let update = |json: Option<String>| -> Result<Option<String>> {
+            let mut state = Self::read_flush_state(identity, json);
+            let before = state.clone();
+            change(&mut state);
+            let write = (state != before)
+                .then(|| serde_json::to_string(&state))
+                .transpose()?;
+            updated = state;
+            Ok(write)
+        };
+        match &self.inner {
+            Backend::Local(l) => l.store.update_meta_value(FLUSH_STATE_KEY, update)?,
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.update_meta_value(FLUSH_STATE_KEY, update)?,
+        }
+        Ok(updated)
+    }
+    fn read_flush_state(identity: &str, json: Option<String>) -> FlushState {
+        let mut state = FlushState::for_identity(identity);
+        if let Some(stored) = json.and_then(|json| serde_json::from_str::<FlushState>(&json).ok()) {
+            if stored.identity == state.identity {
+                state = stored;
+            } else {
+                state.pending_since = stored.pending_since;
+            }
+        }
+        state
+    }
 
+    /// Explicit reembed: drops every vector and rebinds the identity to `metadata`.
     pub fn reset_embeddings(&mut self, metadata: &EmbeddingMetadata) -> Result<()> {
         match &mut self.inner {
             Backend::Local(l) => {
                 l.store.reset_embeddings(metadata)?;
                 l.cache_clock.set(-1);
-                Ok(())
             }
             #[cfg(feature = "postgres-backend")]
-            Backend::Postgres(pg) => pg.clear_all_embeddings(),
+            Backend::Postgres(pg) => pg.reset_embeddings(metadata)?,
         }
+        self.mismatch = None;
+        self.identity = metadata.clone();
+        Ok(())
     }
 
     pub fn rebuild_indexes(&mut self) -> Result<()> {

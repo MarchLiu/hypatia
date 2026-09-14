@@ -14,20 +14,34 @@ AI-oriented memory management system. Stores structured knowledge as a graph of 
 - **Shelf System** -- Named, connectable, exportable data directories for isolation
 - **CLI + REPL** -- Full command-line interface with interactive mode (rustyline)
 - **Agent Integration** -- Claude Code skill for natural-language-to-CLI translation
-- **Cross-Platform** -- Build for 18+ targets (Linux, macOS, Windows, FreeBSD, NetBSD, illumos, Android)
+- **Cross-Platform** -- Prebuilt binaries on [GitHub Releases](https://github.com/MarchLiu/hypatia/releases) with a one-line install script; `scripts/build.sh` cross-compiles other targets
 
 ## Quick Start
 
-```bash
-# Build
-cargo build --release
+Hypatia works with zero downloads and zero configuration: full-text search, graph traversal and JSE queries are available as soon as the binary is installed. Semantic search is optional and can be enabled later.
 
-# Download embedding model (BGE-M3, recommended)
-mkdir -p ~/.hypatia/default
-hf download BAAI/bge-m3 --local-dir /tmp/bge-m3
-cp /tmp/bge-m3/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
-cp /tmp/bge-m3/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
-cp /tmp/bge-m3/onnx/tokenizer.json ~/.hypatia/default/tokenizer.json
+### 1. Install
+
+On macOS (Apple Silicon) or Linux (x86_64 with AVX2, or aarch64; glibc 2.35 or newer and OpenSSL 3), install the prebuilt binary into `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MarchLiu/hypatia/main/scripts/install.sh | sh
+```
+
+It verifies the download when the release publishes a checksum (releases from now on do), and checks that the binary runs before replacing an installed one. `HYPATIA_VERSION` picks a release tag and `HYPATIA_INSTALL_DIR` another directory. Windows x64 binaries are on [GitHub Releases](https://github.com/MarchLiu/hypatia/releases).
+
+Or build from source (Intel Macs, musl-based Linux and x86_64 CPUs without AVX2 have no prebuilt ONNX Runtime either; build it yourself and point `ORT_LIB_PATH` at it, see [ort's linking guide](https://ort.pyke.io/setup/linking)):
+
+```bash
+cargo build --release
+```
+
+### 2. Store and query knowledge
+
+`hypatia init` sets up the `default` shelf at `~/.hypatia/default` and shows what works on it (any other command creates that shelf too; `hypatia init <dir> -n <name>` sets up another one).
+
+```bash
+hypatia init
 
 # Create knowledge
 hypatia knowledge-create "Rust" -d "systems programming language" -t "language,compiled"
@@ -38,10 +52,6 @@ hypatia statement-create "Rust" "is_a" "systems language"
 # Full-text search
 hypatia search "programming language"
 
-# Vector similarity search (requires embedding model)
-hypatia backfill    # generate embeddings for existing entries
-hypatia similar "programming language"  # semantic search
-
 # Structured query (JSE)
 hypatia query '["$knowledge", ["$eq", "name", "Rust"]]'
 hypatia query '["$statement", ["$triple", "Rust", "$*", "$*"]]'
@@ -51,16 +61,29 @@ hypatia query '["$knowledge", ["$search", "database migration"]]'
 hypatia repl
 ```
 
+### 3. Optional: enable semantic search
+
+`similar` needs an embedding model. Either configure a [remote OpenAI-compatible API](#remote-api-openai-compatible), or install BGE-M3 (about 2.3 GB) for the default shelf:
+
+```bash
+hypatia model install BAAI/bge-m3        # resumes if interrupted; -s <shelf> for another shelf
+hypatia backfill                         # optional: embed everything written so far, at once
+hypatia similar "programming language"   # semantic search
+```
+
+Nothing written before enabling semantic search is lost: existing entries get their vectors automatically, newest first, a batch at a time as you keep using hypatia. `backfill` embeds them all at once.
+
 ## Embedding Models
 
 Hypatia supports multiple embedding backends, configured via `shelf.toml` in the shelf directory (e.g., `~/.hypatia/default/shelf.toml`).
 
 ### Default: BAAI/bge-m3 (Local ONNX)
 
-No configuration needed — place model files in the shelf directory and Hypatia auto-detects them.
+`hypatia model install BAAI/bge-m3` downloads the ONNX export into `~/.hypatia/models/BAAI/bge-m3/` (large files verified against the Hub's sha256) and names it in the shelf's `shelf.toml` (`-s <shelf>`, default `default`). Running it again fetches only files that changed upstream; if any did, re-embed the shelves that already use the model (`hypatia backfill --reembed`). A shelf that already holds vectors of another model, or uses a remote API, is left unchanged, with instructions to switch. Set `HF_ENDPOINT` to use a mirror, and `HF_TOKEN` for gated repositories.
+
+Model files placed directly in the shelf directory are picked up without any configuration too:
 
 ```bash
-# Download from HuggingFace
 hf download BAAI/bge-m3 --local-dir /tmp/bge-m3
 cp /tmp/bge-m3/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
 cp /tmp/bge-m3/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
@@ -108,12 +131,7 @@ hf download google/embedding-gemma-300M --local-dir /tmp/embedding-gemma
 #### jinaai/jina-embeddings-v5-text-small
 
 ```bash
-hf download jinaai/jina-embeddings-v5-text-small-text-matching \
-  onnx/model.onnx onnx/model.onnx_data tokenizer.json \
-  --local-dir /tmp/jina-v5-small
-cp /tmp/jina-v5-small/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
-cp /tmp/jina-v5-small/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
-cp /tmp/jina-v5-small/tokenizer.json ~/.hypatia/default/tokenizer.json
+hypatia model install jinaai/jina-embeddings-v5-text-small-text-matching
 ```
 
 shelf.toml:
@@ -132,12 +150,7 @@ pooling = "last_token"
 #### jinaai/jina-embeddings-v5-text-nano
 
 ```bash
-hf download jinaai/jina-embeddings-v5-text-nano-text-matching \
-  onnx/model.onnx onnx/model.onnx_data tokenizer.json \
-  --local-dir /tmp/jina-v5-nano
-cp /tmp/jina-v5-nano/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
-cp /tmp/jina-v5-nano/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
-cp /tmp/jina-v5-nano/tokenizer.json ~/.hypatia/default/tokenizer.json
+hypatia model install jinaai/jina-embeddings-v5-text-nano-text-matching
 ```
 
 shelf.toml:
@@ -225,11 +238,13 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `api_url` | OpenAI URL | API endpoint URL (remote only) |
 | `api_key_env` | `OPENAI_API_KEY` | Environment variable name for API key (remote only) |
 | `api_model` | `text-embedding-3-small` | Model name sent to API (remote only) |
+| `defer` | `true` | Embed writes later, in batches. A local model embeds a batch of the newest entries before each semantic search. A remote API embeds once 128 entries are waiting, or when a command runs on the shelf a minute after the oldest was written: usually one request, and never more than 30 s, even when entries the server rejects have to be singled out. `false` embeds every write as it is saved; with a remote API the write then waits on the network |
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
+| `hypatia init [<path>] [-n <name>]` | Set up a shelf (the default one, or the directory given) and show what works on it |
 | `hypatia connect <path> [-n <name>]` | Connect to a shelf directory |
 | `hypatia disconnect <name>` | Disconnect from a shelf |
 | `hypatia list` | List connected shelves |
@@ -241,6 +256,9 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
 | `hypatia similar <query> [--limit N]` | Vector similarity search |
 | `hypatia backfill [--reembed] [-s <shelf>]` | Generate embeddings for entries missing vectors (or regenerate all) |
+| `hypatia backfill --status [-s <shelf>]` | Report pending entries and why embedding may be stuck, as JSON |
+| `hypatia model install <org/name> [-s <shelf>] [--revision <rev>]` | Download an ONNX embedding model from Hugging Face and use it on a shelf |
+| `hypatia model list` / `model show <name>` / `model register <name> <path>` | List, inspect or register local models |
 | `hypatia import <source> [-s <shelf>] [--reembed]` | Import an exported snapshot into an empty shelf |
 | `hypatia archive-store <file> [-n <name>] [-s <shelf>]` | Store a file in archives with auto-metadata |
 | `hypatia archive-get <name> [-o <output>] [-s <shelf>]` | Get an archive file path or copy it |

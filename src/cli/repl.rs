@@ -144,7 +144,12 @@ impl Repl {
     fn handle_jse(&mut self, input: &str) -> Result<String> {
         let json: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| crate::error::HypatiaError::Parse(format!("invalid JSON: {e}")))?;
+        // Best-effort, as for CLI commands: the query reports a missing shelf itself.
+        let _ = self.lab.flush_if_overdue("default");
         let result = self.lab.query("default", &json)?;
+        if crate::lab::uses_similar(&json) {
+            super::commands::warn_if_incomplete(&self.lab, "default", "both");
+        }
         if result.rows.is_empty() {
             Ok("No results found.".to_string())
         } else {

@@ -32,8 +32,21 @@ pub struct PgStore {
     client: RefCell<Client>,
     schema: String,
     extension: String,
+    // Describe the vectors on disk: the configured identity, or the stored one while adopted
+    // or mismatched.
     dimensions: usize,
     model: String,
+    hnsw: bool,
+    identity_trusted: bool,
+    stored_mismatch: Option<Box<EmbeddingMetadata>>,
+}
+/// How an opener's configured identity relates to the stored one.
+enum Binding {
+    Current,
+    /// An untrusted (placeholder) opener takes the stored identity as is.
+    Adopted(EmbeddingMetadata),
+    /// Vectors exist under a different identity: the shelf opens degraded.
+    Mismatch(EmbeddingMetadata),
 }
 // Do not echo connection strings, SQL text, or server DETAIL (which can carry data).
 fn pg_error(e: postgres::Error) -> HypatiaError {
@@ -114,9 +127,8 @@ impl PgStore {
         embedding: &EmbeddingConfig,
     ) -> Result<Self> {
         super::settings::validate_schema(&config.schema)?;
-        if !embedding.model_identity_trusted {
-            return Err(HypatiaError::Config("PostgreSQL requires a trusted embedding model identity; configure embedding.model or readable model and tokenizer files".into()));
-        }
+        // An untrusted identity is recorded as a placeholder: it rebinds as soon as a real
+        // model appears, since ShelfBackend refuses to write vectors under it.
         if vector.metric != "cosine" || !matches!(vector.index.as_str(), "hnsw" | "none") {
             return Err(HypatiaError::Config(
                 "PostgreSQL vectors require metric=cosine and index=hnsw or none".into(),
@@ -158,23 +170,44 @@ impl PgStore {
             .batch_execute("SET search_path = pg_catalog")
             .map_err(pg_error)?;
         let extension:String=client.query_opt("SELECT n.nspname FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector'",&[]).map_err(pg_error)?.ok_or_else(||HypatiaError::Config("The vector extension must be preinstalled by a database administrator".into()))?.get(0);
-        let store = Self {
+        let mut store = Self {
             client: RefCell::new(client),
             schema: config.schema.clone(),
             extension: ident(&extension),
             dimensions,
             model: embedding.model_identity().to_string(),
+            hnsw: vector.index == "hnsw",
+            identity_trusted: embedding.model_identity_trusted,
+            stored_mismatch: None,
         };
-        store.init_schema(&vector.index)?;
+        match store.init_schema()? {
+            Binding::Current => {}
+            Binding::Adopted(stored) => {
+                store.model = stored.model;
+                store.dimensions = stored.dimensions;
+            }
+            Binding::Mismatch(stored) => {
+                store.model = stored.model.clone();
+                store.dimensions = stored.dimensions;
+                store.stored_mismatch = Some(Box::new(stored));
+            }
+        }
         Ok(store)
     }
     pub fn schema(&self) -> &str {
         &self.schema
     }
+    /// Identity of the vectors on disk when it differs from the configured one. The store
+    /// still opens; callers must refuse vector reads and writes until `reset_embeddings`.
+    pub fn stored_identity_mismatch(&self) -> Option<&EmbeddingMetadata> {
+        self.stored_mismatch.as_deref()
+    }
     fn table(&self, t: &str) -> String {
         format!("{}.{}", ident(&self.schema), ident(t))
     }
-    fn init_schema(&self, index: &str) -> Result<()> {
+    /// Creates or validates the shelf schema and decides how the configured identity binds.
+    fn init_schema(&self) -> Result<Binding> {
+        let index = if self.hnsw { "hnsw" } else { "none" };
         let mut client = self.client.borrow_mut();
         let mut tx = client.transaction().map_err(pg_error)?;
         tx.query_one(
@@ -194,13 +227,20 @@ impl PgStore {
             .query(&format!("SELECT k,v FROM {}", self.table("meta")), &[])
             .map_err(pg_error)?;
         if !metadata.is_empty() {
-            for (key, value) in &expected {
-                if !metadata
+            let stored = |key: &str| {
+                metadata
                     .iter()
-                    .any(|r| r.get::<_, String>(0) == *key && r.get::<_, String>(1) == *value)
-                {
+                    .find(|r| r.get::<_, String>(0) == key)
+                    .map(|r| r.get::<_, String>(1))
+            };
+            // Structure is not identity: these still require an explicit migration.
+            for (key, value) in &expected {
+                if matches!(*key, "embedding_model" | "embedding_dimensions") {
+                    continue;
+                }
+                if stored(key).as_deref() != Some(value.as_str()) {
                     return Err(HypatiaError::Config(format!(
-                        "PostgreSQL shelf metadata mismatch: {key}; explicit migration or re-embedding is required"
+                        "PostgreSQL shelf metadata mismatch: {key}; explicit migration is required"
                     )));
                 }
             }
@@ -218,8 +258,59 @@ impl PgStore {
                     )));
                 }
             }
-            self.validate_schema_structure(&mut tx, index)?;
-            return tx.commit().map_err(pg_error);
+            let stored_identity = match (
+                stored("embedding_model"),
+                stored("embedding_dimensions").and_then(|d| d.parse::<usize>().ok()),
+            ) {
+                (Some(model), Some(dimensions)) => EmbeddingMetadata {
+                    model,
+                    dimensions,
+                    metric: "cosine".into(),
+                },
+                _ => {
+                    return Err(HypatiaError::Config(
+                        "PostgreSQL shelf metadata mismatch: embedding identity is missing".into(),
+                    ));
+                }
+            };
+            let configured = EmbeddingMetadata {
+                model: self.model.clone(),
+                dimensions: self.dimensions,
+                metric: "cosine".into(),
+            };
+            let binding = if stored_identity == configured {
+                Binding::Current
+            } else if !self.identity_trusted {
+                // A placeholder never replaces what is stored, so machines without the
+                // model cannot flip a shared shelf's identity back and forth.
+                Binding::Adopted(stored_identity)
+            } else if self.any_vectors(&mut tx)? {
+                // Checked without a lock: a degraded shelf opens without blocking writers.
+                Binding::Mismatch(stored_identity)
+            } else {
+                // Block vector writers between the check and the rebind; recheck under the lock.
+                tx.batch_execute(&format!(
+                    "LOCK TABLE {},{} IN SHARE ROW EXCLUSIVE MODE",
+                    self.table("knowledge"),
+                    self.table("statement")
+                ))
+                .map_err(pg_error)?;
+                if self.any_vectors(&mut tx)? {
+                    Binding::Mismatch(stored_identity)
+                } else {
+                    // Nothing to invalidate: the identity is free to change.
+                    let from = self.column_dimensions(&mut tx)?;
+                    self.bind_identity(&mut tx, from, &configured)?;
+                    Binding::Current
+                }
+            };
+            let dimensions = match &binding {
+                Binding::Current => configured.dimensions,
+                Binding::Adopted(stored) | Binding::Mismatch(stored) => stored.dimensions,
+            };
+            self.validate_schema_structure(&mut tx, index, dimensions)?;
+            tx.commit().map_err(pg_error)?;
+            return Ok(binding);
         }
         tx.batch_execute(&format!(r#"
 CREATE SEQUENCE {versions} AS bigint NO CYCLE;
@@ -234,18 +325,14 @@ CREATE INDEX statement_relation_idx ON {statement}(relation);
 CREATE INDEX statement_tail_idx ON {statement}(tail);
 CREATE INDEX knowledge_missing_embedding_idx ON {knowledge}(name) WHERE embedding IS NULL;
 CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedding IS NULL;
+CREATE INDEX knowledge_pending_version_idx ON {knowledge}(content_version) WHERE embedding IS NULL;
+CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE embedding IS NULL;
 "#,versions=self.table("content_versions"),docs=self.table("docs"),knowledge=self.table("knowledge"),statement=self.table("statement"),ext=self.extension,dims=self.dimensions)).map_err(pg_error)?;
         tx.batch_execute(&crate::engine::postgres::schema_functions(&self.schema))
             .map_err(pg_error)?;
         if index == "hnsw" {
             for table in ["knowledge", "statement"] {
-                tx.batch_execute(&format!(
-                    "CREATE INDEX {} ON {} USING hnsw(embedding {}.vector_cosine_ops)",
-                    ident(&format!("{table}_embedding_hnsw_idx")),
-                    self.table(table),
-                    self.extension
-                ))
-                .map_err(pg_error)?;
+                self.create_hnsw_index(&mut tx, table)?;
             }
         }
         for (key, value) in expected {
@@ -255,9 +342,90 @@ CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedd
             )
             .map_err(pg_error)?;
         }
-        tx.commit().map_err(pg_error)
+        tx.commit().map_err(pg_error)?;
+        Ok(Binding::Current)
     }
-    fn validate_schema_structure(&self, tx: &mut impl GenericClient, index: &str) -> Result<()> {
+    fn create_hnsw_index(&self, tx: &mut impl GenericClient, table: &str) -> Result<()> {
+        tx.batch_execute(&format!(
+            "CREATE INDEX {} ON {} USING hnsw(embedding {}.vector_cosine_ops)",
+            ident(&format!("{table}_embedding_hnsw_idx")),
+            self.table(table),
+            self.extension
+        ))
+        .map_err(pg_error)
+    }
+    fn any_vectors(&self, tx: &mut impl GenericClient) -> Result<bool> {
+        Ok(tx
+            .query_one(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE embedding IS NOT NULL) OR EXISTS(SELECT 1 FROM {} WHERE embedding IS NOT NULL)",
+                    self.table("knowledge"),
+                    self.table("statement")
+                ),
+                &[],
+            )
+            .map_err(pg_error)?
+            .get(0))
+    }
+    /// The embedding column's actual dimensions, which another process may have changed.
+    fn column_dimensions(&self, tx: &mut impl GenericClient) -> Result<usize> {
+        let typmod: i32 = tx
+            .query_one(
+                "SELECT a.atttypmod FROM pg_catalog.pg_attribute a WHERE a.attrelid=pg_catalog.to_regclass($1) AND a.attname='embedding' AND NOT a.attisdropped",
+                &[&self.table("knowledge")],
+            )
+            .map_err(pg_error)?
+            .get(0);
+        Ok(typmod.max(0) as usize)
+    }
+    /// Rebinds the stored identity to `to`. Only valid while no vector exists: a dimension
+    /// change retypes the all-NULL columns and rebuilds their HNSW indexes.
+    fn bind_identity(
+        &self,
+        tx: &mut impl GenericClient,
+        from_dimensions: usize,
+        to: &EmbeddingMetadata,
+    ) -> Result<()> {
+        if from_dimensions != to.dimensions {
+            for table in ["knowledge", "statement"] {
+                tx.batch_execute(&format!(
+                    "DROP INDEX IF EXISTS {}",
+                    self.table(&format!("{table}_embedding_hnsw_idx"))
+                ))
+                .map_err(pg_error)?;
+                tx.batch_execute(&format!(
+                    "ALTER TABLE {} ALTER COLUMN embedding TYPE {ext}.vector({dims}) USING NULL::{ext}.vector({dims})",
+                    self.table(table),
+                    ext = self.extension,
+                    dims = to.dimensions
+                ))
+                .map_err(pg_error)?;
+                if self.hnsw {
+                    self.create_hnsw_index(tx, table)?;
+                }
+            }
+        }
+        for (key, value) in [
+            ("embedding_model", to.model.clone()),
+            ("embedding_dimensions", to.dimensions.to_string()),
+        ] {
+            tx.execute(
+                &format!(
+                    "INSERT INTO {}(k,v) VALUES($1,$2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                    self.table("meta")
+                ),
+                &[&key, &value],
+            )
+            .map_err(pg_error)?;
+        }
+        Ok(())
+    }
+    fn validate_schema_structure(
+        &self,
+        tx: &mut impl GenericClient,
+        index: &str,
+        dimensions: usize,
+    ) -> Result<()> {
         for table in ["knowledge", "statement"] {
             let rows = tx.query("SELECT a.attname,t.typname,n.nspname,a.atttypmod,a.attnotnull FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid=pg_catalog.to_regclass($1) AND a.attnum>0 AND NOT a.attisdropped", &[&self.table(table)]).map_err(pg_error)?;
             for (column, typ, not_null) in [
@@ -273,7 +441,7 @@ CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedd
                         && r.get::<_, bool>(4) == not_null
                         && if column == "embedding" {
                             ident(&r.get::<_, String>(2)) == self.extension
-                                && r.get::<_, i32>(3) == self.dimensions as i32
+                                && r.get::<_, i32>(3) == dimensions as i32
                         } else {
                             r.get::<_, String>(2) == "pg_catalog"
                         }
@@ -516,32 +684,197 @@ CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedd
             .client
             .borrow_mut()
             .execute(
+                // Conditional on the stored identity: after a concurrent rebind by another
+                // process this is a no-op and the row stays pending.
                 &format!(
-                    "UPDATE {} SET embedding=$3 WHERE {pk}=$1 AND content_version=$2",
-                    self.table(table)
+                    "UPDATE {} SET embedding=$3 WHERE {pk}=$1 AND content_version=$2 AND EXISTS(SELECT 1 FROM {meta} WHERE k='embedding_model' AND v=$4) AND EXISTS(SELECT 1 FROM {meta} WHERE k='embedding_dimensions' AND v=$5)",
+                    self.table(table),
+                    meta = self.table("meta")
                 ),
-                &[&key, &version, &vector],
+                &[
+                    &key,
+                    &version,
+                    &vector,
+                    &self.model,
+                    &self.dimensions.to_string(),
+                ],
             )
             .map_err(pg_error)?
             == 1)
     }
-    /// Explicit re-embedding reset. Every row receives a new token, including
-    /// already-missing embeddings, so all outstanding workers are invalidated.
-    pub fn clear_all_embeddings(&self) -> Result<()> {
-        let mut client = self.client.borrow_mut();
-        let mut tx = client.transaction().map_err(pg_error)?;
-        for table in ["knowledge", "statement"] {
-            tx.execute(
+    /// Entries still waiting for a vector; served by the `*_missing_embedding_idx` indexes.
+    pub fn pending_count(&self, catalog: &str) -> Result<usize> {
+        let (table, _) = catalog_info(catalog)?;
+        let n: i64 = self
+            .client
+            .borrow_mut()
+            .query_one(
                 &format!(
-                    "UPDATE {} SET embedding=NULL,content_version=nextval('{}'::regclass)",
-                    self.table(table),
-                    self.table("content_versions")
+                    "SELECT count(*) FROM {} WHERE embedding IS NULL",
+                    self.table(table)
                 ),
                 &[],
             )
+            .map_err(pg_error)?
+            .get(0);
+        Ok(n as usize)
+    }
+    /// Whether this version of an entry still lacks a vector.
+    pub fn is_pending(&self, catalog: &str, key: &str, version: i64) -> Result<bool> {
+        let (table, key_column) = catalog_info(catalog)?;
+        Ok(self
+            .client
+            .borrow_mut()
+            .query_one(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE {}=$1 AND content_version=$2 AND embedding IS NULL)",
+                    self.table(table),
+                    ident(key_column)
+                ),
+                &[&key, &version],
+            )
+            .map_err(pg_error)?
+            .get(0))
+    }
+    /// Pending entries across both catalogs, counted no further than `limit` in each.
+    pub fn pending_up_to(&self, limit: i64) -> Result<usize> {
+        let (knowledge, _) = catalog_info("knowledge")?;
+        let (statement, _) = catalog_info("statement")?;
+        let n: i64 = self
+            .client
+            .borrow_mut()
+            .query_one(
+                &format!(
+                    "SELECT (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL LIMIT $1) k)
+                          + (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL LIMIT $1) s)",
+                    self.table(knowledge),
+                    self.table(statement)
+                ),
+                &[&limit],
+            )
+            .map_err(pg_error)?
+            .get(0);
+        Ok(n as usize)
+    }
+    /// Up to `limit` pending entries across both catalogs, most recently written first.
+    /// Returns (catalog, key, content, version).
+    pub fn newest_missing_embeddings(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, Content, i64)>> {
+        self.client
+            .borrow_mut()
+            .query(
+                &format!(
+                    "SELECT 'knowledge'::text,name,content,content_version FROM {} WHERE embedding IS NULL UNION ALL SELECT 'statement'::text,triple,content,content_version FROM {} WHERE embedding IS NULL ORDER BY 4 DESC LIMIT $1",
+                    self.table("knowledge"),
+                    self.table("statement")
+                ),
+                &[&limit],
+            )
+            .map_err(pg_error)?
+            .iter()
+            .map(|r| {
+                Ok((
+                    r.get(0),
+                    r.get(1),
+                    serde_json::from_value(r.get(2))?,
+                    r.get(3),
+                ))
+            })
+            .collect()
+    }
+    pub fn meta_value(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .client
+            .borrow_mut()
+            .query_opt(
+                &format!("SELECT v FROM {} WHERE k=$1", self.table("meta")),
+                &[&key],
+            )
+            .map_err(pg_error)?
+            .map(|r| r.get(0)))
+    }
+    pub fn set_meta_value(&self, key: &str, value: &str) -> Result<()> {
+        self.client
+            .borrow_mut()
+            .execute(
+                &format!(
+                    "INSERT INTO {}(k,v) VALUES($1,$2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                    self.table("meta")
+                ),
+                &[&key, &value],
+            )
+            .map_err(pg_error)?;
+        Ok(())
+    }
+    /// Reads and rewrites one value under a transaction lock on its key, so a concurrent
+    /// writer's update is never lost. `change` returns the new value, or `None` to keep it;
+    /// it runs while the connection is borrowed and must not use the store.
+    pub fn update_meta_value(
+        &self,
+        key: &str,
+        change: impl FnOnce(Option<String>) -> Result<Option<String>>,
+    ) -> Result<()> {
+        let mut client = self.client.borrow_mut();
+        let mut tx = client.transaction().map_err(pg_error)?;
+        tx.query_one(
+            "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1,0))",
+            &[&format!("hypatia:{}:{key}", self.schema)],
+        )
+        .map_err(pg_error)?;
+        let current = tx
+            .query_opt(
+                &format!("SELECT v FROM {} WHERE k=$1", self.table("meta")),
+                &[&key],
+            )
+            .map_err(pg_error)?
+            .map(|r| r.get(0));
+        if let Some(value) = change(current)? {
+            tx.execute(
+                &format!(
+                    "INSERT INTO {}(k,v) VALUES($1,$2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                    self.table("meta")
+                ),
+                &[&key, &value],
+            )
             .map_err(pg_error)?;
         }
-        tx.commit().map_err(pg_error)
+        tx.commit().map_err(pg_error)?;
+        Ok(())
+    }
+    /// Explicit re-embedding reset: drops every vector and rebinds the identity to `metadata`.
+    /// Every row receives a new token, including already-missing embeddings, so all
+    /// outstanding workers are invalidated.
+    pub fn reset_embeddings(&mut self, metadata: &EmbeddingMetadata) -> Result<()> {
+        {
+            let mut client = self.client.borrow_mut();
+            let mut tx = client.transaction().map_err(pg_error)?;
+            // Serialize with concurrent opens, which may rebind the identity themselves.
+            tx.query_one(
+                "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1,0))",
+                &[&format!("hypatia:{}", self.schema)],
+            )
+            .map_err(pg_error)?;
+            for table in ["knowledge", "statement"] {
+                tx.execute(
+                    &format!(
+                        "UPDATE {} SET embedding=NULL,content_version=nextval('{}'::regclass)",
+                        self.table(table),
+                        self.table("content_versions")
+                    ),
+                    &[],
+                )
+                .map_err(pg_error)?;
+            }
+            let from = self.column_dimensions(&mut tx)?;
+            self.bind_identity(&mut tx, from, metadata)?;
+            tx.commit().map_err(pg_error)?;
+        }
+        self.model = metadata.model.clone();
+        self.dimensions = metadata.dimensions;
+        self.stored_mismatch = None;
+        Ok(())
     }
     fn clear_embedding(&self, catalog: &str, key: &str) -> Result<()> {
         let (table, pk) = catalog_info(catalog)?;
@@ -770,9 +1103,12 @@ CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedd
             })
             .collect::<Result<Vec<_>>>()?;
         tx.commit().map_err(pg_error)?;
+        // Without vectors there is no identity to carry: a placeholder must not block imports.
+        let has_vectors = knowledge.iter().any(|r| r.embedding.is_some())
+            || statements.iter().any(|r| r.embedding.is_some());
         Ok(Snapshot {
             format_version: 1,
-            embedding: Some(EmbeddingMetadata {
+            embedding: has_vectors.then(|| EmbeddingMetadata {
                 model: self.model.clone(),
                 dimensions: self.dimensions,
                 metric: "cosine".into(),

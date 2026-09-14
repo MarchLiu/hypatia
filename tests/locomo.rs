@@ -361,6 +361,24 @@ fn run_locomo_benchmark() {
         }
     }
 
+    // Writes defer embedding: pay the rest of the debt so vector search sees every entry.
+    {
+        let shelf = mgr.get_mut(&shelf_name).expect("get shelf");
+        while shelf
+            .flush_pending(128)
+            .is_ok_and(|stats| stats.installed > 0)
+        {}
+        if let Ok(debt) = shelf.embedding_debt()
+            && debt.blocked.is_none()
+            && debt.pending_knowledge + debt.pending_statement > 0
+        {
+            eprintln!(
+                "    WARN: {} entries still lack vectors; vector recall is understated",
+                debt.pending_knowledge + debt.pending_statement
+            );
+        }
+    }
+
     let ingest_time = t0.elapsed();
     println!(
         "    Loaded {total_entries} entries in {:.2}s",

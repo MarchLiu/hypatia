@@ -332,6 +332,8 @@ hypatia similar <query> [--limit N]
 
 Requires an embedding model configured in `shelf.toml` (default: BAAI/bge-m3).
 
+Entries are embedded in batches after they are written or updated. With a remote embedding API, `similar` can miss entries changed in the last minute; `search` finds them at once.
+
 ### Examples
 
 | User says | Command |

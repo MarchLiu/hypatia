@@ -1,0 +1,96 @@
+name: release
+
+# Builds the files scripts/install.sh downloads, hypatia-<target>.tar.gz and its .sha256, with
+# the PostgreSQL backend, as the v4.0.0 macOS binary had.
+# Windows x64 is built by build-windows.yml, which already packages .tar.gz.
+# There is no Intel Mac build: ort ships no prebuilt ONNX Runtime for x86_64-apple-darwin.
+#
+# To release: push the tag (a draft release creates none, and the build checks it out), create
+# its release as a draft, run this workflow with the tag as both `ref` and `upload_to_release`,
+# and publish the draft once the files are there. The install script
+# downloads from the latest published release, so publishing first breaks installs until the
+# upload finishes. Files are uploaded only when every build succeeded.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "tag or branch to build"
+        required: true
+      upload_to_release:
+        description: "upload the files to this GitHub release tag (empty = artifacts only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          # Built on the oldest supported Ubuntu: the binary needs glibc 2.35 and OpenSSL 3.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      ASSET: hypatia-${{ matrix.target }}.tar.gz
+      # Keep macOS extended attributes out of the archive.
+      COPYFILE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install OpenSSL headers
+        # The PostgreSQL backend's TLS goes through native-tls, which is OpenSSL on Linux.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+      - name: Build
+        run: cargo build --release --locked --features postgres-backend --target ${{ matrix.target }} -p hypatia
+      - name: Package
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/hypatia"
+          # macOS binaries stay unstripped: stripping breaks their ad-hoc signature.
+          if [[ "$RUNNER_OS" == Linux ]]; then strip "$bin"; fi
+          "$bin" --version
+          tar -czf "$ASSET" -C "$(dirname "$bin")" hypatia
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          else
+            shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypatia-${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+  publish:
+    needs: build
+    if: inputs.upload_to_release != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hypatia-*
+          merge-multiple: true
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.upload_to_release }}
+        run: gh release upload "$TAG" hypatia-*.tar.gz hypatia-*.tar.gz.sha256 --clobber

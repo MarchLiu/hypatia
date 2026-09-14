@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::lab::Lab;
+use crate::lab::{Lab, uses_similar};
 use crate::model::{Content, QueryResult, SearchOpts, StatementKey, Synonyms};
 
 #[derive(Parser)]
@@ -26,6 +26,14 @@ enum Commands {
     Disconnect { name: String },
     /// List connected shelves
     List,
+    /// Set up a shelf (the default one, or the directory given) and show what works on it
+    Init {
+        /// Shelf directory; the default shelf when omitted
+        path: Option<PathBuf>,
+        /// Name to register the directory under; without a directory, the registered shelf to report on
+        #[arg(short, long)]
+        name: Option<String>,
+    },
     /// Execute a JSE query
     Query {
         /// JSE query as JSON string
@@ -135,6 +143,9 @@ enum Commands {
         /// Explicitly invalidate all vectors and regenerate with the configured model
         #[arg(long)]
         reembed: bool,
+        /// Report the embedding debt as JSON instead of paying it
+        #[arg(long, conflicts_with = "reembed")]
+        status: bool,
         /// Shelf to backfill
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -199,6 +210,48 @@ enum ModelCommands {
         /// Model name or path
         name: String,
     },
+    /// Download an ONNX model from Hugging Face into ~/.hypatia/models/ and use it on a shelf
+    Install {
+        /// Model name in Org/Name format (e.g. "BAAI/bge-m3")
+        name: String,
+        /// Shelf to use the model on; left unchanged if it holds vectors of another model
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+        /// Branch, tag or commit to download
+        #[arg(long, default_value = "main")]
+        revision: String,
+    },
+}
+
+impl Commands {
+    /// The shelf whose overdue embedding debt a command pays before it runs. `backfill` and
+    /// `import` handle vectors themselves, `export` copies the shelf as it is, and
+    /// `disconnect` and the archive file lookups never read entries.
+    fn shelf(&self) -> Option<&str> {
+        match self {
+            Self::Query { shelf, .. }
+            | Self::KnowledgeCreate { shelf, .. }
+            | Self::KnowledgeGet { shelf, .. }
+            | Self::KnowledgeDelete { shelf, .. }
+            | Self::StatementDelete { shelf, .. }
+            | Self::StatementCreate { shelf, .. }
+            | Self::Search { shelf, .. }
+            | Self::Similar { shelf, .. }
+            | Self::ArchiveStore { shelf, .. }
+            | Self::SessionCurrent { shelf, .. } => Some(shelf),
+            Self::Connect { .. }
+            | Self::Disconnect { .. }
+            | Self::List
+            | Self::Init { .. }
+            | Self::Export { .. }
+            | Self::Import { .. }
+            | Self::Backfill { .. }
+            | Self::ArchiveGet { .. }
+            | Self::ArchiveList { .. }
+            | Self::Model(_)
+            | Self::Repl => None,
+        }
+    }
 }
 
 pub fn run() -> crate::error::Result<()> {
@@ -215,6 +268,10 @@ pub fn run() -> crate::error::Result<()> {
 }
 
 fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
+    if let Some(shelf) = cmd.shelf() {
+        // Best-effort: the command itself reports a shelf that is missing or broken.
+        let _ = lab.flush_if_overdue(shelf);
+    }
     match cmd {
         Commands::Connect { path, name } => {
             let shelf_name = lab.connect_shelf(&path, name.as_deref())?;
@@ -247,11 +304,16 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 }
             }
         }
+        Commands::Init { path, name } => super::init::run(lab, path.as_deref(), name.as_deref())?,
         Commands::Query { jse, shelf } => {
             let json: serde_json::Value = serde_json::from_str(&jse)
                 .map_err(|e| crate::error::HypatiaError::Parse(format!("invalid JSON: {e}")))?;
+            let semantic = uses_similar(&json);
             let result = lab.query(&shelf, &json)?;
             print_result(&result);
+            if semantic {
+                warn_if_incomplete(lab, &shelf, "both");
+            }
         }
         Commands::KnowledgeCreate {
             name,
@@ -408,6 +470,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         } => {
             let result = lab.similar(&shelf, &query, &target, limit)?;
             print_result(&result);
+            warn_if_incomplete(lab, &shelf, &target);
         }
         Commands::Export { name, dest } => {
             lab.export_shelf(&name, &dest)?;
@@ -424,12 +487,28 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 source.display()
             );
         }
-        Commands::Backfill { shelf, reembed } => {
+        Commands::Backfill {
+            shelf,
+            reembed,
+            status,
+        } => {
+            if status {
+                let debt = lab.embedding_debt(&shelf)?;
+                println!("{}", serde_json::to_string_pretty(&debt)?);
+                return Ok(());
+            }
             let stats = lab.backfill_vectors_with_reembed(&shelf, reembed)?;
             println!(
                 "Backfill complete: {} vectors created, {} skipped, {} errors",
                 stats.created, stats.skipped, stats.errors
             );
+            // Embedding is this command's only job: failed entries are a failure.
+            if stats.errors > 0 {
+                return Err(crate::error::HypatiaError::Embedding(format!(
+                    "{} entries could not be embedded and stay pending",
+                    stats.errors
+                )));
+            }
         }
         Commands::ArchiveStore { file, name, shelf } => {
             let file_name = file
@@ -554,19 +633,26 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 println!("  ({} unsummarized messages)", result.rows.len());
             }
         }
-        Commands::Model(cmd) => execute_model_command(cmd)?,
+        Commands::Model(cmd) => execute_model_command(lab, cmd)?,
         Commands::Repl => unreachable!(),
     }
     Ok(())
 }
 
-fn execute_model_command(cmd: ModelCommands) -> crate::error::Result<()> {
+fn execute_model_command(lab: &mut Lab, cmd: ModelCommands) -> crate::error::Result<()> {
     match cmd {
+        ModelCommands::Install {
+            name,
+            shelf,
+            revision,
+        } => super::model_install::run(lab, &name, &shelf, &revision)?,
         ModelCommands::List => {
             let models = crate::embedding::config::list_local_models();
             if models.is_empty() {
                 println!("No models found in ~/.hypatia/models/");
-                println!("Use 'hypatia model register <name> <path>' to register a model.");
+                println!(
+                    "Use 'hypatia model install BAAI/bge-m3' to download one, or 'hypatia model register <name> <path>' to register a local directory."
+                );
             } else {
                 for (name, path) in &models {
                     // Show symlink target if applicable
@@ -632,6 +718,27 @@ fn execute_model_command(cmd: ModelCommands) -> crate::error::Result<()> {
     Ok(())
 }
 
+/// Semantic results cannot include entries that have no vector yet; say so on stderr.
+/// `target` is the searched catalog: "knowledge", "statement" or "both".
+pub(crate) fn warn_if_incomplete(lab: &Lab, shelf: &str, target: &str) {
+    let Ok(debt) = lab.embedding_debt(shelf) else {
+        return;
+    };
+    let pending = match target {
+        "knowledge" => debt.pending_knowledge,
+        "statement" => debt.pending_statement,
+        _ => debt.pending_knowledge + debt.pending_statement,
+    };
+    if pending > 0 {
+        eprintln!(
+            "note: {pending} entries are not embedded yet, so results may be incomplete; run `hypatia backfill -s {shelf}`"
+        );
+        if let Some(paused) = debt.paused {
+            eprintln!("note: automatic embedding is paused: {}", paused.reason);
+        }
+    }
+}
+
 fn print_result(result: &QueryResult) {
     if result.rows.is_empty() {
         println!("No results found.");
@@ -662,6 +769,27 @@ mod tests {
                 check_subcommand(sub2);
             }
         }
+    }
+
+    #[test]
+    fn commands_on_a_shelf_settle_its_debt_except_backfill_and_import() {
+        let shelf = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            cli.command.unwrap().shelf().map(str::to_string)
+        };
+        assert_eq!(
+            shelf(&["hypatia", "similar", "x", "-s", "work"]).as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            shelf(&["hypatia", "knowledge-create", "k"]).as_deref(),
+            Some("default")
+        );
+        assert_eq!(shelf(&["hypatia", "backfill", "-s", "work"]), None);
+        assert_eq!(shelf(&["hypatia", "import", "/tmp/export"]), None);
+        assert_eq!(shelf(&["hypatia", "list"]), None);
+        assert_eq!(shelf(&["hypatia", "init", "/tmp/shelf"]), None);
+        assert_eq!(shelf(&["hypatia", "archive-list", "-s", "work"]), None);
     }
 
     fn check_subcommand(cmd: &clap::Command) {

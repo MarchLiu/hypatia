@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod flush;
 pub mod json_index;
 #[cfg(feature = "legacy-migration")]
 pub mod migrate;

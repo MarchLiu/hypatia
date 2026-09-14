@@ -7,6 +7,13 @@ pub struct EmbeddingConfig {
     pub model_identity: String,
     /// True when a configured model name or local artifact fingerprint is available.
     pub model_identity_trusted: bool,
+    /// The model shelf.toml names, if any (`Org/Name` or a path).
+    pub model: Option<String>,
+    /// Why a configured local model cannot be used (not installed, or broken).
+    pub local_unavailable: Option<String>,
+    /// Embed writes later, a batch at a time (the default); `false` embeds each write as it
+    /// is saved.
+    pub defer: bool,
     /// Which provider to use: "local" (ONNX) or "remote" (HTTP API).
     pub provider: ProviderKind,
     /// Local ONNX settings.
@@ -74,6 +81,8 @@ pub(crate) struct EmbeddingToml {
     api_url: Option<String>,
     api_key_env: Option<String>,
     api_model: Option<String>,
+    /// Write it to shelf.toml only to opt out: older binaries refuse unknown keys.
+    defer: Option<bool>,
 }
 
 impl Default for EmbeddingToml {
@@ -89,6 +98,7 @@ impl Default for EmbeddingToml {
             api_url: None,
             api_key_env: None,
             api_model: None,
+            defer: None,
         }
     }
 }
@@ -110,17 +120,38 @@ pub struct ResolvedModel {
 /// 2. HF name like "BAAI/bge-m3" → look in `~/.hypatia/models/BAAI/bge-m3/`
 /// 3. Not found → look in HF cache `~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/<hash>/`
 pub fn resolve_model(model_ref: &str) -> Result<ResolvedModel, String> {
+    resolve_installed_model(model_ref)?.ok_or_else(|| {
+        if Path::new(model_ref).is_absolute() {
+            format!("model directory does not exist: {model_ref}")
+        } else {
+            format!(
+                "model '{}' not found in ~/.hypatia/models/ or HuggingFace cache",
+                model_ref
+            )
+        }
+    })
+}
+
+/// Like [`resolve_model`], but `Ok(None)` when the model is simply not installed yet.
+fn resolve_installed_model(model_ref: &str) -> Result<Option<ResolvedModel>, String> {
+    locate_model(model_ref)?
+        .map(|dir| resolve_model_dir(&dir, model_ref))
+        .transpose()
+}
+
+/// Find the directory a model reference points at, without validating its contents.
+fn locate_model(model_ref: &str) -> Result<Option<PathBuf>, String> {
     let path = PathBuf::from(model_ref);
 
-    // Case 1: Absolute path
+    // Case 1: Absolute path (missing means not installed yet)
     if path.is_absolute() {
-        return resolve_model_dir(&path, model_ref);
+        return Ok(path.exists().then_some(path));
     }
 
     // Case 2: ~/.hypatia/models/<org>/<name>/
     let hypatia_model_dir = dirs_home().join(".hypatia").join("models").join(model_ref);
     if hypatia_model_dir.is_dir() {
-        return resolve_model_dir(&hypatia_model_dir, model_ref);
+        return Ok(Some(hypatia_model_dir));
     }
 
     // Case 3: HuggingFace cache
@@ -136,15 +167,11 @@ pub fn resolve_model(model_ref: &str) -> Result<ResolvedModel, String> {
         // Look for the latest snapshot
         let snapshots_dir = hf_cache.join("snapshots");
         if snapshots_dir.is_dir() {
-            let latest = find_latest_snapshot(&snapshots_dir)?;
-            return resolve_model_dir(&latest, model_ref);
+            return find_latest_snapshot(&snapshots_dir).map(Some);
         }
     }
 
-    Err(format!(
-        "model '{}' not found in ~/.hypatia/models/ or HuggingFace cache",
-        model_ref
-    ))
+    Ok(None)
 }
 
 /// Within a resolved model directory, find the ONNX model and tokenizer files.
@@ -468,6 +495,11 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Where named models live, as `<Org>/<Name>` directories: `~/.hypatia/models`.
+pub fn models_dir() -> PathBuf {
+    dirs_home().join(".hypatia").join("models")
+}
+
 #[cfg(not(unix))]
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("{e}"))?;
@@ -546,16 +578,34 @@ impl EmbeddingConfig {
         let default_dims = 1024;
         let dimensions = toml.dimensions.unwrap_or(default_dims);
 
+        let mut local_unavailable = None;
         // Resolve local model paths with priority: model > model_path > shelf_dir defaults
         let (model_path, tokenizer_path) = if let Some(model_ref) = &toml.model {
             // New-style: resolve by HF name, absolute path, or fallback
-            match resolve_model(model_ref) {
-                Ok(resolved) => (resolved.model_path, resolved.tokenizer_path),
-                Err(e) => {
-                    eprintln!(
-                        "warning: model resolution failed for '{}': {}",
-                        model_ref, e
-                    );
+            match resolve_installed_model(model_ref) {
+                Ok(Some(resolved)) => (resolved.model_path, resolved.tokenizer_path),
+                outcome => {
+                    // Not installed yet is normal: semantic search is optional, and this runs
+                    // on every command. Only a broken install is worth a warning.
+                    local_unavailable = Some(match outcome {
+                        Err(e) => {
+                            eprintln!(
+                                "warning: model resolution failed for '{}': {}",
+                                model_ref, e
+                            );
+                            format!("embedding model '{model_ref}' is not usable: {e}")
+                        }
+                        _ if Path::new(model_ref).is_absolute() => {
+                            format!("embedding model directory {model_ref} does not exist")
+                        }
+                        // Only a Hugging Face name like Org/Name can be installed by name.
+                        _ if crate::embedding::install::validate_repo(model_ref).is_ok() => {
+                            format!(
+                                "embedding model '{model_ref}' is not installed; run `hypatia model install {model_ref}`"
+                            )
+                        }
+                        _ => format!("embedding model '{model_ref}' is not installed"),
+                    });
                     // An explicitly selected model must never run a different shelf-local model.
                     // Keep unavailable paths for the selected identity; normal CRUD still works.
                     let unavailable = dirs_home().join(".hypatia").join("models").join(model_ref);
@@ -623,6 +673,9 @@ impl EmbeddingConfig {
         Self {
             model_identity,
             model_identity_trusted,
+            model: toml.model.clone(),
+            local_unavailable,
+            defer: toml.defer.unwrap_or(true),
             provider,
             local,
             remote,
@@ -644,6 +697,18 @@ impl EmbeddingConfig {
     /// Check if the local model files exist.
     pub fn local_files_exist(&self) -> bool {
         self.local.model_path.exists() && self.local.tokenizer_path.exists()
+    }
+
+    /// Point the install hint at `shelf`: without `-s`, `model install` sets up the default
+    /// shelf instead.
+    pub fn for_shelf(&mut self, shelf: &str) {
+        if let (Some(model), Some(reason)) = (&self.model, &mut self.local_unavailable) {
+            let bare = format!("`hypatia model install {model}`");
+            *reason = reason.replace(
+                &bare,
+                &format!("`hypatia model install {model} -s {shelf}`"),
+            );
+        }
     }
 }
 
@@ -731,6 +796,39 @@ mod tests {
     fn resolve_model_nonexistent_hf_name() {
         let result = resolve_model("nonexistent-org/nonexistent-model-xyz");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_missing_absolute_model_path_is_not_installed() {
+        let missing = "/nonexistent-hypatia-model-dir/model";
+        assert!(resolve_installed_model(missing).unwrap().is_none());
+        assert!(
+            resolve_model(missing)
+                .unwrap_err()
+                .contains("does not exist")
+        );
+        let config = EmbeddingConfig::from_parsed(
+            toml::from_str::<EmbeddingToml>(&format!("model = '{missing}'")).unwrap(),
+            Path::new("."),
+        );
+        assert_eq!(
+            config.local_unavailable,
+            Some(format!(
+                "embedding model directory {missing} does not exist"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_missing_model_is_not_installed_but_a_broken_one_is_an_error() {
+        assert!(
+            resolve_installed_model("nonexistent-org/nonexistent-model-xyz")
+                .unwrap()
+                .is_none()
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("model.onnx"), b"fake").unwrap();
+        assert!(resolve_installed_model(dir.path().to_str().unwrap()).is_err());
     }
 
     #[test]

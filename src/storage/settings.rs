@@ -230,6 +230,16 @@ mod tests {
         }
     }
     #[test]
+    fn embedding_is_deferred_unless_opted_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let defer = |text: &str| {
+            ShelfSettings::parse(text, dir.path()).map(|settings| settings.embedding.defer)
+        };
+        assert!(defer("").unwrap());
+        assert!(!defer("[embedding]\ndefer=false").unwrap());
+        assert!(defer("[embedding]\ndefer='no'").is_err());
+    }
+    #[test]
     fn connection_sources_and_redaction() {
         let dir = tempfile::tempdir().unwrap();
         let parse = |connection: &str| {
