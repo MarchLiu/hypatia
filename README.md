@@ -357,31 +357,28 @@ hypatia query '["$statement", ["$k-hop", "Alice", "knows", 3]]'
 
 ## Agent Skills
 
-The binary carries three agent skills: `hypatia` translates natural language into CLI calls, `hypatia-memory` is the automatic memory protocol, and `hypatia-dream` consolidates the graph at the end of a work period. Install them into an agent's user-level skills directory:
+The binary carries three agent skills: `hypatia` turns natural language into CLI calls, `hypatia-memory` is the automatic memory protocol, and `hypatia-dream` consolidates the graph at the end of a work period.
 
 ```bash
-hypatia skill install --agent claude                  # or codex, opencode; repeat --agent for several
+hypatia skill install --agent claude                  # or codex, opencode; comma-separate several
 hypatia skill install --dir ./my-skills               # any directory: <DIR>/<name>/SKILL.md
-hypatia skill install --agent claude --skill hypatia  # one skill only
-hypatia skill status --agent claude                   # where each skill lives and whether it is current
+hypatia skill status --agent claude                   # where each skill is, and whether it is current
 ```
 
 | `--agent` | Directory |
 |---|---|
 | `claude` | `~/.claude/skills` |
-| `codex` | `~/.agents/skills`, the cross-agent location Codex now uses. Its older `~/.codex/skills` is deprecated. |
-| `opencode` | `~/.config/opencode/skills`, or `$OPENCODE_CONFIG_DIR/skills`. OpenCode also loads the two directories above. |
+| `codex` | `~/.agents/skills` |
+| `opencode` | `~/.config/opencode/skills`, or `$OPENCODE_CONFIG_DIR/skills` |
 
-- OpenCode also loads the Claude Code and cross-agent directories, and Codex still reads its deprecated `~/.codex/skills`. `install` and `status` warn when a same-name copy there is not current, since it could shadow the managed one.
-- An installed copy always matches the binary that wrote it. After upgrading hypatia, run `install` again: copies it wrote earlier are updated in place.
-- A copy you edited, or one hypatia did not install, is left alone and reported, and `install` exits non-zero. Add `--force` to overwrite it.
-- Start a new agent session to pick up newly installed skills.
-- `hypatia-memory` is triggered by host hooks, not by the skill file alone. The Codex and OpenCode hook installers are in `codex-integration/` and `opencode-integration/`.
-- DSH users get these skills from the `dsh-hypatia` plugin and need no install.
+- Run `install` again after upgrading hypatia. Copies it installed are updated; a copy you edited, or one hypatia did not install, is kept unless you pass `--force`.
+- `install` and `status` also warn about stale copies of a skill in other directories the host reads.
+- `hypatia-memory` needs host hooks to trigger. The Codex and OpenCode hook installers are in `codex-integration/` and `opencode-integration/`.
+- DSH users get these skills from the `dsh-hypatia` plugin.
 
 ## MCP Server
 
-`hypatia mcp` serves the knowledge graph to an agent over the Model Context Protocol, using the stdio transport.
+`hypatia mcp` serves the knowledge graph to an agent over the Model Context Protocol (stdio).
 
 ```bash
 claude mcp add hypatia -- hypatia mcp
@@ -394,11 +391,10 @@ command = "hypatia"
 args = ["mcp"]
 ```
 
-- Tools cover the data plane: `query`, `search`, `similar`, `session_current`, knowledge and statement create/read/update/delete, archives, `list_shelves`, `shelf_status`, and a bounded `backfill`. Every tool that works on a shelf takes an optional `shelf`, which defaults to `default`.
-- Connecting shelves, `init`, `model install`, `export` and `import` stay in the CLI. The server reads shelf configuration once at start, so restart it after running any of them.
-- Writes return the shelf's embedding debt, so an agent can tell when fresh entries are not yet found by `similar`.
-- Resources: `hypatia://{shelf}/status`, `hypatia://{shelf}/knowledge/{name}` and `hypatia://{shelf}/statement/{head}/{relation}/{tail}`, with each segment percent-encoded.
-- The server drops the local model after every request, so several agent sessions do not each keep a full copy loaded. Measured with bge-m3 on macOS, an idle server's physical footprint is about 50 to 540 MB instead of 1.5 GB (its RSS stays near 0.9 GB, because the allocator keeps freed pages for the next load), and each semantic call pays about 1.8 s to reload the model.
+- Tools: `query`, `search`, `similar`, `session_current`, knowledge and statement create/read/update/delete, archives, `list_shelves`, `shelf_status`, and a bounded `backfill`. `connect`, `init`, `model install`, `export` and `import` stay in the CLI.
+- Resources: `hypatia://{shelf}/status`, `hypatia://{shelf}/knowledge/{name}` and `hypatia://{shelf}/statement/{head}/{relation}/{tail}`.
+- Writes return the shelf's embedding debt, so an agent knows when new entries are not yet found by `similar`.
+- The local model is loaded only for the request that needs it and released afterwards. The server reads shelf configuration once at start: restart it after `model install`, `connect` or `init`.
 - The skills still decide when to remember and how to link; install them with `hypatia skill install`.
 
 ## Architecture
