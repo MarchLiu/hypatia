@@ -9,6 +9,9 @@ pub struct EmbeddingConfig {
     pub model_identity_trusted: bool,
     /// Why a configured local model cannot be used (not installed, or broken).
     pub local_unavailable: Option<String>,
+    /// Embed writes later, a batch at a time (the default); `false` embeds each write as it
+    /// is saved.
+    pub defer: bool,
     /// Which provider to use: "local" (ONNX) or "remote" (HTTP API).
     pub provider: ProviderKind,
     /// Local ONNX settings.
@@ -76,6 +79,8 @@ pub(crate) struct EmbeddingToml {
     api_url: Option<String>,
     api_key_env: Option<String>,
     api_model: Option<String>,
+    /// Write it to shelf.toml only to opt out: older binaries refuse unknown keys.
+    defer: Option<bool>,
 }
 
 impl Default for EmbeddingToml {
@@ -91,6 +96,7 @@ impl Default for EmbeddingToml {
             api_url: None,
             api_key_env: None,
             api_model: None,
+            defer: None,
         }
     }
 }
@@ -652,6 +658,7 @@ impl EmbeddingConfig {
             model_identity,
             model_identity_trusted,
             local_unavailable,
+            defer: toml.defer.unwrap_or(true),
             provider,
             local,
             remote,

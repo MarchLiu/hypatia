@@ -719,6 +719,43 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             .get(0);
         Ok(n as usize)
     }
+    /// Whether this version of an entry still lacks a vector.
+    pub fn is_pending(&self, catalog: &str, key: &str, version: i64) -> Result<bool> {
+        let (table, key_column) = catalog_info(catalog)?;
+        Ok(self
+            .client
+            .borrow_mut()
+            .query_one(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE {}=$1 AND content_version=$2 AND embedding IS NULL)",
+                    self.table(table),
+                    ident(key_column)
+                ),
+                &[&key, &version],
+            )
+            .map_err(pg_error)?
+            .get(0))
+    }
+    /// Pending entries across both catalogs, counted no further than `limit` in each.
+    pub fn pending_up_to(&self, limit: i64) -> Result<usize> {
+        let (knowledge, _) = catalog_info("knowledge")?;
+        let (statement, _) = catalog_info("statement")?;
+        let n: i64 = self
+            .client
+            .borrow_mut()
+            .query_one(
+                &format!(
+                    "SELECT (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL LIMIT $1) k)
+                          + (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL LIMIT $1) s)",
+                    self.table(knowledge),
+                    self.table(statement)
+                ),
+                &[&limit],
+            )
+            .map_err(pg_error)?
+            .get(0);
+        Ok(n as usize)
+    }
     /// Up to `limit` pending entries across both catalogs, most recently written first.
     /// Returns (catalog, key, content, version).
     pub fn newest_missing_embeddings(
@@ -769,6 +806,41 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
                 &[&key, &value],
             )
             .map_err(pg_error)?;
+        Ok(())
+    }
+    /// Reads and rewrites one value under a transaction lock on its key, so a concurrent
+    /// writer's update is never lost. `change` returns the new value, or `None` to keep it;
+    /// it runs while the connection is borrowed and must not use the store.
+    pub fn update_meta_value(
+        &self,
+        key: &str,
+        change: impl FnOnce(Option<String>) -> Result<Option<String>>,
+    ) -> Result<()> {
+        let mut client = self.client.borrow_mut();
+        let mut tx = client.transaction().map_err(pg_error)?;
+        tx.query_one(
+            "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1,0))",
+            &[&format!("hypatia:{}:{key}", self.schema)],
+        )
+        .map_err(pg_error)?;
+        let current = tx
+            .query_opt(
+                &format!("SELECT v FROM {} WHERE k=$1", self.table("meta")),
+                &[&key],
+            )
+            .map_err(pg_error)?
+            .map(|r| r.get(0));
+        if let Some(value) = change(current)? {
+            tx.execute(
+                &format!(
+                    "INSERT INTO {}(k,v) VALUES($1,$2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                    self.table("meta")
+                ),
+                &[&key, &value],
+            )
+            .map_err(pg_error)?;
+        }
+        tx.commit().map_err(pg_error)?;
         Ok(())
     }
     /// Explicit re-embedding reset: drops every vector and rebinds the identity to `metadata`.

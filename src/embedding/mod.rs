@@ -4,4 +4,6 @@ pub mod provider;
 
 pub use config::EmbeddingConfig;
 pub use config::PoolingStrategy;
-pub use provider::{EmbeddingProvider, OnnxProvider, RemoteApiProvider, build_provider};
+pub use provider::{
+    BatchFailure, BatchOutcome, EmbeddingProvider, OnnxProvider, RemoteApiProvider, build_provider,
+};

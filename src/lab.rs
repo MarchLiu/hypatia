@@ -50,10 +50,13 @@ impl Lab {
     // --- JSE Query ---
 
     pub fn query(&mut self, shelf_name: &str, jse: &serde_json::Value) -> Result<QueryResult> {
-        let shelf = self.shelf_manager.get(shelf_name).ok_or_else(|| {
+        let shelf = self.shelf_manager.get_mut(shelf_name).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf_name}' is not connected"))
         })?;
-        Evaluator::execute(jse, shelf)
+        if uses_similar(jse) {
+            shelf.flush_before_similar();
+        }
+        Evaluator::execute(jse, &*shelf)
     }
 
     // --- Knowledge CRUD ---
@@ -143,15 +146,16 @@ impl Lab {
     // --- Similarity search ---
 
     pub fn similar(
-        &self,
+        &mut self,
         shelf: &str,
         query: &str,
         target: &str,
         limit: i64,
     ) -> Result<QueryResult> {
-        let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
+        let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
+        shelf_ref.flush_before_similar();
 
         let opts = SearchOpts {
             catalog: None,
@@ -211,6 +215,14 @@ impl Lab {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
         shelf_ref.embedding_debt()
+    }
+
+    /// When a command on `shelf` begins: pays embedding debt that has waited too long.
+    pub fn flush_if_overdue(&mut self, shelf: &str) -> Result<()> {
+        let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        shelf_ref.flush_if_overdue()
     }
 
     // --- Archive files ---
@@ -354,11 +366,27 @@ impl Lab {
         }
         shelf_ref.rebuild_vector_indexes()?;
         // Bookkeeping only: the vectors are in, so a failure here must not fail the backfill.
-        if let Err(e) = shelf_ref.settle_pending() {
+        if let Err(e) = shelf_ref
+            .settle_pending()
+            .and_then(|_| shelf_ref.record_backfill(stats.created, stats.errors))
+        {
             eprintln!("warning: could not update embedding bookkeeping: {e}");
         }
 
         Ok(stats)
+    }
+}
+
+/// Whether a JSE expression contains a `$similar` operator anywhere.
+pub fn uses_similar(jse: &serde_json::Value) -> bool {
+    match jse {
+        serde_json::Value::Array(items) => {
+            // An operator takes an argument; a lone "$similar" is data.
+            (items.len() > 1 && items[0].as_str() == Some("$similar"))
+                || items.iter().any(uses_similar)
+        }
+        serde_json::Value::Object(fields) => fields.values().any(uses_similar),
+        _ => false,
     }
 }
 
@@ -560,6 +588,7 @@ mod backfill_tests {
         assert!(!mismatched(&lab));
         lab.create_knowledge("test", "kept", Content::new("saved"))
             .unwrap();
+        lab.backfill_vectors("test").unwrap();
         assert_eq!(vectors(&lab), 1);
         drop(lab);
 
@@ -615,8 +644,13 @@ mod backfill_tests {
     fn vectors_are_never_written_under_an_unknown_identity() {
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        // No model name and no model files: the identity is only a placeholder.
-        std::fs::write(dir.path().join("shelf.toml"), "[embedding]\ndimensions=3\n").unwrap();
+        // No model name and no model files: the identity is only a placeholder. Embedding on
+        // write checks the synchronous path; the flush below checks the deferred one.
+        std::fs::write(
+            dir.path().join("shelf.toml"),
+            "[embedding]\ndimensions=3\ndefer=false\n",
+        )
+        .unwrap();
         let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
         manager.connect(dir.path(), Some("test")).unwrap();
         manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
@@ -625,8 +659,62 @@ mod backfill_tests {
         };
         lab.create_knowledge("test", "k", Content::new("x"))
             .unwrap();
-        let backend = &lab.shelf_manager.get("test").unwrap().backend;
-        assert_eq!(backend.embedding_row_count("knowledge").unwrap(), 0);
+        let shelf = lab.shelf_manager.get_mut("test").unwrap();
+        assert_eq!(shelf.flush_pending(128).unwrap().installed, 0);
+        assert_eq!(shelf.backend.embedding_row_count("knowledge").unwrap(), 0);
+    }
+    #[test]
+    fn semantic_reads_embed_recent_local_writes_first() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("shelf.toml"),
+            "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n",
+        )
+        .unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        lab.create_knowledge("test", "one", Content::new("first"))
+            .unwrap();
+        // Far below the write threshold: the write only notes the debt.
+        assert_eq!(lab.embedding_debt("test").unwrap().pending_knowledge, 1);
+        assert_eq!(
+            lab.similar("test", "first", "knowledge", 5)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        lab.create_knowledge("test", "two", Content::new("second"))
+            .unwrap();
+        let query = serde_json::json!(["$knowledge", ["$similar", "second"]]);
+        assert!(!lab.query("test", &query).unwrap().rows.is_empty());
+        let debt = lab.embedding_debt("test").unwrap();
+        assert_eq!((debt.pending_knowledge, debt.pending_since), (0, None));
+    }
+    #[test]
+    fn similar_operators_are_found_anywhere_in_a_query() {
+        use serde_json::json;
+        assert!(uses_similar(&json!(["$knowledge", ["$similar", "x"]])));
+        assert!(uses_similar(&json!([
+            "$knowledge",
+            ["$and", ["$eq", "name", "a"], ["$similar", "x"]]
+        ])));
+        assert!(uses_similar(&json!({"any": ["$similar", "x"]})));
+        // The word as data is not the operator.
+        assert!(!uses_similar(&json!([
+            "$knowledge",
+            ["$eq", "name", "$similar"]
+        ])));
+        assert!(!uses_similar(&json!(["$knowledge", ["$search", "x"]])));
+        assert!(!uses_similar(&json!([
+            "$knowledge",
+            ["$has", "tags", ["$similar"]]
+        ])));
     }
 }
 

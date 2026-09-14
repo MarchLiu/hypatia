@@ -368,6 +368,23 @@ impl ShelfBackend {
             Backend::Postgres(pg) => pg.pending_count(catalog),
         }
     }
+    /// Whether this version of an entry still lacks a vector.
+    pub fn is_pending(&self, catalog: &str, key: &str, version: i64) -> Result<bool> {
+        match &self.inner {
+            Backend::Local(l) => l.store.is_pending(catalog, key, version),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.is_pending(catalog, key, version),
+        }
+    }
+    /// Pending entries across both catalogs, counted no further than `limit` in each, so the
+    /// cost never grows with the debt.
+    pub fn pending_up_to(&self, limit: usize) -> Result<usize> {
+        match &self.inner {
+            Backend::Local(l) => l.store.pending_up_to(limit as i64),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.pending_up_to(limit as i64),
+        }
+    }
     /// Why no vector can be written right now, if so. Checked before embedding anything, so
     /// a flush never computes vectors only to have them refused.
     pub fn vectors_blocked(&self) -> Result<Option<Blocked>> {
@@ -419,7 +436,35 @@ impl ShelfBackend {
             #[cfg(feature = "postgres-backend")]
             Backend::Postgres(pg) => pg.meta_value(FLUSH_STATE_KEY)?,
         };
-        let mut state = FlushState::for_identity(&self.identity.model);
+        Ok(Self::read_flush_state(&self.identity.model, json))
+    }
+    /// Reads, changes and writes the flush state as one step, so concurrent processes never
+    /// lose each other's updates. Writes only if `change` changed something.
+    pub fn update_flush_state(
+        &mut self,
+        change: impl FnOnce(&mut FlushState),
+    ) -> Result<FlushState> {
+        let mut updated = FlushState::default();
+        let identity = &self.identity.model;
+        let update = |json: Option<String>| -> Result<Option<String>> {
+            let mut state = Self::read_flush_state(identity, json);
+            let before = state.clone();
+            change(&mut state);
+            let write = (state != before)
+                .then(|| serde_json::to_string(&state))
+                .transpose()?;
+            updated = state;
+            Ok(write)
+        };
+        match &self.inner {
+            Backend::Local(l) => l.store.update_meta_value(FLUSH_STATE_KEY, update)?,
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.update_meta_value(FLUSH_STATE_KEY, update)?,
+        }
+        Ok(updated)
+    }
+    fn read_flush_state(identity: &str, json: Option<String>) -> FlushState {
+        let mut state = FlushState::for_identity(identity);
         if let Some(stored) = json.and_then(|json| serde_json::from_str::<FlushState>(&json).ok()) {
             if stored.identity == state.identity {
                 state = stored;
@@ -427,15 +472,7 @@ impl ShelfBackend {
                 state.pending_since = stored.pending_since;
             }
         }
-        Ok(state)
-    }
-    pub fn save_flush_state(&mut self, state: &FlushState) -> Result<()> {
-        let json = serde_json::to_string(state)?;
-        match &self.inner {
-            Backend::Local(l) => l.store.set_meta_value(FLUSH_STATE_KEY, &json),
-            #[cfg(feature = "postgres-backend")]
-            Backend::Postgres(pg) => pg.set_meta_value(FLUSH_STATE_KEY, &json),
-        }
+        state
     }
 
     /// Explicit reembed: drops every vector and rebinds the identity to `metadata`.

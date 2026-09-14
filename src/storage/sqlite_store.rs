@@ -806,6 +806,33 @@ impl SqliteStore {
         Ok(n as usize)
     }
 
+    /// Whether this version of an entry still lacks a vector.
+    pub fn is_pending(&self, catalog: &str, key: &str, version: i64) -> Result<bool> {
+        let (table, key_column) = catalog_table(catalog)?;
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM {table} WHERE {key_column}=?1 AND content_version=?2 AND embedding IS NULL)"
+            ),
+            rusqlite::params![key, version],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Pending entries across both catalogs, counted no further than `limit` in each.
+    pub fn pending_up_to(&self, limit: i64) -> Result<usize> {
+        let (knowledge, _) = catalog_table("knowledge")?;
+        let (statement, _) = catalog_table("statement")?;
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "SELECT (SELECT count(*) FROM (SELECT 1 FROM {knowledge} WHERE embedding IS NULL LIMIT ?1))
+                      + (SELECT count(*) FROM (SELECT 1 FROM {statement} WHERE embedding IS NULL LIMIT ?1))"
+            ),
+            [limit],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
     /// Up to `limit` pending entries across both catalogs, most recently written first.
     /// Returns (catalog, key, content, version).
     pub fn newest_missing_embeddings(
@@ -844,6 +871,31 @@ impl SqliteStore {
             "INSERT INTO meta(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             [key, value],
         )?;
+        Ok(())
+    }
+
+    /// Reads and rewrites one value under the database write lock, so a concurrent writer's
+    /// update is never lost. `change` returns the new value, or `None` to keep the old one;
+    /// it runs inside the transaction and must not use the store.
+    pub fn update_meta_value(
+        &self,
+        key: &str,
+        change: impl FnOnce(Option<String>) -> Result<Option<String>>,
+    ) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let current = tx
+            .query_row("SELECT v FROM meta WHERE k=?1", [key], |r| r.get(0))
+            .optional()?;
+        if let Some(value) = change(current)? {
+            tx.execute(
+                "INSERT INTO meta(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                [key, value.as_str()],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::lab::Lab;
+use crate::lab::{Lab, uses_similar};
 use crate::model::{Content, QueryResult, SearchOpts, StatementKey, Synonyms};
 
 #[derive(Parser)]
@@ -204,6 +204,36 @@ enum ModelCommands {
     },
 }
 
+impl Commands {
+    /// The shelf whose overdue embedding debt a command pays before it runs. `backfill` and
+    /// `import` handle vectors themselves, `export` copies the shelf as it is, and
+    /// `disconnect` and the archive file lookups never read entries.
+    fn shelf(&self) -> Option<&str> {
+        match self {
+            Self::Query { shelf, .. }
+            | Self::KnowledgeCreate { shelf, .. }
+            | Self::KnowledgeGet { shelf, .. }
+            | Self::KnowledgeDelete { shelf, .. }
+            | Self::StatementDelete { shelf, .. }
+            | Self::StatementCreate { shelf, .. }
+            | Self::Search { shelf, .. }
+            | Self::Similar { shelf, .. }
+            | Self::ArchiveStore { shelf, .. }
+            | Self::SessionCurrent { shelf, .. } => Some(shelf),
+            Self::Connect { .. }
+            | Self::Disconnect { .. }
+            | Self::List
+            | Self::Export { .. }
+            | Self::Import { .. }
+            | Self::Backfill { .. }
+            | Self::ArchiveGet { .. }
+            | Self::ArchiveList { .. }
+            | Self::Model(_)
+            | Self::Repl => None,
+        }
+    }
+}
+
 pub fn run() -> crate::error::Result<()> {
     let cli = Cli::parse();
     let mut lab = Lab::new()?;
@@ -218,6 +248,10 @@ pub fn run() -> crate::error::Result<()> {
 }
 
 fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
+    if let Some(shelf) = cmd.shelf() {
+        // Best-effort: the command itself reports a shelf that is missing or broken.
+        let _ = lab.flush_if_overdue(shelf);
+    }
     match cmd {
         Commands::Connect { path, name } => {
             let shelf_name = lab.connect_shelf(&path, name.as_deref())?;
@@ -671,18 +705,9 @@ pub(crate) fn warn_if_incomplete(lab: &Lab, shelf: &str, target: &str) {
         eprintln!(
             "note: {pending} entries are not embedded yet, so results may be incomplete; run `hypatia backfill -s {shelf}`"
         );
-    }
-}
-
-/// Whether a JSE expression contains a `$similar` operator anywhere.
-pub(crate) fn uses_similar(jse: &serde_json::Value) -> bool {
-    match jse {
-        serde_json::Value::Array(items) => {
-            items.first().and_then(|op| op.as_str()) == Some("$similar")
-                || items.iter().any(uses_similar)
+        if let Some(paused) = debt.paused {
+            eprintln!("note: automatic embedding is paused: {}", paused.reason);
         }
-        serde_json::Value::Object(fields) => fields.values().any(uses_similar),
-        _ => false,
     }
 }
 
@@ -719,20 +744,23 @@ mod tests {
     }
 
     #[test]
-    fn similar_operators_are_found_anywhere_in_a_query() {
-        use serde_json::json;
-        assert!(uses_similar(&json!(["$knowledge", ["$similar", "x"]])));
-        assert!(uses_similar(&json!([
-            "$knowledge",
-            ["$and", ["$eq", "name", "a"], ["$similar", "x"]]
-        ])));
-        assert!(uses_similar(&json!({"any": ["$similar", "x"]})));
-        // The word as data is not the operator.
-        assert!(!uses_similar(&json!([
-            "$knowledge",
-            ["$eq", "name", "$similar"]
-        ])));
-        assert!(!uses_similar(&json!(["$knowledge", ["$search", "x"]])));
+    fn commands_on_a_shelf_settle_its_debt_except_backfill_and_import() {
+        let shelf = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            cli.command.unwrap().shelf().map(str::to_string)
+        };
+        assert_eq!(
+            shelf(&["hypatia", "similar", "x", "-s", "work"]).as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            shelf(&["hypatia", "knowledge-create", "k"]).as_deref(),
+            Some("default")
+        );
+        assert_eq!(shelf(&["hypatia", "backfill", "-s", "work"]), None);
+        assert_eq!(shelf(&["hypatia", "import", "/tmp/export"]), None);
+        assert_eq!(shelf(&["hypatia", "list"]), None);
+        assert_eq!(shelf(&["hypatia", "archive-list", "-s", "work"]), None);
     }
 
     fn check_subcommand(cmd: &clap::Command) {

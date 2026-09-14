@@ -19,6 +19,13 @@ pub trait EmbeddingProvider {
         texts.iter().map(|t| self.embed(t)).collect()
     }
 
+    /// One fail-fast attempt at a batch, for automatic flushes: no retries, and no more
+    /// requests than it takes to find the inputs that fail, so the command that triggered the
+    /// flush never waits long on a struggling provider. `Err` means nothing got through.
+    fn try_embed_batch(&self, texts: &[&str]) -> Result<BatchOutcome, BatchFailure> {
+        Ok(BatchOutcome::from_results(self.embed_batch(texts)))
+    }
+
     /// Vector dimensions of this provider.
     fn dimensions(&self) -> usize;
 
@@ -492,14 +499,172 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 const API_TIMEOUT_SECS: u64 = 60;
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 500;
+/// An automatic flush runs inside another command, so it gets one short attempt.
+const QUICK_TIMEOUT_SECS: u64 = 10;
 
 /// Inputs per request: the backfill page size, well under OpenAI's limit.
 const REMOTE_BATCH: usize = 128;
+/// Largest response body read: 128 vectors of 4096 dimensions stay far below it.
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// A request that failed for good. `status` is set when the server rejected it.
+/// Server error bodies can be whole HTML pages: messages keep only their start.
+fn excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let text = text.trim();
+    match text.char_indices().nth(MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
+/// Why nothing in an automatic batch got through, so the flush can decide what to do next.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BatchFailure {
+    /// The server turned the request down as sent (400, 413 and other 4xx), even with single
+    /// inputs.
+    Rejected(String),
+    /// The key, model or endpoint is wrong (401, 403, 404, no key, a response that is not
+    /// JSON); retrying will not help.
+    Refused(String),
+    /// Network trouble, rate limits or server errors: worth retrying later.
+    Transient(String),
+}
+
+impl BatchFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Rejected(message) | Self::Refused(message) | Self::Transient(message) => message,
+        }
+    }
+}
+
+/// What an automatic batch produced.
+#[derive(Debug)]
+pub struct BatchOutcome {
+    /// One result per input, in order.
+    pub vectors: Vec<Result<Vec<f32>, HypatiaError>>,
+    /// Inputs that failed on their own, while the provider handled others.
+    pub refused_alone: Vec<usize>,
+    /// Largest batch the server accepted after turning a larger one down as too large.
+    pub accepted_size: Option<usize>,
+}
+
+impl BatchOutcome {
+    /// Results with nothing learned about the server beyond them: an input failing beside
+    /// others that succeeded failed on its own.
+    pub fn from_results(vectors: Vec<Result<Vec<f32>, HypatiaError>>) -> Self {
+        let refused_alone = if vectors.iter().any(Result::is_ok) {
+            (0..vectors.len())
+                .filter(|&i| vectors[i].is_err())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            vectors,
+            refused_alone,
+            accepted_size: None,
+        }
+    }
+}
+
+/// A request that failed for good. `status` is set when the server rejected it; `transient`
+/// when it failed only for reasons that may pass (rate limits, server or network errors).
 struct RequestFailure {
     status: Option<u16>,
+    transient: bool,
     message: String,
+}
+
+impl RequestFailure {
+    /// What this failure says about every request like it.
+    fn kind(&self) -> BatchFailure {
+        let message = self.message.clone();
+        match self.status {
+            _ if self.transient => BatchFailure::Transient(message),
+            None | Some(401 | 403 | 404) => BatchFailure::Refused(message),
+            Some(_) => BatchFailure::Rejected(message),
+        }
+    }
+}
+
+/// Requests an automatic flush may send to find the inputs a server refuses. Refusals come
+/// back fast, and isolating one input among 128 takes about 16 requests.
+const QUICK_BUDGET: usize = 32;
+/// Longest an automatic flush spends on the server, however many requests it has left.
+const QUICK_DEADLINE_SECS: u64 = 30;
+
+/// How one embedding call talks to the server, and what it has learned so far.
+struct Attempt {
+    timeout: std::time::Duration,
+    retries: u32,
+    /// Requests still allowed; `None` for no limit.
+    budget: Option<usize>,
+    /// When to stop sending; `None` for no limit.
+    deadline: Option<std::time::Instant>,
+    /// Whether the server has accepted any request in this call; see `embed_chunk`.
+    proven: bool,
+    /// Whether the server has turned a chunk down as too large (413) in this call.
+    too_large: bool,
+    /// Largest chunk accepted after a 413.
+    accepted_size: Option<usize>,
+    /// What the first failed request said; it explains a call where nothing got through.
+    first_failure: Option<BatchFailure>,
+}
+
+impl Attempt {
+    /// An explicit backfill: full retries, as many requests as it takes.
+    fn thorough() -> Self {
+        Self::new(
+            std::time::Duration::from_secs(API_TIMEOUT_SECS),
+            MAX_RETRIES,
+            None,
+            None,
+        )
+    }
+
+    /// An automatic flush: a short timeout, no retries, a few requests and a few seconds at
+    /// most.
+    fn quick() -> Self {
+        Self::new(
+            std::time::Duration::from_secs(QUICK_TIMEOUT_SECS),
+            0,
+            Some(QUICK_BUDGET),
+            Some(std::time::Duration::from_secs(QUICK_DEADLINE_SECS)),
+        )
+    }
+
+    fn new(
+        timeout: std::time::Duration,
+        retries: u32,
+        budget: Option<usize>,
+        total: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            timeout,
+            retries,
+            budget,
+            deadline: total.map(|total| std::time::Instant::now() + total),
+            proven: false,
+            too_large: false,
+            accepted_size: None,
+            first_failure: None,
+        }
+    }
+}
+
+/// An input left without a vector, and whether it failed on its own.
+struct Failed {
+    error: HypatiaError,
+    alone: bool,
+}
+
+/// An input that failed along with its request.
+fn failed(message: &str) -> Result<Vec<f32>, Failed> {
+    Err(Failed {
+        error: HypatiaError::Embedding(message.into()),
+        alone: false,
+    })
 }
 
 /// Remote embedding API provider (OpenAI-compatible).
@@ -523,6 +688,7 @@ impl RemoteApiProvider {
     fn api_key(&self) -> Result<String, RequestFailure> {
         std::env::var(&self.api_key_env).map_err(|_| RequestFailure {
             status: None,
+            transient: false,
             message: format!("environment variable {} not set", self.api_key_env),
         })
     }
@@ -531,6 +697,21 @@ impl RemoteApiProvider {
     fn request_with_retry(
         &self,
         input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RequestFailure> {
+        self.request(
+            input,
+            std::time::Duration::from_secs(API_TIMEOUT_SECS),
+            MAX_RETRIES,
+        )
+    }
+
+    /// Send an embedding request, retrying rate limits, server errors and network trouble
+    /// up to `retries` times.
+    fn request(
+        &self,
+        input: &serde_json::Value,
+        timeout: std::time::Duration,
+        retries: u32,
     ) -> Result<serde_json::Value, RequestFailure> {
         let api_key = self.api_key()?;
 
@@ -542,15 +723,14 @@ impl RemoteApiProvider {
             request_body["dimensions"] = serde_json::json!(self.dimensions);
         }
 
-        let timeout = std::time::Duration::from_secs(API_TIMEOUT_SECS);
         let mut last_err = None;
 
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..=retries {
             if attempt > 0 {
                 let delay =
                     std::time::Duration::from_millis(RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1));
                 eprintln!(
-                    "    [remote-embed] retry {attempt}/{MAX_RETRIES} after {}ms",
+                    "    [remote-embed] retry {attempt}/{retries} after {}ms",
                     delay.as_millis()
                 );
                 std::thread::sleep(delay);
@@ -569,7 +749,8 @@ impl RemoteApiProvider {
                 Ok(mut response) => {
                     let status = response.status().as_u16();
                     if status >= 400 {
-                        let msg = response.body_mut().read_to_string().unwrap_or_default();
+                        let msg =
+                            excerpt(&response.body_mut().read_to_string().unwrap_or_default());
                         // Rate limits and server errors are transient; any other rejection is
                         // about the request itself and would fail again.
                         if status == 429 || status >= 500 {
@@ -578,13 +759,22 @@ impl RemoteApiProvider {
                         }
                         return Err(RequestFailure {
                             status: Some(status),
+                            transient: false,
                             message: format!("API returned {status}: {msg}"),
                         });
                     }
-                    return response.body_mut().read_json().map_err(|e| RequestFailure {
-                        status: None,
-                        message: format!("failed to parse API response: {e}"),
-                    });
+                    return response
+                        .body_mut()
+                        .with_config()
+                        .limit(MAX_RESPONSE_BYTES)
+                        .read_json()
+                        .map_err(|e| RequestFailure {
+                            status: None,
+                            // A body that is not the expected JSON points at the wrong
+                            // endpoint; a read that failed (timeout, reset) may pass later.
+                            transient: !matches!(&e, ureq::Error::Json(json) if !json.is_io()),
+                            message: format!("failed to parse API response: {e}"),
+                        });
                 }
                 Err(e) => {
                     last_err = Some(format!("request failed: {e}"));
@@ -593,36 +783,46 @@ impl RemoteApiProvider {
             }
         }
 
+        let last_err = last_err.unwrap_or_else(|| "unknown error".into());
         Err(RequestFailure {
             status: None,
-            message: format!(
-                "all {} retries exhausted: {}",
-                MAX_RETRIES,
-                last_err.unwrap_or_else(|| "unknown error".into())
-            ),
+            transient: true,
+            message: if retries == 0 {
+                last_err
+            } else {
+                format!("all {retries} retries exhausted: {last_err}")
+            },
         })
     }
 
     /// One request for the whole chunk. 413 means too large: split in half and retry, down to
-    /// single inputs. 400 is ambiguous: it may refuse the request itself (say, an unsupported
+    /// single inputs. 400 (or 422) is ambiguous: it may refuse the request itself (say, an unsupported
     /// parameter) or just one input. Once the server has accepted any request in this call
     /// (`proven`), a 400 is about an input and the chunk is split; before that, two inputs are
     /// probed first, since either one might be the refused input.
     ///
-    /// Returns the message of a failure every later request would repeat, so the caller can
-    /// stop sending them.
+    /// An input the server turns down alone, once it has accepted other requests, failed on
+    /// its own. Returns the message of a failure every later request would repeat, so the
+    /// caller can stop sending them.
     fn embed_chunk(
         &self,
+        attempt: &mut Attempt,
         chunk: &[&str],
-        proven: &mut bool,
-        results: &mut Vec<Result<Vec<f32>, HypatiaError>>,
+        results: &mut Vec<Result<Vec<f32>, Failed>>,
     ) -> Option<String> {
-        let failure = match self.request_with_retry(&serde_json::json!(chunk)) {
+        let failure = match self.send(attempt, &serde_json::json!(chunk)) {
             Ok(response) => {
-                *proven = true;
+                if attempt.too_large {
+                    attempt.accepted_size = attempt.accepted_size.max(Some(chunk.len()));
+                }
                 match Self::parse_batch(&response, chunk.len()) {
                     Ok(vectors) => results.extend(vectors.into_iter().map(Ok)),
-                    Err(e) => results.extend(chunk.iter().map(|_| Err(same_error(&e)))),
+                    Err(e) => results.extend(chunk.iter().map(|_| {
+                        Err(Failed {
+                            error: same_error(&e),
+                            alone: false,
+                        })
+                    })),
                 }
                 return None;
             }
@@ -630,32 +830,35 @@ impl RemoteApiProvider {
         };
         let splittable = chunk.len() > 1
             && match failure.status {
-                Some(413) => true,
-                Some(400) => *proven || self.probe(chunk, proven),
+                Some(413) => {
+                    attempt.too_large = true;
+                    true
+                }
+                Some(400 | 422) => attempt.proven || self.probe(attempt, chunk),
                 _ => false,
             };
         if splittable {
             let (left, right) = chunk.split_at(chunk.len() / 2);
-            if let Some(fatal) = self.embed_chunk(left, proven, results) {
-                results.extend(
-                    right
-                        .iter()
-                        .map(|_| Err(HypatiaError::Embedding(fatal.clone()))),
-                );
+            if let Some(fatal) = self.embed_chunk(attempt, left, results) {
+                results.extend(right.iter().map(|_| failed(&fatal)));
                 return Some(fatal);
             }
-            return self.embed_chunk(right, proven, results);
+            return self.embed_chunk(attempt, right, results);
         }
-        results.extend(
-            chunk
-                .iter()
-                .map(|_| Err(HypatiaError::Embedding(failure.message.clone()))),
-        );
+        let alone = chunk.len() == 1
+            && attempt.proven
+            && matches!(failure.status, Some(status) if !matches!(status, 401 | 403 | 404));
+        results.extend(chunk.iter().map(|_| {
+            Err(Failed {
+                error: HypatiaError::Embedding(failure.message.clone()),
+                alone,
+            })
+        }));
         // A refused request (bad key, unknown model, rejected parameter) or an unreachable
         // server fails every later request too; a single refused input does not.
         let repeats = match failure.status {
             None | Some(401 | 403 | 404) => true,
-            Some(400) => chunk.len() > 1 && !*proven,
+            Some(400 | 422) => chunk.len() > 1 && !attempt.proven,
             _ => false,
         };
         repeats.then_some(failure.message)
@@ -663,20 +866,76 @@ impl RemoteApiProvider {
 
     /// Whether the server accepts a request at all, tried with the shortest input and then
     /// the longest: either might be the one it refuses.
-    fn probe(&self, chunk: &[&str], proven: &mut bool) -> bool {
+    fn probe(&self, attempt: &mut Attempt, chunk: &[&str]) -> bool {
         let shortest = (0..chunk.len())
             .min_by_key(|&i| chunk[i].len())
             .expect("chunk is nonempty");
         let longest = (0..chunk.len())
             .max_by_key(|&i| chunk[i].len())
             .expect("chunk is nonempty");
-        let accepts = |i: usize| {
-            self.request_with_retry(&serde_json::json!([chunk[i]]))
-                .is_ok()
+        self.send(attempt, &serde_json::json!([chunk[shortest]]))
+            .is_ok()
+            || (longest != shortest
+                && self
+                    .send(attempt, &serde_json::json!([chunk[longest]]))
+                    .is_ok())
+    }
+
+    /// One request under the attempt's timeout, retries, request budget and deadline.
+    fn send(
+        &self,
+        attempt: &mut Attempt,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RequestFailure> {
+        let left = attempt
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        let outcome = match &mut attempt.budget {
+            _ if left.is_some_and(|left| left.is_zero()) => Err(RequestFailure {
+                status: None,
+                transient: true,
+                message: "stopped after too long; `hypatia backfill` tries harder".into(),
+            }),
+            Some(0) => Err(RequestFailure {
+                status: None,
+                transient: true,
+                message: "stopped after too many requests; `hypatia backfill` tries harder".into(),
+            }),
+            budget => {
+                if let Some(requests) = budget {
+                    *requests -= 1;
+                }
+                // The last request must not outlast the deadline either.
+                let timeout = left.map_or(attempt.timeout, |left| attempt.timeout.min(left));
+                self.request(input, timeout, attempt.retries)
+            }
         };
-        let accepted = accepts(shortest) || (longest != shortest && accepts(longest));
-        *proven |= accepted;
-        accepted
+        match &outcome {
+            Ok(_) => attempt.proven = true,
+            Err(failure) => {
+                attempt.first_failure.get_or_insert_with(|| failure.kind());
+            }
+        }
+        outcome
+    }
+
+    /// Embeds `texts` in chunks of `size` under `attempt`, stopping at a failure every later
+    /// request would repeat.
+    fn embed_chunks(
+        &self,
+        attempt: &mut Attempt,
+        texts: &[&str],
+        size: usize,
+    ) -> Vec<Result<Vec<f32>, Failed>> {
+        let mut results = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(size.max(1)) {
+            if let Some(fatal) = self.embed_chunk(attempt, chunk, &mut results) {
+                // Every later request would fail the same way: fail their inputs unsent.
+                results.extend(texts[results.len()..].iter().map(|_| failed(&fatal)));
+                break;
+            }
+        }
+        results
     }
 
     /// Vectors in input order. The spec gives each item an `index`; servers that omit it
@@ -724,10 +983,14 @@ impl RemoteApiProvider {
             .and_then(|e| e.as_array())
             .ok_or_else(|| HypatiaError::Embedding("unexpected API response format".into()))?;
 
+        // A value that is not a number must not quietly shorten the vector.
         let vector: Vec<f32> = embedding
             .iter()
-            .filter_map(|v| v.as_f64().map(|f| f as f32))
-            .collect();
+            .map(|v| v.as_f64().map(|f| f as f32))
+            .collect::<Option<_>>()
+            .ok_or_else(|| {
+                HypatiaError::Embedding("API returned a non-numeric embedding value".into())
+            })?;
 
         if vector.is_empty() {
             return Err(HypatiaError::Embedding(
@@ -748,21 +1011,32 @@ impl EmbeddingProvider for RemoteApiProvider {
     }
 
     fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>, HypatiaError>> {
-        let mut results = Vec::with_capacity(texts.len());
-        // Whether the server has accepted any request yet; see `embed_chunk`.
-        let mut proven = false;
-        for chunk in texts.chunks(REMOTE_BATCH) {
-            if let Some(fatal) = self.embed_chunk(chunk, &mut proven, &mut results) {
-                // Every later request would fail the same way: fail their inputs unsent.
-                results.extend(
-                    texts[results.len()..]
-                        .iter()
-                        .map(|_| Err(HypatiaError::Embedding(fatal.clone()))),
-                );
-                break;
-            }
+        self.embed_chunks(&mut Attempt::thorough(), texts, REMOTE_BATCH)
+            .into_iter()
+            .map(|result| result.map_err(|failed| failed.error))
+            .collect()
+    }
+
+    fn try_embed_batch(&self, texts: &[&str]) -> Result<BatchOutcome, BatchFailure> {
+        let mut attempt = Attempt::quick();
+        let results = self.embed_chunks(&mut attempt, texts, texts.len());
+        if !attempt.proven {
+            // Nothing got through, so the first failure explains the whole batch.
+            return Err(attempt
+                .first_failure
+                .unwrap_or_else(|| BatchFailure::Transient("no request was sent".into())));
         }
-        results
+        let refused_alone = (0..results.len())
+            .filter(|&i| matches!(&results[i], Err(Failed { alone: true, .. })))
+            .collect();
+        Ok(BatchOutcome {
+            vectors: results
+                .into_iter()
+                .map(|result| result.map_err(|failed| failed.error))
+                .collect(),
+            refused_alone,
+            accepted_size: attempt.accepted_size,
+        })
     }
 
     fn dimensions(&self) -> usize {
@@ -865,33 +1139,14 @@ mod tests {
     fn serve(
         respond: impl Fn(&Value) -> (u16, Value) + Send + 'static,
     ) -> (String, std::sync::mpsc::Receiver<Value>) {
-        use std::io::{BufRead, Read, Write};
+        use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
         let (seen, requests) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
-                let body: Value = {
-                    let mut reader = std::io::BufReader::new(&mut stream);
-                    let mut length = 0;
-                    loop {
-                        let mut line = String::new();
-                        reader.read_line(&mut line).unwrap();
-                        let line = line.trim_end();
-                        if line.is_empty() {
-                            break;
-                        }
-                        if let Some((name, value)) = line.split_once(':')
-                            && name.eq_ignore_ascii_case("content-length")
-                        {
-                            length = value.trim().parse().unwrap();
-                        }
-                    }
-                    let mut body = vec![0; length];
-                    reader.read_exact(&mut body).unwrap();
-                    serde_json::from_slice(&body).unwrap()
-                };
+                let body = read_request(&mut stream);
                 let (status, reply) = respond(&body);
                 if seen.send(body).is_err() {
                     return;
@@ -905,6 +1160,44 @@ mod tests {
             }
         });
         (url, requests)
+    }
+
+    /// Reads one request and returns its JSON body.
+    fn read_request(stream: &mut std::net::TcpStream) -> Value {
+        use std::io::{BufRead, Read};
+        let mut reader = std::io::BufReader::new(stream);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// A server answering every request with `raw`, a whole HTTP response sent as is.
+    fn serve_raw(raw: &'static str) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                read_request(&mut stream);
+                let _ = stream.write_all(raw.as_bytes());
+            }
+        });
+        url
     }
 
     /// Input counts of the requests the server has seen, in order.
@@ -1033,5 +1326,159 @@ mod tests {
         assert_eq!(got.len(), 130);
         assert!(got.iter().all(Result::is_err));
         assert_eq!(batch_sizes(&requests), [128]);
+    }
+
+    #[test]
+    fn a_quick_attempt_names_why_nothing_got_through() {
+        let kind = |status: u16| {
+            let (url, requests) = serve(move |_| (status, json!({"error": "no"})));
+            let outcome = remote(&url).try_embed_batch(&["a", "b"]).map(|_| ());
+            let kind = match outcome.unwrap_err() {
+                BatchFailure::Rejected(_) => "rejected",
+                BatchFailure::Refused(_) => "refused",
+                BatchFailure::Transient(_) => "transient",
+            };
+            (kind, batch_sizes(&requests))
+        };
+        for (status, expected, requests) in [
+            // Each input is tried alone: either might be the one refused.
+            (400, "rejected", vec![2, 1, 1]),
+            (413, "rejected", vec![2, 1, 1]),
+            (422, "rejected", vec![2, 1, 1]),
+            // Nothing else is tried again.
+            (401, "refused", vec![2]),
+            (403, "refused", vec![2]),
+            (404, "refused", vec![2]),
+            (429, "transient", vec![2]),
+            (503, "transient", vec![2]),
+        ] {
+            assert_eq!(kind(status), (expected, requests), "{status}");
+        }
+
+        let (url, _requests) = serve(|body| (200, embeddings(&body["input"])));
+        let vectors = remote(&url).try_embed_batch(&["a", "bbb"]).unwrap().vectors;
+        assert_eq!(vectors[1].as_ref().unwrap()[0], 3.0);
+
+        // A missing key is refused before anything is sent; an unreachable server is transient.
+        let mut unset = remote(&url);
+        unset.api_key_env = "HYPATIA_TEST_KEY_THAT_IS_NEVER_SET".into();
+        assert!(matches!(
+            unset.try_embed_batch(&["a"]),
+            Err(BatchFailure::Refused(_))
+        ));
+        // Tests only listen on ephemeral ports, so none can take port 1 from under this one.
+        assert!(matches!(
+            remote("http://127.0.0.1:1/v1/embeddings").try_embed_batch(&["a"]),
+            Err(BatchFailure::Transient(_))
+        ));
+
+        // A body that is not JSON points at the wrong endpoint; one cut short may pass later.
+        let html = serve_raw(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\nConnection: close\r\n\r\n<html></html>",
+        );
+        assert!(matches!(
+            remote(&html).try_embed_batch(&["a"]),
+            Err(BatchFailure::Refused(_))
+        ));
+        let cut = serve_raw(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{\"data\": [",
+        );
+        assert!(matches!(
+            remote(&cut).try_embed_batch(&["a"]),
+            Err(BatchFailure::Transient(_))
+        ));
+    }
+
+    #[test]
+    fn a_quick_attempt_isolates_the_inputs_a_server_refuses() {
+        let (url, requests) = serve(|body| {
+            if body["input"].as_array().unwrap().iter().any(|t| t == "bad") {
+                (400, json!({"error": "input too long"}))
+            } else {
+                (200, embeddings(&body["input"]))
+            }
+        });
+        let outcome = remote(&url)
+            .try_embed_batch(&["xxxx", "bad", "yy", "zzz"])
+            .unwrap();
+        assert_eq!(
+            outcome
+                .vectors
+                .iter()
+                .map(Result::is_ok)
+                .collect::<Vec<_>>(),
+            [true, false, true, true]
+        );
+        assert_eq!(
+            (outcome.refused_alone, outcome.accepted_size),
+            (vec![1], None)
+        );
+        // The batch, a probe with the shortest input, then ordinary splitting.
+        assert_eq!(batch_sizes(&requests), [4, 1, 2, 1, 1, 2]);
+    }
+
+    #[test]
+    fn a_quick_attempt_learns_the_batch_size_a_server_accepts() {
+        let (url, _requests) = serve(|body| {
+            if body["input"].as_array().unwrap().len() > 2 {
+                (413, json!({"error": "too many inputs"}))
+            } else {
+                (200, embeddings(&body["input"]))
+            }
+        });
+        let outcome = remote(&url)
+            .try_embed_batch(&["a", "b", "c", "d", "e"])
+            .unwrap();
+        assert!(outcome.vectors.iter().all(Result::is_ok));
+        assert_eq!(
+            (outcome.refused_alone, outcome.accepted_size),
+            (vec![], Some(2))
+        );
+    }
+
+    #[test]
+    fn a_quick_attempt_gives_up_after_a_few_requests() {
+        let (url, requests) = serve(|_| (413, json!({"error": "too large"})));
+        let owned = texts(128);
+        let inputs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert!(matches!(
+            remote(&url).try_embed_batch(&inputs),
+            Err(BatchFailure::Rejected(_))
+        ));
+        assert_eq!(batch_sizes(&requests).len(), QUICK_BUDGET);
+    }
+
+    #[test]
+    fn a_quick_attempt_stops_at_its_deadline() {
+        let (url, requests) = serve(|body| (200, embeddings(&body["input"])));
+        let mut attempt = Attempt::new(
+            std::time::Duration::from_secs(10),
+            0,
+            None,
+            Some(std::time::Duration::ZERO),
+        );
+        assert!(remote(&url).send(&mut attempt, &json!(["a"])).is_err());
+        assert!(batch_sizes(&requests).is_empty());
+        assert!(matches!(
+            attempt.first_failure,
+            Some(BatchFailure::Transient(_))
+        ));
+    }
+
+    #[test]
+    fn non_numeric_embedding_values_are_an_error() {
+        let parse = |item: Value| RemoteApiProvider::parse_vector(&item);
+        assert!(parse(json!({"embedding": [0.5, null, 0.25]})).is_err());
+        assert!(parse(json!({"embedding": [0.5, "1"]})).is_err());
+        assert_eq!(parse(json!({"embedding": [0.5, 1]})).unwrap(), [0.5, 1.0]);
+    }
+
+    #[test]
+    fn long_server_messages_are_cut_short() {
+        let page = format!("<html>{}</html>", "é".repeat(1000));
+        let short = excerpt(&page);
+        assert_eq!(short.chars().count(), 201);
+        assert!(short.ends_with('…'));
+        assert_eq!(excerpt("  bad key \n"), "bad key");
     }
 }

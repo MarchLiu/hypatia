@@ -51,8 +51,6 @@ hypatia query '["$knowledge", ["$search", "database migration"]]'
 hypatia repl
 ```
 
-Until an embedding model is configured, writes print an `embedding pending` note. It is expected and safe to ignore: the entry is saved and fully searchable by text and graph.
-
 ### 3. Optional: enable semantic search
 
 `similar` needs an embedding model. Either configure a [remote OpenAI-compatible API](#remote-api-openai-compatible), or download BGE-M3 (about 2.3 GB) into the shelf directory:
@@ -64,11 +62,11 @@ cp /tmp/bge-m3/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
 cp /tmp/bge-m3/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
 cp /tmp/bge-m3/onnx/tokenizer.json ~/.hypatia/default/tokenizer.json
 
-hypatia backfill                         # embed entries written before the model was installed
+hypatia backfill                         # optional: embed everything written so far, at once
 hypatia similar "programming language"   # semantic search
 ```
 
-Nothing written before enabling semantic search is lost: `backfill` generates vectors for existing entries.
+Nothing written before enabling semantic search is lost: existing entries get their vectors automatically, newest first, a batch at a time as you keep using hypatia. `backfill` embeds them all at once.
 
 ## Embedding Models
 
@@ -244,6 +242,7 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `api_url` | OpenAI URL | API endpoint URL (remote only) |
 | `api_key_env` | `OPENAI_API_KEY` | Environment variable name for API key (remote only) |
 | `api_model` | `text-embedding-3-small` | Model name sent to API (remote only) |
+| `defer` | `true` | Embed writes later, in batches. A local model embeds a batch of the newest entries before each semantic search. A remote API embeds once 128 entries are waiting, or when a command runs on the shelf a minute after the oldest was written: usually one request, and never more than 30 s, even when entries the server rejects have to be singled out. `false` embeds every write as it is saved; with a remote API the write then waits on the network |
 
 ## CLI Reference
 

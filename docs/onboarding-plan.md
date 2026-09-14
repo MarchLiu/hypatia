@@ -290,6 +290,15 @@ F. 预编译分发：curl 安装脚本                      零依赖 · 漏斗�
 
 - **C1**（默认仍同步嵌入，行为基本不变，可独立验证）：pending 计数 + SQLite 部分索引、`meta` 状态键（`pending_since`、熔断、可用批大小）、install-only flush 路径、`hypatia backfill --status`、显式 `backfill` 在 errors > 0 时非零退出、`similar` 结果不完整时的 stderr 提示。
 - **C2**（翻转默认）：`embed_saved` 改为阈值检查、Lab 读前补齐、每条命令入口的时间上限检查、基准测试查询前显式 flush、skill 文档补一句延迟语义。warning 按原因分流：没配模型 → 不说话；配了但失败 → 保留 warning；`content_version` 竞态 → 不说话。「语义检索未启用」的提示放到 `init` 与 `similar` 的报错里，那才是用户真正想要向量的地方。
+  - C2 实现时定下的细节：
+    - 自动 flush 的「快速失败」经 `EmbeddingProvider::try_embed_batch` 暴露：10 s 超时、不重试。远程先发整批；整批失败时按错误码分三类 —— Rejected（400 / 413 / 其他 4xx）、Refused（401 / 403 / 404、缺 key、响应不是 JSON）、Transient（429、5xx、网络，含读响应体时超时或断连）。Refused 与 Transient 立即停下；Rejected 在同一次 flush 里沿用 `backfill` 的探测与拆批（400、422 先探测，413 直接拆）找出被拒的输入，但不重试，最多 32 个请求、合计不超过 30 s（拒绝返回很快，从 128 条里隔离出一条约 16 个请求）。
+    - 一个请求都没被接受：请求本身被拒，按失败类型熔断（Refused 为永久，其余为瞬时），不跳过任何条目。服务器接受了其他请求、却单独拒绝某条输入：这条输入记入 `skipped`（按 catalog、key、content_version，最多 32 条），自动 flush 跳过它直到内容变化。显式 `backfill` 不看 `skipped`，仍会尝试并报告原因；只要嵌入成功一条就清空 `skipped`。
+    - 批大小只从 413 学习：拆批后被接受的最大块记为 `remote_batch`，但本批有条目单独失败时不学（可能正是那一条太大）。400 不再让批变小，因此不需要回长逻辑。
+    - 请求成功但个别条目失败：provider 单独报错、或向量含非有限值 / 全零的条目记入 `skipped`，不熔断。向量维度与配置不符按永久失败熔断（配置错误）。一条都没写进去、且不是条目本身的原因：按瞬时失败熔断；多条输入一条都没写进去时，即使 provider 是逐条报错，也视为 provider 故障，不跳过。仍在欠账中的被跳过条目（编辑、删除或已嵌入的不算）加上本次单独失败的超过 32 条：同样熔断，而不是轮换着反复重试。`backfill --status` 以 `passed_over` 报告被跳过、仍在欠账中的条目数。存储错误让本批立即停下，不再逐条等锁。
+    - 熔断退避：瞬时失败 60 s 起翻倍，上限 1 h。永久失败每小时仍重试一次：换 API key 不改变 model identity，状态本身感知不到修复。显式 `backfill` 只要嵌入成功一条（或没有失败），就解除熔断、清掉 `remote_batch` 与 `skipped`。`paused` 只在熔断未到重试时间时报告。
+    - `pending_since` 只在为空时设置，且只计自动 flush 能还的欠账：只剩被跳过的条目时视为没有欠账，否则每条命令都会被判为超时。删掉最后一条欠账等方式留下的陈旧起点，由命令入口的 `settle_pending` 清掉。没有被跳过的条目时，入口只查有无欠账，阈值检查最多数到阈值，都不随欠账规模变慢。读写条目的 shelf 命令在入口做 settle，只对远程检查 60 s 上限；`backfill`、`import`、`export`、`disconnect`、`archive-get`、`archive-list` 与不带 shelf 的命令跳过。
+    - `meta` 状态的读-改-写是原子的：SQLite 用 `BEGIN IMMEDIATE`，PG 用按键的 `pg_advisory_xact_lock`。
+    - 读前补齐不看 `defer`：关闭延迟的 shelf 在 `similar` 前同样补上存量欠账。关闭延迟时，写入只在向量能写入时才嵌入。
 
 **D 的具体内容**：
 

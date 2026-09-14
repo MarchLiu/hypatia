@@ -435,6 +435,33 @@ fn pending_entries_and_meta_values() {
         store.meta_value("flush").unwrap().as_deref(),
         Some("{\"a\":1}")
     );
+    // An update sees the current value and writes only when asked to.
+    store
+        .update_meta_value("flush", |current| {
+            assert_eq!(current.as_deref(), Some("{\"a\":1}"));
+            Ok(None)
+        })
+        .unwrap();
+    assert_eq!(
+        store.meta_value("flush").unwrap().as_deref(),
+        Some("{\"a\":1}")
+    );
+    // Concurrent read-modify-write cycles never lose an update.
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                let c = f.open();
+                for _ in 0..20 {
+                    c.update_meta_value("counter", |current| {
+                        let n: u32 = current.map_or(0, |v| v.parse().unwrap());
+                        Ok(Some((n + 1).to_string()))
+                    })
+                    .unwrap();
+                }
+            });
+        }
+    });
+    assert_eq!(store.meta_value("counter").unwrap().as_deref(), Some("40"));
     // Extra meta keys never disturb opening.
     drop(store);
     assert!(f.open().stored_identity_mismatch().is_none());

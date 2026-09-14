@@ -1,11 +1,18 @@
-use crate::embedding::{EmbeddingProvider, build_provider, config::ProviderKind};
+use crate::embedding::{
+    BatchFailure, BatchOutcome, EmbeddingProvider, build_provider, config::ProviderKind,
+};
 use crate::error::{HypatiaError, Result};
 use crate::model::{Content, QueryResult, QueryTarget, SearchOpts, ShelfConfig, ShelfId};
 use crate::storage::{
     ShelfRegistry, Storage,
     backend::ShelfBackend,
-    flush::{Blocked, BlockedReason, EmbeddingDebt, FlushStats, Paused, now},
+    flush::{
+        Blocked, BlockedReason, Breaker, EmbeddingDebt, FLUSH_BATCH, FlushState, FlushStats,
+        LOCAL_WRITE_THRESHOLD, MAX_SKIPPED, Paused, REMOTE_MAX_DELAY_SECS, REMOTE_WRITE_THRESHOLD,
+        SkippedEntry, now, seconds_since,
+    },
     settings::ShelfSettings,
+    transfer::validate_vector,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -106,6 +113,18 @@ impl Storage for OpenShelf {
         ))
     }
 }
+/// Why a row of an automatic batch got no vector.
+enum RowFailure {
+    /// The provider failed on this input alone, or gave it non-finite or zero values.
+    Alone,
+    /// The provider failed on this input along with the rest of the request.
+    Provider,
+    /// The vector has this many values instead of the configured dimensions.
+    WrongSize(usize),
+    /// Storing the vector failed; the rest of the batch was left untried.
+    Storage,
+}
+
 impl OpenShelf {
     pub fn open(path: &Path, name: Option<&str>) -> Result<Self> {
         // Configuration errors must not create a SQLite file or local vector directory.
@@ -123,7 +142,9 @@ impl OpenShelf {
             embedder,
         })
     }
-    /// Content has committed. Embedding failures leave the row pending for backfill.
+    /// Content has committed, and its vector is owed. By default the write only notes the
+    /// debt, and pays a batch of it once enough has built up; with `embedding.defer = false`
+    /// it embeds right away. Never fails the write: vectors are a rebuildable cache.
     pub fn embed_saved(&mut self, catalog: &str, key: &str, content: &Content, version: i64) {
         // Skip before embedding: the vector would be refused, and embedding may load a model.
         if let Some(m) = self.backend.identity_mismatch() {
@@ -134,59 +155,102 @@ impl OpenShelf {
             self.note_pending();
             return;
         }
-        let outcome = (|| -> Result<bool> {
-            let Some(v) = self.embedder.maybe_embed(&content.embedding_text(key))? else {
-                return Ok(false);
+        if self.settings.embedding.defer {
+            self.note_pending();
+            let threshold = match self.settings.embedding.provider {
+                ProviderKind::Local => LOCAL_WRITE_THRESHOLD,
+                ProviderKind::Remote => REMOTE_WRITE_THRESHOLD,
             };
-            self.backend.install_embedding(catalog, key, version, &v)
-        })();
-        match outcome {
-            Ok(true) => return,
-            Ok(false) => eprintln!(
-                "warning: {catalog}/{key}: content saved; embedding pending (model unavailable or content changed); run backfill"
-            ),
-            Err(e) => eprintln!(
-                "warning: {catalog}/{key}: content saved; embedding pending: {e}; run backfill"
-            ),
+            self.auto_flush(threshold);
+            return;
+        }
+        // Opted out of deferral. Embed only a vector that could be written: without a model,
+        // or under an identity that refuses vectors, the entry stays owed, as when deferred.
+        if self
+            .vectors_blocked()
+            .is_ok_and(|blocked| blocked.is_none())
+        {
+            let outcome = (|| -> Result<bool> {
+                let vector = self.embedder.embed(&content.embedding_text(key))?;
+                self.backend
+                    .install_embedding(catalog, key, version, &vector)
+            })();
+            match outcome {
+                Ok(true) => return,
+                // The content changed meanwhile, and the newer save owes its own vector.
+                Ok(false) => {}
+                Err(e) => eprintln!(
+                    "warning: {catalog}/{key}: content saved; embedding pending: {e}; run `hypatia backfill -s {}`",
+                    self.id.name
+                ),
+            }
         }
         self.note_pending();
     }
-    /// Records when the current embedding debt started. The clock restarts when this entry is
-    /// the whole debt: an older start belongs to a debt paid without bookkeeping (an update
-    /// that embedded, a delete). Best-effort: bookkeeping must never fail a committed write.
+    /// Records when the current embedding debt started, unless a start is already recorded.
+    /// A start left over from a debt paid without bookkeeping (a delete, say) is cleared by
+    /// `settle_pending` when the next command begins. Best-effort: bookkeeping must never
+    /// fail a committed write.
     fn note_pending(&mut self) {
         let _ = (|| -> Result<()> {
-            let pending = self.backend.pending_count("knowledge")?
-                + self.backend.pending_count("statement")?;
-            let mut state = self.backend.flush_state()?;
-            if state.pending_since.is_none() || pending <= 1 {
-                state.pending_since = Some(now());
-                self.backend.save_flush_state(&state)?;
+            if self.backend.flush_state()?.pending_since.is_none() {
+                self.backend.update_flush_state(|state| {
+                    state.pending_since.get_or_insert_with(now);
+                })?;
             }
             Ok(())
         })();
     }
-    /// Brings `pending_since` in line with what is actually pending: cleared once the debt is
-    /// paid, started when pending entries predate the bookkeeping.
-    pub fn settle_pending(&mut self) -> Result<()> {
-        let pending =
-            self.backend.pending_count("knowledge")? + self.backend.pending_count("statement")?;
-        let mut state = self.backend.flush_state()?;
-        let changed = match (pending, &state.pending_since) {
-            (0, Some(_)) => {
-                state.pending_since = None;
-                true
-            }
-            (1.., None) => {
-                state.pending_since = Some(now());
-                true
-            }
-            _ => false,
+    /// Brings `pending_since` in line with the debt automatic flushes can pay: cleared once
+    /// none is left, however it was paid (entries passed over as failing on their own do not
+    /// count), and started when payable entries predate the bookkeeping. The debt is looked up
+    /// outside the update, so a write landing in between can lose its start; the next command
+    /// starts it again.
+    pub fn settle_pending(&mut self) -> Result<FlushState> {
+        let state = self.backend.flush_state()?;
+        let pending = self.payable_up_to(&state, 1)? > 0;
+        let settled = |state: &FlushState| match (pending, state.pending_since.is_some()) {
+            (false, true) => Some(None),
+            (true, false) => Some(Some(now())),
+            _ => None,
         };
-        if changed {
-            self.backend.save_flush_state(&state)?;
+        if settled(&state).is_none() {
+            return Ok(state);
         }
-        Ok(())
+        self.backend.update_flush_state(|state| {
+            if let Some(since) = settled(&*state) {
+                state.pending_since = since;
+            }
+        })
+    }
+    /// Pending entries automatic flushes can embed, counted no further than `limit`: entries
+    /// passed over as failing on their own are debt they will not pay.
+    fn payable_up_to(&self, state: &FlushState, limit: usize) -> Result<usize> {
+        if state.skipped.is_empty() {
+            return self.backend.pending_up_to(limit);
+        }
+        // At most `skipped.len()` of these rows are passed over, so the count reaches `limit`
+        // whenever that many are payable.
+        Ok(self
+            .backend
+            .newest_missing_embeddings((limit + state.skipped.len()) as i64)?
+            .iter()
+            .filter(|(catalog, key, _, version)| !state.is_skipped(catalog, key, *version))
+            .count())
+    }
+    /// The entries passed over as failing on their own that are still pending as they were:
+    /// not edited, deleted or embedded since.
+    fn passed_over(&self, state: &FlushState) -> Result<Vec<SkippedEntry>> {
+        let mut still = Vec::new();
+        for entry in &state.skipped {
+            if self
+                .backend
+                .is_pending(&entry.catalog, &entry.key, entry.version)?
+            {
+                still.push(entry.clone());
+            }
+        }
+        Ok(still)
     }
     /// Why vectors cannot be written right now: the backend refuses them, or the provider
     /// cannot produce them.
@@ -213,8 +277,181 @@ impl OpenShelf {
             message,
         }))
     }
-    /// Embeds up to `limit` pending entries, newest first, and only writes their vectors:
-    /// no index rebuild, so it is cheap enough for the write or read path.
+    /// Pays one batch of embedding debt, newest first, once at least `min_pending` entries
+    /// are owed: one fail-fast attempt that writes vectors only (no index rebuild). Does
+    /// nothing while vectors are blocked or automatic flushes are paused. A failure pauses
+    /// later attempts and prints a warning, but never reaches the command that triggered it.
+    pub fn auto_flush(&mut self, min_pending: usize) -> FlushStats {
+        self.try_auto_flush(min_pending).unwrap_or_else(|e| {
+            eprintln!("warning: automatic embedding skipped: {e}");
+            FlushStats::default()
+        })
+    }
+    fn try_auto_flush(&mut self, min_pending: usize) -> Result<FlushStats> {
+        let mut stats = FlushStats::default();
+        if self.vectors_blocked()?.is_some() {
+            return Ok(stats);
+        }
+        let state = self.backend.flush_state()?;
+        if state.breaker.as_ref().is_some_and(|b| !b.is_due()) {
+            return Ok(stats);
+        }
+        if min_pending > 1 && self.payable_up_to(&state, min_pending)? < min_pending {
+            return Ok(stats);
+        }
+        let limit = match self.settings.embedding.provider {
+            ProviderKind::Local => FLUSH_BATCH,
+            ProviderKind::Remote => state.remote_batch.unwrap_or(FLUSH_BATCH),
+        };
+        // Entries that fail on their own are passed over, so they never crowd out the rest.
+        let rows: Vec<_> = self
+            .backend
+            .newest_missing_embeddings((limit + state.skipped.len()) as i64)?
+            .into_iter()
+            .filter(|(catalog, key, _, version)| !state.is_skipped(catalog, key, *version))
+            .take(limit)
+            .collect();
+        if rows.is_empty() {
+            return Ok(stats);
+        }
+        let sent = rows.len();
+        let entries: Vec<SkippedEntry> = rows
+            .iter()
+            .map(|(catalog, key, _, version)| SkippedEntry {
+                catalog: catalog.clone(),
+                key: key.clone(),
+                version: *version,
+            })
+            .collect();
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|(_, key, content, _)| content.embedding_text(key))
+            .collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let outcome = match self.embedder.try_embed_batch(&texts) {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                // Nothing got through: pause, for good when retrying cannot help.
+                stats.failed = sent;
+                stats.error = Some(failure.message().to_string());
+                let permanent = matches!(failure, BatchFailure::Refused(_));
+                self.pause(permanent, failure.message().to_string());
+                return Ok(stats);
+            }
+        };
+        let accepted_size = outcome.accepted_size;
+        let failures = self.install_vectors(rows, outcome, &mut stats);
+        // When nothing at all got through a batch of several, the provider is failing, even if
+        // it failed on each entry separately.
+        let alone: Vec<SkippedEntry> = if stats.installed == 0 && sent > 1 {
+            Vec::new()
+        } else {
+            failures
+                .iter()
+                .filter(|(_, failure)| matches!(failure, RowFailure::Alone))
+                .map(|(index, _)| entries[*index].clone())
+                .collect()
+        };
+        // Entries edited, deleted or embedded since they were passed over no longer count.
+        let still_passed_over = (state.skipped.len() + alone.len() > MAX_SKIPPED)
+            .then(|| self.passed_over(&state).ok())
+            .flatten();
+        let crowded = still_passed_over
+            .as_ref()
+            .is_some_and(|still| still.len() + alone.len() > MAX_SKIPPED);
+        let wrong_size = failures.iter().find_map(|(_, failure)| match failure {
+            RowFailure::WrongSize(len) => Some(*len),
+            _ => None,
+        });
+        let dims = self.settings.embedding.dimensions();
+        let pause = match wrong_size {
+            // Every vector will have the wrong size: a configuration error.
+            Some(len) => Some((
+                true,
+                format!(
+                    "the provider returns vectors of {len} values, but the shelf expects {dims}"
+                ),
+            )),
+            // Nothing stored, and not because of the entries: the provider is failing.
+            None if stats.installed == 0 && stats.failed > alone.len() => {
+                Some((false, stats.error.clone().unwrap_or_default()))
+            }
+            None if crowded => Some((
+                false,
+                format!("more than {MAX_SKIPPED} entries fail on their own"),
+            )),
+            None => None,
+        };
+        let recorded = self.backend.update_flush_state(|current| {
+            if let Some(still) = &still_passed_over {
+                // Forget the stale entries; ones another process passed over meanwhile stay.
+                current
+                    .skipped
+                    .retain(|entry| still.contains(entry) || !state.skipped.contains(entry));
+            }
+            current.skip(alone.iter().cloned());
+            if pause.is_none() {
+                current.breaker = None;
+                // A batch turned down as too large teaches the size, unless an entry failing
+                // alone may be what was too large.
+                if alone.is_empty()
+                    && let Some(size) = accepted_size
+                {
+                    current.remote_batch = Some(size);
+                }
+            }
+        });
+        if let Err(e) = recorded {
+            eprintln!("warning: could not record the outcome of automatic embedding: {e}");
+        }
+        let shelf = &self.id.name;
+        let error = stats.error.as_deref().unwrap_or_default();
+        if !alone.is_empty() {
+            eprintln!(
+                "warning: {} entries could not be embedded ({error}); automatic embedding passes over them until their content changes, and `hypatia backfill -s {shelf}` reports why",
+                alone.len()
+            );
+        }
+        if stats.installed > 0 && stats.failed > alone.len() {
+            eprintln!(
+                "warning: {} entries got no vector ({error}); they stay pending",
+                stats.failed - alone.len()
+            );
+        }
+        if let Some((permanent, reason)) = pause {
+            self.pause(permanent, reason);
+        }
+        // Bookkeeping only: the vectors are in, so a failure here must not fail the flush.
+        let _ = self.settle_pending();
+        Ok(stats)
+    }
+    /// Pauses automatic flushes after a failure, and says so. Best-effort, like all of their
+    /// bookkeeping.
+    fn pause(&mut self, permanent: bool, reason: String) {
+        let paused = self.backend.update_flush_state(|state| {
+            state.breaker = Some(Breaker::trip(state.breaker.as_ref(), permanent, reason));
+        });
+        let shelf = &self.id.name;
+        match paused.map(|state| state.breaker) {
+            Ok(Some(b)) if b.permanent => eprintln!(
+                "warning: automatic embedding paused: {}; fix the embedding configuration, then run `hypatia backfill -s {shelf}`",
+                b.reason
+            ),
+            Ok(Some(b)) => eprintln!(
+                "warning: automatic embedding failed: {}; entries stay pending until the next attempt after {}",
+                b.reason,
+                b.retry_after.as_deref().unwrap_or_default()
+            ),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("warning: could not record the outcome of automatic embedding: {e}")
+            }
+        }
+    }
+    /// Embeds up to `limit` pending entries, newest first, with the provider's full retries
+    /// and splitting, and writes their vectors only (no index rebuild). For explicit callers,
+    /// such as a benchmark paying its debt before querying: paused automatic flushes do not
+    /// stop it.
     pub fn flush_pending(&mut self, limit: usize) -> Result<FlushStats> {
         let mut stats = FlushStats::default();
         if self.vectors_blocked()?.is_some() {
@@ -226,40 +463,124 @@ impl OpenShelf {
             .map(|(_, key, content, _)| content.embedding_text(key))
             .collect();
         let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let mut vectors = self.embedder.embed_batch(&texts).into_iter();
-        for (catalog, key, _, version) in rows {
-            let vector = vectors.next().unwrap_or_else(|| {
-                Err(HypatiaError::Embedding(
-                    "provider returned too few vectors".into(),
-                ))
-            });
-            match vector.and_then(|v| self.backend.install_embedding(&catalog, &key, version, &v)) {
-                Ok(true) => stats.installed += 1,
-                Ok(false) => stats.skipped += 1,
-                Err(e) => {
-                    stats.failed += 1;
-                    stats.error.get_or_insert_with(|| e.to_string());
-                }
-            }
-        }
+        let outcome = BatchOutcome::from_results(self.embedder.embed_batch(&texts));
+        self.install_vectors(rows, outcome, &mut stats);
         // Bookkeeping only: the vectors are in, so a failure here must not fail the flush.
         let _ = self.settle_pending();
         Ok(stats)
+    }
+    /// Checks and installs one vector per row, in order, counting the outcomes. Returns the
+    /// rows that got no vector, and why. A storage error stops the batch: the rows after it
+    /// would most likely wait on the same lock, one by one.
+    fn install_vectors(
+        &mut self,
+        rows: Vec<(String, String, Content, i64)>,
+        outcome: BatchOutcome,
+        stats: &mut FlushStats,
+    ) -> Vec<(usize, RowFailure)> {
+        let dims = self.settings.embedding.dimensions();
+        let total = rows.len();
+        let mut failures = Vec::new();
+        let mut vectors = outcome.vectors.into_iter();
+        for (index, (catalog, key, _, version)) in rows.into_iter().enumerate() {
+            let checked = match vectors.next() {
+                None => Err((
+                    HypatiaError::Embedding("provider returned too few vectors".into()),
+                    RowFailure::Provider,
+                )),
+                Some(Err(e)) if outcome.refused_alone.contains(&index) => {
+                    Err((e, RowFailure::Alone))
+                }
+                Some(Err(e)) => Err((e, RowFailure::Provider)),
+                Some(Ok(vector)) if vector.len() != dims => Err((
+                    HypatiaError::Validation(format!(
+                        "embedding has {} values, but the shelf expects {dims}",
+                        vector.len()
+                    )),
+                    RowFailure::WrongSize(vector.len()),
+                )),
+                Some(Ok(vector)) => validate_vector(&vector, dims)
+                    .map(|()| vector)
+                    .map_err(|e| (e, RowFailure::Alone)),
+            };
+            let installed = checked.and_then(|vector| {
+                self.backend
+                    .install_embedding(&catalog, &key, version, &vector)
+                    .map_err(|e| (e, RowFailure::Storage))
+            });
+            match installed {
+                Ok(true) => stats.installed += 1,
+                Ok(false) => stats.skipped += 1,
+                Err((e, failure)) => {
+                    stats.failed += 1;
+                    stats.error.get_or_insert_with(|| e.to_string());
+                    let storage = matches!(failure, RowFailure::Storage);
+                    failures.push((index, failure));
+                    if storage {
+                        stats.failed += total - index - 1;
+                        break;
+                    }
+                }
+            }
+        }
+        failures
+    }
+    /// Before a semantic read. A local model is about to be loaded for the query anyway, so
+    /// pay a batch of debt first, newest first, and recent writes are found at once. Remote
+    /// debt is left to the write threshold and the time cap.
+    pub fn flush_before_similar(&mut self) {
+        if self.settings.embedding.provider == ProviderKind::Local {
+            self.auto_flush(1);
+        }
+    }
+    /// When a command on this shelf begins: settles the bookkeeping, and pays a batch of a
+    /// remote debt older than `REMOTE_MAX_DELAY_SECS`. With no background process, an overdue
+    /// debt can only be paid by the next command.
+    pub fn flush_if_overdue(&mut self) -> Result<()> {
+        let state = self.settle_pending()?;
+        let overdue = state.pending_since.as_deref().is_some_and(|since| {
+            seconds_since(since).is_none_or(|secs| secs >= REMOTE_MAX_DELAY_SECS)
+        });
+        if overdue && self.settings.embedding.provider == ProviderKind::Remote {
+            self.auto_flush(1);
+        }
+        Ok(())
+    }
+    /// An explicit backfill has run. Once it embedded anything, or nothing failed, the
+    /// provider evidently works: paused automatic flushes resume, and what they learned starts
+    /// over, the batch size and the entries passed over alike (backfill has just tried those).
+    /// A backfill that only failed proves nothing and changes nothing.
+    pub fn record_backfill(&mut self, created: usize, errors: usize) -> Result<()> {
+        self.backend.update_flush_state(|state| {
+            if created > 0 || errors == 0 {
+                state.breaker = None;
+                state.remote_batch = None;
+                state.skipped.clear();
+            }
+        })?;
+        Ok(())
     }
     /// The shelf's embedding debt, for `backfill --status` and agent interfaces.
     pub fn embedding_debt(&self) -> Result<EmbeddingDebt> {
         let pending_knowledge = self.backend.pending_count("knowledge")?;
         let pending_statement = self.backend.pending_count("statement")?;
         let state = self.backend.flush_state()?;
+        let passed_over = self.passed_over(&state)?.len();
         Ok(EmbeddingDebt {
             pending_knowledge,
             pending_statement,
+            passed_over,
             // A paid debt has no start, whatever the bookkeeping last recorded.
             pending_since: state
                 .pending_since
-                .filter(|_| pending_knowledge + pending_statement > 0),
+                .filter(|_| pending_knowledge + pending_statement > passed_over),
             blocked: self.vectors_blocked()?,
-            paused: state.breaker.as_ref().map(Paused::from),
+            // A pause past its retry time is over, although the next attempt has yet to run.
+            paused: state
+                .breaker
+                .as_ref()
+                .filter(|b| !b.is_due())
+                .map(Paused::from),
         })
     }
     pub fn save_vector_indexes(&mut self) -> Result<()> {
