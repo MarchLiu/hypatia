@@ -166,7 +166,7 @@ hypatia knowledge-create "session-<SESSION_ID>" \
   --scopes "<PROJECT>"
 ```
 
-- Create `session-<SESSION_ID>` the first time a summary arrives. The CLI has no update command, and `knowledge-create` fails on an existing name. To replace the entry with newer summary text, run `hypatia knowledge-delete "session-<SESSION_ID>"` and then the `knowledge-create` above. Statements reference entries by name and deleting an entry never deletes them, so the `belongTo` links survive.
+- Create `session-<SESSION_ID>` the first time a summary arrives; `knowledge-create` fails on an existing name. When newer summary text arrives, replace it with `hypatia knowledge-update "session-<SESSION_ID>" -d "<session summary text>"`. Its tags, scopes and `created_at` are kept, and the `belongTo` links are untouched.
 - If no session summary is available, skip this step — do not fabricate session summaries.
 
 ### Step 3: Link message to session

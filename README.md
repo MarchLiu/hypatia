@@ -250,6 +250,7 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia list` | List connected shelves |
 | `hypatia knowledge-create <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>]` | Create a knowledge entry |
 | `hypatia knowledge-get <name>` | Get a knowledge entry |
+| `hypatia knowledge-update <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>] [--scopes <scopes>]` | Update a knowledge entry; omitted fields are kept, an empty value clears one |
 | `hypatia knowledge-delete <name>` | Delete a knowledge entry |
 | `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple; exits 0 without changes if it already exists |
 | `hypatia statement-delete <subj> <pred> <obj>` | Delete a triple |

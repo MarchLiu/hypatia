@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use crate::lab::{Lab, uses_similar};
 use crate::model::{Content, QueryResult, SearchOpts, StatementKey, Synonyms};
+use crate::service::KnowledgePatch;
 
 #[derive(Parser)]
 #[command(name = "hypatia", about = "AI-oriented memory management", version)]
@@ -60,6 +61,28 @@ enum Commands {
         /// Scopes (comma-separated, e.g. "project-a," for global)
         #[arg(long, default_value = "")]
         scopes: String,
+        /// Shelf name
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
+    /// Update a knowledge entry: omitted fields keep their values, an empty value clears one
+    KnowledgeUpdate {
+        name: String,
+        /// New content data
+        #[arg(short, long)]
+        data: Option<String>,
+        /// New tags (comma-separated); "" clears them
+        #[arg(short, long)]
+        tags: Option<String>,
+        /// New synonyms (comma-separated); "" clears them
+        #[arg(long)]
+        synonyms: Option<String>,
+        /// New figure references (comma-separated); "" clears them
+        #[arg(short, long)]
+        figures: Option<String>,
+        /// New scopes (comma-separated, trailing comma adds global); "" clears them
+        #[arg(long)]
+        scopes: Option<String>,
         /// Shelf name
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -234,6 +257,7 @@ impl Commands {
         match self {
             Self::Query { shelf, .. }
             | Self::KnowledgeCreate { shelf, .. }
+            | Self::KnowledgeUpdate { shelf, .. }
             | Self::KnowledgeGet { shelf, .. }
             | Self::KnowledgeDelete { shelf, .. }
             | Self::StatementDelete { shelf, .. }
@@ -277,6 +301,22 @@ pub fn run() -> crate::error::Result<()> {
 }
 
 fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
+    // Reject an update with nothing to change before paying any embedding debt.
+    if let Commands::KnowledgeUpdate {
+        data: None,
+        tags: None,
+        synonyms: None,
+        figures: None,
+        scopes: None,
+        ..
+    } = &cmd
+    {
+        return Err(crate::error::HypatiaError::Validation(
+            "nothing to update: pass at least one of --data, --tags, --synonyms, --figures, \
+             --scopes"
+                .into(),
+        ));
+    }
     if let Some(shelf) = cmd.shelf() {
         // Best-effort: the command itself reports a shelf that is missing or broken.
         let _ = lab.flush_if_overdue(shelf);
@@ -333,58 +373,36 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             scopes,
             shelf,
         } => {
-            let tags_vec: Vec<String> = if tags.is_empty() {
-                Vec::new()
-            } else {
-                tags.split(',').map(|s| s.trim().to_string()).collect()
-            };
-            let syn = if synonyms.is_empty() {
-                None
-            } else {
-                let list: Vec<String> = synonyms
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if list.is_empty() {
-                    None
-                } else {
-                    Some(Synonyms::Flat(list))
-                }
-            };
-            let figures_vec: Vec<String> = if figures.is_empty() {
-                Vec::new()
-            } else {
-                figures
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            };
-            let scopes_vec: Vec<String> = if scopes.is_empty() {
-                Vec::new()
-            } else {
-                scopes
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            };
-            // Treat trailing comma as implicit global scope
-            let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
-                let mut v = scopes_vec;
-                v.push(String::new());
-                v
-            } else {
-                scopes_vec
-            };
             let content = Content::new(&data)
-                .with_tags(tags_vec)
-                .with_synonyms(syn)
-                .with_figures(figures_vec)
-                .with_scopes(scopes_vec);
+                .with_tags(parse_tags(&tags))
+                .with_synonyms(parse_flat_synonyms(&synonyms))
+                .with_figures(parse_list(&figures))
+                .with_scopes(parse_scopes(&scopes));
             let k = lab.create_knowledge(&shelf, &name, content)?;
             println!("Created knowledge: {}", k.name);
+        }
+        Commands::KnowledgeUpdate {
+            name,
+            data,
+            tags,
+            synonyms,
+            figures,
+            scopes,
+            shelf,
+        } => {
+            let patch = KnowledgePatch {
+                data,
+                tags: tags.as_deref().map(parse_tags),
+                synonyms: synonyms.as_deref().map(parse_flat_synonyms),
+                figures: figures.as_deref().map(parse_list),
+                scopes: scopes.as_deref().map(parse_scopes),
+            };
+            let updated = lab.patch_knowledge(&shelf, &name, &patch)?;
+            if updated.changed {
+                println!("Updated knowledge: {}", updated.knowledge.name);
+            } else {
+                println!("Knowledge unchanged: {}", updated.knowledge.name);
+            }
         }
         Commands::KnowledgeGet { name, shelf } => match lab.get_knowledge(&shelf, &name)? {
             Some(k) => {
@@ -431,22 +449,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 }
                 None => None,
             };
-            let scopes_vec: Vec<String> = if scopes.is_empty() {
-                Vec::new()
-            } else {
-                scopes
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            };
-            let scopes_vec = if scopes.ends_with(',') && !scopes_vec.contains(&String::new()) {
-                let mut v = scopes_vec;
-                v.push(String::new());
-                v
-            } else {
-                scopes_vec
-            };
+            let scopes_vec = parse_scopes(&scopes);
             let content = Content::new(&data)
                 .with_synonyms(syn)
                 .with_scopes(scopes_vec);
@@ -769,11 +772,80 @@ fn print_result(result: &QueryResult) {
     }
 }
 
+/// Comma-separated tags, split exactly as `knowledge-create` always has.
+fn parse_tags(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split(',').map(|s| s.trim().to_string()).collect()
+    }
+}
+
+/// A comma-separated list with blank items dropped; `""` gives an empty list.
+fn parse_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Comma-separated knowledge synonyms; `""` gives none.
+fn parse_flat_synonyms(raw: &str) -> Option<Synonyms> {
+    let list = parse_list(raw);
+    if list.is_empty() {
+        None
+    } else {
+        Some(Synonyms::Flat(list))
+    }
+}
+
+/// Comma-separated scopes. A trailing comma adds the empty-string global scope, so `","`
+/// is global only and `"p,"` is project plus global; `""` stores no scope at all.
+fn parse_scopes(raw: &str) -> Vec<String> {
+    let mut scopes = parse_list(raw);
+    if raw.ends_with(',') && !scopes.contains(&String::new()) {
+        scopes.push(String::new());
+    }
+    scopes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
     use std::collections::HashMap;
+
+    #[test]
+    fn scope_and_list_parsing_matches_the_documented_cli_behaviour() {
+        assert!(parse_scopes("").is_empty());
+        assert_eq!(parse_scopes(","), [""]);
+        assert_eq!(parse_scopes("p"), ["p"]);
+        assert_eq!(parse_scopes("p,"), ["p", ""]);
+        assert_eq!(parse_scopes(" a , b "), ["a", "b"]);
+        assert_eq!(parse_list("x,,y"), ["x", "y"]);
+        assert_eq!(parse_tags("a,b"), ["a", "b"]);
+        // Tags have never dropped blank items, unlike the other lists; keep create unchanged.
+        assert_eq!(parse_tags(","), ["", ""]);
+        assert_eq!(parse_tags("a,,b"), ["a", "", "b"]);
+        assert_eq!(parse_tags(" "), [""]);
+        assert!(parse_list(",").is_empty());
+        // Only a comma at the very end marks global scope.
+        assert_eq!(parse_scopes("p, "), ["p"]);
+        assert_eq!(parse_flat_synonyms(""), None);
+        assert_eq!(
+            parse_flat_synonyms("q, r"),
+            Some(Synonyms::Flat(vec!["q".into(), "r".into()]))
+        );
+    }
+
+    #[test]
+    fn knowledge_update_settles_the_debt_of_its_shelf() {
+        let cli =
+            Cli::try_parse_from(["hypatia", "knowledge-update", "k", "-d", "x", "-s", "work"])
+                .unwrap();
+        let cmd = cli.command.unwrap();
+        assert_eq!(cmd.shelf(), Some("work"));
+    }
 
     /// Check every subcommand for duplicate short flags.
     /// Catches issues like -s being used for both --shelf and --synonyms.

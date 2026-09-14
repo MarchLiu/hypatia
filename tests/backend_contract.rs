@@ -1083,3 +1083,47 @@ fn duplicate_statement_create_never_reaches_the_embedder() {
     assert_eq!(again.statement.content.data, "original");
     assert_eq!(calls.get(), before);
 }
+
+#[test]
+fn knowledge_patch_that_changes_nothing_keeps_the_version() {
+    use hypatia::service::{KnowledgePatch, KnowledgeService};
+    let dir = TempDir::new().unwrap();
+    let mut shelf = local(&dir);
+    let version = shelf
+        .backend
+        .insert_knowledge("k", &Content::new("same").with_tags(vec!["t".into()]))
+        .unwrap();
+    let noop = KnowledgePatch {
+        data: Some("same".into()),
+        ..Default::default()
+    };
+    assert!(
+        !KnowledgeService::new(&mut shelf)
+            .patch("k", &noop)
+            .unwrap()
+            .changed
+    );
+    // Installing against the original version still succeeds, so the no-op wrote nothing.
+    assert!(
+        shelf
+            .backend
+            .install_embedding("knowledge", "k", version, &[1., 0., 0.])
+            .unwrap()
+    );
+
+    let real = KnowledgePatch {
+        data: Some("new".into()),
+        ..Default::default()
+    };
+    let updated = KnowledgeService::new(&mut shelf).patch("k", &real).unwrap();
+    assert!(updated.changed);
+    assert_eq!(updated.knowledge.content.data, "new");
+    assert_eq!(updated.knowledge.content.tags, ["t"]);
+    // A real change moves the version, so the old one can no longer install a vector.
+    assert!(
+        !shelf
+            .backend
+            .install_embedding("knowledge", "k", version, &[1., 0., 0.])
+            .unwrap()
+    );
+}

@@ -4,7 +4,9 @@ use std::path::Path;
 use crate::engine::Evaluator;
 use crate::error::Result;
 use crate::model::*;
-use crate::service::{CreatedStatement, KnowledgeService, StatementService};
+use crate::service::{
+    CreatedStatement, KnowledgePatch, KnowledgeService, StatementService, UpdatedKnowledge,
+};
 use crate::storage::{ShelfManager, Storage};
 
 /// Statistics returned by backfill operation.
@@ -135,6 +137,19 @@ impl Lab {
         })?;
         let mut svc = KnowledgeService::new(shelf_ref);
         svc.update(name, content)
+    }
+
+    /// Change only the fields a patch names; see [`KnowledgeService::patch`].
+    pub fn patch_knowledge(
+        &mut self,
+        shelf: &str,
+        name: &str,
+        patch: &KnowledgePatch,
+    ) -> Result<UpdatedKnowledge> {
+        let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        KnowledgeService::new(shelf_ref).patch(name, patch)
     }
 
     pub fn delete_knowledge(&mut self, shelf: &str, name: &str) -> Result<()> {

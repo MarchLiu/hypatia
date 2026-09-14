@@ -40,9 +40,9 @@
 
 - 作为 **`hypatia mcp` 子命令**，不是独立 binary —— 单一安装、单一版本，任何 Agent 配一行 `command: hypatia, args: [mcp]`。
 - **运行时：同步、手写 stdio JSON-RPC，不引入 tokio。** 代码库是全同步的（`ureq`、同步 `postgres`、`rusqlite`，零 `async fn`）；官方 Rust SDK `rmcp` 基于 tokio，引入它意味着给同步代码库塞一个 runtime，且每次调 `Lab` 都要 `spawn_blocking` 包一层。只做 tools 与 resources 时协议面很小：`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`resources/list`、`resources/templates/list`、`resources/read`。stdin 逐行读、逐条处理的同步循环即可，与 §4.1「不引入 server 基础设施」一致。
-- **tools 只覆盖数据面**，贴着现有子命令，**零「智能记忆」端点**（理由见 §4.2）：`query`、`search`、`similar`、`session_current`、`knowledge_create` / `knowledge_get` / `knowledge_delete`、`statement_create` / `statement_delete`、`archive_store` / `archive_get` / `archive_list`、`list_shelves`、`backfill`（限批，见下）。
+- **tools 只覆盖数据面**，贴着现有子命令，**零「智能记忆」端点**（理由见 §4.2）：`query`、`search`、`similar`、`session_current`、`knowledge_create` / `knowledge_get` / `knowledge_update` / `knowledge_delete`、`statement_create` / `statement_delete`、`archive_store` / `archive_get` / `archive_list`、`list_shelves`、`backfill`（限批，见下）。
 - **管理面留在 CLI，不做成 tool**（2026-09-14 定）：`connect` / `disconnect` / `init` 会写 `~/.hypatia/shelves.json`，而长驻进程写回的是启动时读到的旧表，会冲掉其他会话期间的注册（§3.5）；`model install` 是 GB 级下载，会长时间占住同步循环；`export` / `import` 是整库文件操作。这些是人在终端里做一次的事，不是 agent 在对话中反复调用的事。
-- **待定**：是否暴露 `knowledge_update`。`Lab::update_knowledge` 已存在，但 CLI 没有对应子命令；v1 先按与 CLI 对齐不暴露。
+- **暴露 `knowledge_update`**（2026-09-14 定）：CLI 同时新增 `knowledge-update`，两者共用 `Lab::patch_knowledge` 的字段合并语义：未给出的字段保持原值，给出的字段替换，空值清空该字段；内容无变化时不写库，版本号与向量都不动。先读后写之间若有其他会话改了同一条目，写回的是整条内容，那次改动会丢失，即使改的是本次没有给出的字段；窗口只有两条 SQL、不含模型调用，同一条目被并发更新也少见，所以不做版本比对。
 - **resources** 用 resource template（`hypatia://{shelf}/knowledge/{name}`、`hypatia://{shelf}/statement/{triple}`）；`resources/list` 只枚举 shelf 与 shelf 状态，不枚举条目 —— 大库会把列表撑爆。
 - 薄薄盖在 `src/lab.rs` 的 facade 上，不复制业务逻辑。`src/cli/repl.rs` 已证明 `Lab` 可跨命令长期持有。
 - **本地模型用完即释放**（2026-09-14 定）。加载本就是惰性的，只有 flush 与 `similar` 会触发；v1 在每个 tool call 结束时释放本次加载的本地模型，常驻内存与 CLI 相当，不做空闲计时。实测每个进程加载 bge-m3 后约占 1.5 GB 私有内存，进程之间不共享（§3.5），N 个会话常驻就是 N 份。代价是每次需要本地模型的调用多付一次加载，实测连同进程启动约 1.8 s；远程 provider 不受影响。实现上给 `EmbeddingProvider` 加一个默认空实现的释放方法，本地 provider 回到待加载状态，由 MCP 层在调用结束时对各 shelf 调用；CLI 进程本就用完即退，无需调用。provider 仍是 shelf 作用域，因为配置在每个 shelf 各自的 `shelf.toml`，一个 server 会挂多个 shelf。
@@ -158,7 +158,7 @@ stdio 本身不是并发瓶颈：宿主为每条 stdio 连接拉起一个 server
 - 管理面不做成 tool，其中 connect / disconnect 明确不暴露（§3.1、§3.5）。
 - 本地模型每次 tool call 用完即释放，不做空闲计时（§3.1）。
 - backfill 限批（§3.1）。
-- 待定：是否暴露 `knowledge_update`，v1 默认不暴露。
+- 暴露 `knowledge_update`；CLI 的 `knowledge-update` 已实施，MCP 工具随 H 实施（§3.1）。
 - 不在 H 内：hypatia-memory 摘要级联按会话分区，ONNX 线程数限制，同一进程内多个 shelf 共享模型（§3.5）。
 
 **G v1 的范围**：
@@ -188,7 +188,7 @@ G 的进阶形态（v2）：**判断层单一源，宿主适配层由 CLI 生成
 - 1–2：文本已修，`hypatia` 与 `hypatia-memory` 两份 skill 及其 `dsh-hypatia/skills/` 镜像同步。长期靠 G v2 的生成消除。
   - #1 改为「先删后建」：`knowledge-delete` 不级联 statement（两个后端都没有外键），实测 `belongTo` 边在重建后保留。代价是 session 节点的 `created_at` 重置，对运营型节点无害。
   - #2 实测：`--scopes ""` 存为无 scope，`["$has","scopes",""]` 查不到；`","` 存为 `[""]`，`"p,"` 存为 `["p",""]`。已改为尾逗号写法。原文会让 agent 写下的全局规则在全局查询里永久不可见。
-  - 备选（未做）：给 CLI 补 `knowledge-update`。`Lab::update_knowledge` 已存在，能原子替换并保留 `created_at`，但属于接口扩张，留待 H 或单独决定。
+  - 后续（2026-09-14）：CLI 已补 `knowledge-update`，hypatia-memory 改回用它替换 session 节点，保留 `created_at`，也不再有删与建之间的中断窗口。
 - 3–4：MCP 的 schema 化之后不可能再发生；CLI 侧不动，改 flag 名是无收益的破坏。
 - 5：**暂缓**。改 exit code 会让 DSH 插件的 `runOk` 把「不存在」当失败去重试，在 §5.3 修好之前会撞上不幂等的 `statement-create`；改措辞会让它的正则失效。MCP 会替 MCP 宿主解决；skill 宿主的收益不足以抵消破坏面。
 
