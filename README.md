@@ -30,9 +30,11 @@ cargo build --release
 
 ### 2. Store and query knowledge
 
-The first command creates the `default` shelf at `~/.hypatia/default`.
+`hypatia init` sets up the `default` shelf at `~/.hypatia/default` and shows what works on it (any other command creates that shelf too; `hypatia init <dir> -n <name>` sets up another one).
 
 ```bash
+hypatia init
+
 # Create knowledge
 hypatia knowledge-create "Rust" -d "systems programming language" -t "language,compiled"
 
@@ -234,6 +236,7 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 
 | Command | Description |
 |---------|-------------|
+| `hypatia init [<path>] [-n <name>]` | Set up a shelf (the default one, or the directory given) and show what works on it |
 | `hypatia connect <path> [-n <name>]` | Connect to a shelf directory |
 | `hypatia disconnect <name>` | Disconnect from a shelf |
 | `hypatia list` | List connected shelves |

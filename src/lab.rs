@@ -32,6 +32,21 @@ pub enum Attached {
     Remote { config: std::path::PathBuf },
 }
 
+/// What works on a shelf, as `hypatia init` reports it.
+#[derive(Debug)]
+pub struct ShelfStatus {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub postgres: bool,
+    /// What embeds the shelf's entries: a model name, shelf-directory files, or a remote API.
+    pub embedder: String,
+    /// Why semantic search is off, and how to turn it on; `None` when it is on.
+    pub semantic_search_off: Option<String>,
+    /// What stops vectors from being written although a model is there, and what to do.
+    pub attention: Option<String>,
+    pub debt: crate::storage::flush::EmbeddingDebt,
+}
+
 pub struct Lab {
     shelf_manager: ShelfManager,
 }
@@ -42,6 +57,12 @@ impl Lab {
         Ok(Self { shelf_manager })
     }
 
+    /// A lab over a given manager, so tests stay out of the real home directory.
+    #[cfg(test)]
+    pub(crate) fn from_manager(shelf_manager: ShelfManager) -> Self {
+        Self { shelf_manager }
+    }
+
     // --- Shelf operations ---
 
     pub fn connect_shelf(&mut self, path: &Path, name: Option<&str>) -> Result<String> {
@@ -50,6 +71,11 @@ impl Lab {
 
     pub fn disconnect_shelf(&mut self, name: &str) -> Result<()> {
         self.shelf_manager.disconnect(name)
+    }
+
+    /// Opens a registered shelf again; the error says why it cannot be opened.
+    pub fn reopen_shelf(&mut self, name: &str) -> Result<()> {
+        self.shelf_manager.reopen(name)
     }
 
     pub fn list_shelves(&self) -> Vec<(&str, &std::path::PathBuf, bool)> {
@@ -330,6 +356,41 @@ impl Lab {
         Ok(Attached::Configured { config, kept })
     }
 
+    /// What works on `shelf`, for `hypatia init`.
+    pub fn shelf_status(&self, shelf: &str) -> Result<ShelfStatus> {
+        let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        let embedding = &shelf_ref.settings.embedding;
+        let embedder = match embedding.provider {
+            crate::embedding::config::ProviderKind::Remote => {
+                format!("the remote API model {}", embedding.remote.api_model)
+            }
+            crate::embedding::config::ProviderKind::Local => {
+                embedding.model.clone().unwrap_or_else(|| {
+                    format!("the model at {}", embedding.local.model_path.display())
+                })
+            }
+        };
+        let debt = shelf_ref.embedding_debt()?;
+        // Only reported once semantic search is on; until then the way to turn it on comes first.
+        let attention = match shelf_ref.backend.identity_mismatch() {
+            // Its message already ends with the command that recovers the shelf.
+            Some(mismatch) => Some(mismatch.to_string()),
+            None => debt.blocked.as_ref().map(|blocked| blocked.message.clone()),
+        };
+        Ok(ShelfStatus {
+            name: shelf.to_string(),
+            path: shelf_ref.id.path.clone(),
+            postgres: shelf_ref.settings.storage.backend
+                == crate::storage::settings::BackendKind::Pgvector,
+            embedder,
+            semantic_search_off: shelf_ref.semantic_search_off(),
+            attention,
+            debt,
+        })
+    }
+
     // --- Archive files ---
 
     /// Store a file in the shelf's archives/ directory.
@@ -390,14 +451,21 @@ impl Lab {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
 
-        // A changed model explains more than "no model": report it first.
+        // Without a usable model nothing below can run, re-embedding included: say how to
+        // set one up first.
+        if let Some(off) = shelf_ref.semantic_search_off_error() {
+            return Err(off);
+        }
         if !reembed && let Some(m) = shelf_ref.backend.identity_mismatch() {
             return Err(m.to_error());
         }
         if !shelf_ref.embedder.is_available() {
-            return Err(crate::error::HypatiaError::ModelUnavailable(
-                "no embedding model found; place embedding_model.onnx and tokenizer.json in the shelf directory".to_string(),
-            ));
+            // The model is there but failed to load earlier in this process: embedding says why.
+            return Err(shelf_ref.embedder.embed("").err().unwrap_or_else(|| {
+                crate::error::HypatiaError::ModelUnavailable(
+                    "the embedding model is unavailable".to_string(),
+                )
+            }));
         }
 
         if !reembed
@@ -406,9 +474,9 @@ impl Lab {
                 + shelf_ref.backend.embedding_row_count("statement")?
                 > 0
         {
-            return Err(crate::error::HypatiaError::Config(
-                "legacy vector identity is unknown; run backfill --reembed explicitly".into(),
-            ));
+            return Err(crate::error::HypatiaError::Config(format!(
+                "legacy vector identity is unknown; run `hypatia backfill --reembed -s {shelf}` explicitly"
+            )));
         }
         if reembed {
             if !shelf_ref.settings.embedding.model_identity_trusted {
@@ -544,6 +612,95 @@ mod backfill_tests {
         }
     }
     #[test]
+    fn status_and_similar_say_how_to_turn_semantic_search_on() {
+        let home = tempfile::tempdir().unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        let named = tempfile::tempdir().unwrap();
+        std::fs::write(
+            named.path().join("shelf.toml"),
+            "[embedding]\nmodel = 'org/missing'\ndimensions = 3\n",
+        )
+        .unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(bare.path(), Some("bare")).unwrap();
+        manager.connect(named.path(), Some("named")).unwrap();
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        lab.create_knowledge("bare", "k", Content::new("x"))
+            .unwrap();
+
+        // No model at all: install the default one, or configure a remote API.
+        let status = lab.shelf_status("bare").unwrap();
+        let off = status.semantic_search_off.clone().unwrap();
+        assert!(
+            off.contains("hypatia model install BAAI/bge-m3 -s bare"),
+            "{off}"
+        );
+        assert_eq!((status.debt.pending_knowledge, status.postgres), (1, false));
+        let err = lab
+            .similar("bare", "x", "knowledge", 5)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("semantic search is off") && err.contains("model install"),
+            "{err}"
+        );
+
+        // A named model that is not installed: install that one.
+        let off = lab
+            .shelf_status("named")
+            .unwrap()
+            .semantic_search_off
+            .unwrap();
+        assert!(
+            off.contains("`hypatia model install org/missing -s named`"),
+            "{off}"
+        );
+        assert_eq!(lab.shelf_status("named").unwrap().embedder, "org/missing");
+
+        // Legacy paths that point nowhere: name the files, not the default model.
+        let legacy = tempfile::tempdir().unwrap();
+        std::fs::write(
+            legacy.path().join("shelf.toml"),
+            "[embedding]\nmodel_path = '/nonexistent/m.onnx'\ndimensions = 3\n",
+        )
+        .unwrap();
+        lab.connect_shelf(legacy.path(), Some("legacy")).unwrap();
+        let off = lab
+            .shelf_status("legacy")
+            .unwrap()
+            .semantic_search_off
+            .unwrap();
+        assert!(
+            off.starts_with("embedding model files not found: /nonexistent/m.onnx"),
+            "{off}"
+        );
+
+        // A remote API without its key: name the variable.
+        let remote = tempfile::tempdir().unwrap();
+        std::fs::write(
+            remote.path().join("shelf.toml"),
+            "[embedding]\nprovider = 'remote'\napi_key_env = 'HYPATIA_TEST_KEY_THAT_IS_NEVER_SET'\ndimensions = 3\n",
+        )
+        .unwrap();
+        lab.connect_shelf(remote.path(), Some("remote")).unwrap();
+        let off = lab
+            .shelf_status("remote")
+            .unwrap()
+            .semantic_search_off
+            .unwrap();
+        assert!(
+            off.ends_with("environment variable HYPATIA_TEST_KEY_THAT_IS_NEVER_SET"),
+            "{off}"
+        );
+
+        // A model that works turns it on.
+        lab.shelf_manager.get_mut("named").unwrap().embedder = Box::new(Fixed { fail: false });
+        let status = lab.shelf_status("named").unwrap();
+        assert_eq!((status.semantic_search_off, status.attention), (None, None));
+    }
+    #[test]
     fn backfill_embeds_a_page_per_batch_and_isolates_failures() {
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -635,11 +792,16 @@ mod backfill_tests {
             .conn()
             .execute("DELETE FROM meta WHERE k='embedding_metadata'", [])
             .unwrap();
+        // Both hints name the shelf: without `-s`, backfill would rebuild the default one.
+        let attention = lab.shelf_status("test").unwrap().attention.unwrap();
         assert!(
-            lab.backfill_vectors("test")
-                .unwrap_err()
-                .to_string()
-                .contains("--reembed")
+            attention.contains("`hypatia backfill --reembed -s test`"),
+            "{attention}"
+        );
+        let err = lab.backfill_vectors("test").unwrap_err().to_string();
+        assert!(
+            err.contains("`hypatia backfill --reembed -s test`"),
+            "{err}"
         );
         assert_eq!(
             lab.backfill_vectors_with_reembed("test", true)
@@ -746,6 +908,33 @@ mod backfill_tests {
         for err in refused {
             assert!(err.to_string().contains("--reembed"), "{err}");
         }
+        drop(lab);
+
+        // A changed model that is not installed: installing it comes before re-embedding.
+        write_model("org/missing");
+        let mut unusable = Lab {
+            shelf_manager: ShelfManager::with_home(home.path().into()).unwrap(),
+        };
+        let refused = [
+            unusable
+                .similar("test", "saved", "knowledge", 5)
+                .err()
+                .unwrap(),
+            unusable
+                .backfill_vectors_with_reembed("test", true)
+                .err()
+                .unwrap(),
+        ];
+        for err in refused {
+            assert!(
+                err.to_string()
+                    .contains("`hypatia model install org/missing -s test`"),
+                "{err}"
+            );
+        }
+        drop(unusable);
+        write_model("model-c");
+        let mut lab = open();
 
         // An explicit reembed rebuilds every vector under the new identity.
         assert_eq!(

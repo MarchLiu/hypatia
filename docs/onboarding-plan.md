@@ -324,6 +324,12 @@ F. 预编译分发：curl 安装脚本                      零依赖 · 漏斗�
   或在 shelf.toml 配置远程 API。已有内容会在启用后自动补齐向量。
 ```
 
+E 实现时定下的细节：
+
+- 命令为 `hypatia init [<dir>] [-n <name>]`：不带目录时报告 default shelf（`Lab::new` 已确保它存在）；带目录时连接该目录，已以同一路径登记则直接复用（比较时跟随符号链接；命名与登记用输入的路径，只解析 `..`，与 `connect` 一致），同一目录换名字则报错，名字已登记给别的目录时也报错并提示 `-n`（连接会覆盖那条登记，即使那个 shelf 只是启动时没打开），因此重复执行不改变任何东西。已登记但启动时没打开的 shelf 会重新打开一次，报出真实的打开错误。输出为英文，与其余 CLI 一致。
+- 状态分三层：shelf 就绪（路径与后端）；全文检索、图遍历、JSE 可用；语义检索。语义检索分三种：未启用时给出唯一的下一步（未配置模型 → `model install BAAI/bge-m3 -s <shelf>` 或配置远程 API；配置了未安装的 `Org/Name` → 安装该模型；远程缺 key → 说出环境变量名），并说明已有内容会自动补齐；模型存在但写不进向量（模型变更、legacy 向量）→ 给出 reembed 提示；可用 → 说明用的是哪个模型，有欠账时说明条数及暂停原因或 `backfill` 命令。
+- 「语义检索未启用」的同一段提示也用于 `similar` / `$similar` 的报错（`OpenShelf::semantic_search_off`），替代原来「找不到哪个模型文件」的报错；`similar` 与 `backfill` 都先检查它，再检查模型变更（重新 embed 也需要可用的模型）。提示里的命令一律带 `-s <shelf>`：`model install` 与 `backfill --reembed` 不带 `-s` 时作用于 default shelf，照着非 default shelf 的提示执行会改错 shelf。`init` 不跑命令入口的欠账检查，不加载模型，不连网，所以「可用」只表示已配置好，写作 "set up with"。
+
 **F 的具体内容**：
 
 - curl 安装脚本：探测平台 → 从 GitHub Releases 下载对应产物 → 放入 `~/.local/bin`。curl 下载不带 quarantine 属性，避开 Gatekeeper 对未签名 macOS 二进制的拦截；脚本内检查 AVX2（x86-64）与 libc++（Linux）。

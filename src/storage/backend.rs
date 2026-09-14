@@ -25,6 +25,8 @@ pub struct ShelfBackend {
     identity: EmbeddingMetadata,
     /// Stored vectors belong to a different model than configured.
     mismatch: Option<IdentityMismatch>,
+    /// The shelf's name, for hints that name a command.
+    shelf: String,
 }
 enum Backend {
     Local(LocalBackend),
@@ -274,6 +276,7 @@ impl ShelfBackend {
             inner,
             dims,
             identity_trusted: settings.embedding.model_identity_trusted,
+            shelf: config.id.name.clone(),
             mismatch: stored.map(|stored| IdentityMismatch {
                 shelf: config.id.name.clone(),
                 stored,
@@ -410,8 +413,10 @@ impl ShelfBackend {
         if legacy {
             return blocked(
                 BlockedReason::LegacyVectors,
-                "legacy vectors have unknown model identity; run `hypatia backfill --reembed`"
-                    .into(),
+                format!(
+                    "legacy vectors have unknown model identity; run `hypatia backfill --reembed -s {}`",
+                    self.shelf
+                ),
             );
         }
         Ok(None)

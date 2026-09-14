@@ -26,6 +26,14 @@ enum Commands {
     Disconnect { name: String },
     /// List connected shelves
     List,
+    /// Set up a shelf (the default one, or the directory given) and show what works on it
+    Init {
+        /// Shelf directory; the default shelf when omitted
+        path: Option<PathBuf>,
+        /// Name to register the directory under; without a directory, the registered shelf to report on
+        #[arg(short, long)]
+        name: Option<String>,
+    },
     /// Execute a JSE query
     Query {
         /// JSE query as JSON string
@@ -234,6 +242,7 @@ impl Commands {
             Self::Connect { .. }
             | Self::Disconnect { .. }
             | Self::List
+            | Self::Init { .. }
             | Self::Export { .. }
             | Self::Import { .. }
             | Self::Backfill { .. }
@@ -295,6 +304,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 }
             }
         }
+        Commands::Init { path, name } => super::init::run(lab, path.as_deref(), name.as_deref())?,
         Commands::Query { jse, shelf } => {
             let json: serde_json::Value = serde_json::from_str(&jse)
                 .map_err(|e| crate::error::HypatiaError::Parse(format!("invalid JSON: {e}")))?;
@@ -778,6 +788,7 @@ mod tests {
         assert_eq!(shelf(&["hypatia", "backfill", "-s", "work"]), None);
         assert_eq!(shelf(&["hypatia", "import", "/tmp/export"]), None);
         assert_eq!(shelf(&["hypatia", "list"]), None);
+        assert_eq!(shelf(&["hypatia", "init", "/tmp/shelf"]), None);
         assert_eq!(shelf(&["hypatia", "archive-list", "-s", "work"]), None);
     }
 

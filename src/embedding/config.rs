@@ -7,6 +7,8 @@ pub struct EmbeddingConfig {
     pub model_identity: String,
     /// True when a configured model name or local artifact fingerprint is available.
     pub model_identity_trusted: bool,
+    /// The model shelf.toml names, if any (`Org/Name` or a path).
+    pub model: Option<String>,
     /// Why a configured local model cannot be used (not installed, or broken).
     pub local_unavailable: Option<String>,
     /// Embed writes later, a batch at a time (the default); `false` embeds each write as it
@@ -671,6 +673,7 @@ impl EmbeddingConfig {
         Self {
             model_identity,
             model_identity_trusted,
+            model: toml.model.clone(),
             local_unavailable,
             defer: toml.defer.unwrap_or(true),
             provider,
@@ -694,6 +697,18 @@ impl EmbeddingConfig {
     /// Check if the local model files exist.
     pub fn local_files_exist(&self) -> bool {
         self.local.model_path.exists() && self.local.tokenizer_path.exists()
+    }
+
+    /// Point the install hint at `shelf`: without `-s`, `model install` sets up the default
+    /// shelf instead.
+    pub fn for_shelf(&mut self, shelf: &str) {
+        if let (Some(model), Some(reason)) = (&self.model, &mut self.local_unavailable) {
+            let bare = format!("`hypatia model install {model}`");
+            *reason = reason.replace(
+                &bare,
+                &format!("`hypatia model install {model} -s {shelf}`"),
+            );
+        }
     }
 }
 

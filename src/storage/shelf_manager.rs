@@ -80,6 +80,11 @@ impl Storage for OpenShelf {
         opts: &SearchOpts,
         target: QueryTarget,
     ) -> Result<QueryResult> {
+        // Say how to turn semantic search on first: re-embedding after a model change needs
+        // a usable model too.
+        if let Some(off) = self.semantic_search_off_error() {
+            return Err(off);
+        }
         // Refuse before embedding: the query vector could not be compared anyway.
         if let Some(m) = self.backend.identity_mismatch() {
             return Err(m.to_error());
@@ -128,8 +133,9 @@ enum RowFailure {
 impl OpenShelf {
     pub fn open(path: &Path, name: Option<&str>) -> Result<Self> {
         // Configuration errors must not create a SQLite file or local vector directory.
-        let settings = ShelfSettings::load(path)?;
+        let mut settings = ShelfSettings::load(path)?;
         let config = ShelfConfig::from_path(path, name);
+        settings.embedding.for_shelf(&config.id.name);
         std::fs::create_dir_all(path)?;
         let backend = ShelfBackend::open(&config, &settings)?;
         std::fs::create_dir_all(&config.archives_path)?;
@@ -276,6 +282,52 @@ impl OpenShelf {
             reason: BlockedReason::ProviderUnavailable,
             message,
         }))
+    }
+    /// Why semantic search is off on this shelf, and how to turn it on; `None` when a query
+    /// can be embedded.
+    pub fn semantic_search_off(&self) -> Option<String> {
+        if self.embedder.is_available() {
+            return None;
+        }
+        let embedding = &self.settings.embedding;
+        match embedding.provider {
+            ProviderKind::Remote => Some(format!(
+                "the remote API needs its key in the environment variable {}",
+                embedding.remote.api_key_env
+            )),
+            // Files that are there but fail to load: the embedding error itself says why.
+            ProviderKind::Local if embedding.local_files_exist() => None,
+            // A named model's message already says how to install it, or why it fails.
+            ProviderKind::Local => Some(embedding.local_unavailable.clone().unwrap_or_else(|| {
+                let local = &embedding.local;
+                let missing: Vec<String> = [&local.model_path, &local.tokenizer_path]
+                    .into_iter()
+                    .filter(|p| !p.exists())
+                    .map(|p| p.display().to_string())
+                    .collect();
+                let nothing_configured = missing.len() == 2
+                    && local.model_path == self.id.path.join("embedding_model.onnx")
+                    && local.tokenizer_path == self.id.path.join("tokenizer.json");
+                if nothing_configured {
+                    format!(
+                        "no embedding model is set up; run `hypatia model install BAAI/bge-m3 -s {}` (about 2.3 GB), or configure a remote API in {}",
+                        self.id.name,
+                        self.id.path.join("shelf.toml").display()
+                    )
+                } else {
+                    format!("embedding model files not found: {}", missing.join(", "))
+                }
+            })),
+        }
+    }
+    /// `semantic_search_off` as the error a vector operation fails with.
+    pub fn semantic_search_off_error(&self) -> Option<HypatiaError> {
+        self.semantic_search_off().map(|off| {
+            HypatiaError::ModelUnavailable(format!(
+                "semantic search is off on shelf '{}': {off}",
+                self.id.name
+            ))
+        })
     }
     /// Pays one batch of embedding debt, newest first, once at least `min_pending` entries
     /// are owed: one fail-fast attempt that writes vectors only (no index rebuild). Does
