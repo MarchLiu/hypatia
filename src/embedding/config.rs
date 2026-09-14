@@ -493,6 +493,11 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Where named models live, as `<Org>/<Name>` directories: `~/.hypatia/models`.
+pub fn models_dir() -> PathBuf {
+    dirs_home().join(".hypatia").join("models")
+}
+
 #[cfg(not(unix))]
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("{e}"))?;
@@ -587,6 +592,15 @@ impl EmbeddingConfig {
                                 model_ref, e
                             );
                             format!("embedding model '{model_ref}' is not usable: {e}")
+                        }
+                        _ if Path::new(model_ref).is_absolute() => {
+                            format!("embedding model directory {model_ref} does not exist")
+                        }
+                        // Only a Hugging Face name like Org/Name can be installed by name.
+                        _ if crate::embedding::install::validate_repo(model_ref).is_ok() => {
+                            format!(
+                                "embedding model '{model_ref}' is not installed; run `hypatia model install {model_ref}`"
+                            )
                         }
                         _ => format!("embedding model '{model_ref}' is not installed"),
                     });
@@ -784,7 +798,9 @@ mod tests {
         );
         assert_eq!(
             config.local_unavailable,
-            Some(format!("embedding model '{missing}' is not installed"))
+            Some(format!(
+                "embedding model directory {missing} does not exist"
+            ))
         );
     }
 

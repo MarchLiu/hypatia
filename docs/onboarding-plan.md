@@ -305,6 +305,15 @@ F. 预编译分发：curl 安装脚本                      零依赖 · 漏斗�
 - **自带下载器**：`ureq` 已是依赖（带 TLS，远程 provider 在用），直接走 `https://huggingface.co/<repo>/resolve/main/<file>`，不需要 Python 的 `hf`。要求：Range 断点续传（2.27 GB）、按 HF LFS 的 sha256 校验、下载完成后原子 rename、stderr 输出进度。
 - D 与 F 不耦合：三种分发方式都不会把 2.3 GB 的模型塞进包里。
 - **挂到目标 shelf**：没有 shelf.toml 的 shelf 只看 shelf 目录（§2.5 场景 2），因此 D 要在目标 shelf 的 shelf.toml 写入 `model = "<name>"`。只改**没有向量**的 shelf，写后立刻以新配置打开一次完成改绑（依赖 I）；已有向量的 shelf 只打印切换命令与 reembed 提示。
+- D 实现时定下的细节：
+  - 命令为 `hypatia model install <Org/Name> [-s <shelf>] [--revision <rev>]`，落到 `~/.hypatia/models/<Org>/<Name>/`，保留仓库内的相对路径（`onnx/…`），现有的模型解析无需改动即可找到。名字只允许 `Org/Name` 形式，防止写出 models 目录；已用 `model register` 登记（软链接）的名字拒绝写入。
+  - 先把 revision 解析成 commit（`/api/models/<repo>/revision/<rev>`，revision 整段百分号编码，返回的 sha 须为 40 位十六进制），所有文件都从这一个 commit 下载；目录名与写入 shelf.toml 的名字用 Hub 返回的 `id`（只接受大小写差异）。只列根目录与 `onnx/`，并跟随 `Link` 分页（只跟随同一 Hub 的链接）：取 `model.onnx`（优先 `onnx/`），同目录的 `model.onnx_data` / `model.onnx.data` 及编号分片 `model.onnx_data_<n>`，以及同目录的 `tokenizer.json`，没有才用根目录的 —— BAAI/bge-m3 根目录与 `onnx/` 的 tokenizer 并不相同。图文件最后下载，中断的安装不会被当成可用模型。没有 ONNX 导出的仓库直接报错。
+  - 模型目录里写 `.hypatia-install.json`，记录 commit 与每个文件的版本（LFS 文件用 sha256，其他用 git oid），每落地一个文件更新一次。只有记录与 Hub 当前版本一致的文件才跳过；没有记录但已在的大文件按 sha256 校验通过后接受。文件换了版本时提示依赖该模型的 shelf 需要 `backfill --reembed`（identity 只含模型名，不含 commit）。
+  - 下载写到 `<file>.<版本前 16 位>.part`，续传发 `Range`：206 且 `Content-Range` 起点正确才追加；服务器返回 200、起点不对或 416 都从头来。边写边算 sha256，LFS 文件比对 Hub 给出的 sha256（忽略大小写），小文件只比大小；校验不符删除 `.part` 并报错；`sync_all` 后原子 rename。请求带 `Accept-Encoding: identity`。连接 30 s、等响应头 60 s 超时，不设整体超时；卡住时中断重跑即可续传。
+  - 同一模型目录用操作系统文件锁防止并发安装（进程退出即释放，Ctrl-C 后可直接重跑）；models 目录下沿途有软链接（例如 `model register` 登记的模型）一律拒绝写入。
+  - 支持 `HF_ENDPOINT`（镜像）与 `HF_TOKEN`。token 在同主机重定向时保留（Hub 对小文件用同主机 307），跨主机（CDN）时丢弃。Hub 对不存在的仓库也回 401，因此没有 `X-Error-Code` 时提示「不存在，或 gated / private」；`GatedRepo` 时提示先在 Hub 上接受条款。
+  - 下载前先确认目标 shelf 已连接。shelf.toml 用 `toml_edit` 原地修改：缺 `[embedding]` 时建独立的表（不是内联表），保留注释与 `[storage]` 等其他设置，清掉已被 `model` 取代的 `model_path` / `tokenizer_path`；写入沿用原文件权限（可能含数据库密码），`sync_all` 后 rename，软链接则写到它指向的文件。重新打开失败时恢复原文件，恢复也失败则两个错误一起报告。remote shelf 与已名为该模型的 shelf 不改；非 BAAI/bge-m3 的模型额外提示检查 `dimensions` / `pooling` / `max_seq_length`。
+  - 配置里 `model` 形如 `Org/Name` 且未安装时，提示信息改为「run `hypatia model install <name>`」。
 
 **E 的状态提示建议**（依赖 C、I 落地，否则最后一句不成立）：
 

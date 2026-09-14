@@ -1,5 +1,6 @@
 pub mod config;
 pub mod embedder;
+pub mod install;
 pub mod provider;
 
 pub use config::EmbeddingConfig;

@@ -747,6 +747,19 @@ impl ShelfManager {
         self.shelves.get_mut(name)
     }
 
+    /// Opens a registered shelf again, so a changed shelf.toml takes effect.
+    pub fn reopen(&mut self, name: &str) -> Result<()> {
+        let path = self
+            .registry
+            .get(name)
+            .cloned()
+            .ok_or_else(|| HypatiaError::Shelf(format!("shelf '{name}' is not registered")))?;
+        // Close it first: dropping a shelf saves its vector caches.
+        self.shelves.remove(name);
+        self.connect_internal(&path, Some(name))?;
+        Ok(())
+    }
+
     /// List all registered shelves with their paths.
     /// Returns (name, path, is_connected) tuples.
     pub fn list(&self) -> Vec<(&str, &std::path::PathBuf, bool)> {

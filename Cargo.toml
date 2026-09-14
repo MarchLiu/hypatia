@@ -18,6 +18,7 @@ ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
 tokenizers = "0.21"
 ndarray = "0.17"
 toml = "0.8"
+toml_edit = "0.22"
 ureq = { version = "3", features = ["json"] }
 jieba-rs = "0.8"
 sha2 = "0.11"

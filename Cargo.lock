@@ -1383,6 +1383,7 @@ dependencies = [
  "thiserror",
  "tokenizers",
  "toml",
+ "toml_edit 0.22.27",
  "ureq",
  "usearch",
 ]

@@ -15,6 +15,23 @@ pub struct BackfillStats {
     pub errors: usize,
 }
 
+/// What pointing a shelf at a local model did.
+#[derive(Debug, PartialEq)]
+pub enum Attached {
+    /// shelf.toml now names the model, and the shelf was opened again with it. `kept` lists
+    /// model settings shelf.toml already had, which may have been meant for another model.
+    Configured {
+        config: std::path::PathBuf,
+        kept: Vec<String>,
+    },
+    /// The shelf already names the model.
+    AlreadyConfigured,
+    /// The shelf holds vectors of another model, which switching would strand; unchanged.
+    HasVectors { config: std::path::PathBuf },
+    /// The shelf embeds through a remote API; unchanged.
+    Remote { config: std::path::PathBuf },
+}
+
 pub struct Lab {
     shelf_manager: ShelfManager,
 }
@@ -225,6 +242,94 @@ impl Lab {
         shelf_ref.flush_if_overdue()
     }
 
+    /// Points `shelf` at the local model `model` by naming it in the shelf's shelf.toml, and
+    /// opens the shelf again so it takes effect. A shelf holding vectors of another model, or
+    /// embedding through a remote API, is only reported on. Comments and other settings in
+    /// shelf.toml are kept.
+    pub fn attach_model(&mut self, shelf: &str, model: &str) -> Result<Attached> {
+        let dir = self
+            .shelf_manager
+            .list()
+            .into_iter()
+            .find(|(name, _, _)| *name == shelf)
+            .map(|(_, path, _)| path.clone())
+            .ok_or_else(|| {
+                crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not registered"))
+            })?;
+        let config = dir.join("shelf.toml");
+        let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        if shelf_ref.settings.embedding.provider == crate::embedding::config::ProviderKind::Remote {
+            return Ok(Attached::Remote { config });
+        }
+        let original = match std::fs::read_to_string(&config) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        // Never echo the file: it may hold a PostgreSQL connection string.
+        let mut document: toml_edit::DocumentMut = original
+            .as_deref()
+            .unwrap_or_default()
+            .parse()
+            .map_err(|e: toml_edit::TomlError| {
+                crate::error::HypatiaError::Config(format!("invalid shelf.toml: {}", e.message()))
+            })?;
+        let current = document
+            .get("embedding")
+            .and_then(|embedding| embedding.get("model"))
+            .and_then(|model| model.as_str());
+        if current == Some(model) {
+            return Ok(Attached::AlreadyConfigured);
+        }
+        let backend = &shelf_ref.backend;
+        if backend.embedding_row_count("knowledge")? + backend.embedding_row_count("statement")? > 0
+        {
+            return Ok(Attached::HasVectors { config });
+        }
+        if document
+            .get("embedding")
+            .is_some_and(|embedding| !embedding.is_table_like())
+        {
+            return Err(crate::error::HypatiaError::Config(
+                "shelf.toml: embedding must be a table".into(),
+            ));
+        }
+        if document.get("embedding").is_none() {
+            // A section of its own, where instructions tell users to add settings.
+            document["embedding"] = toml_edit::table();
+        }
+        document["embedding"]["model"] = toml_edit::value(model);
+        if let Some(embedding) = document["embedding"].as_table_like_mut() {
+            // `model` takes their place; left behind they would still change the identity.
+            embedding.remove("model_path");
+            embedding.remove("tokenizer_path");
+        }
+        let kept: Vec<String> = ["dimensions", "pooling", "max_seq_length"]
+            .into_iter()
+            .filter(|key| document["embedding"].get(key).is_some())
+            .map(String::from)
+            .collect();
+        write_atomically(&config, &document.to_string())?;
+        if let Err(e) = self.shelf_manager.reopen(shelf) {
+            // Put the shelf back as it was, and say so if even that fails.
+            let restored = match &original {
+                Some(text) => write_atomically(&config, text),
+                None => std::fs::remove_file(&config).map_err(Into::into),
+            }
+            .and_then(|()| self.shelf_manager.reopen(shelf));
+            return Err(match restored {
+                Ok(()) => e,
+                Err(restore) => crate::error::HypatiaError::Config(format!(
+                    "{e}; restoring {} failed too: {restore}",
+                    config.display()
+                )),
+            });
+        }
+        Ok(Attached::Configured { config, kept })
+    }
+
     // --- Archive files ---
 
     /// Store a file in the shelf's archives/ directory.
@@ -375,6 +480,27 @@ impl Lab {
 
         Ok(stats)
     }
+}
+
+/// Replaces a file in one step, so a crash never leaves it half written or empty. Its
+/// permissions are kept (shelf.toml may hold a database password), and a symbolic link is
+/// followed to the file it names.
+fn write_atomically(path: &Path, text: &str) -> Result<()> {
+    let target = if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        std::fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
+    };
+    let dir = target.parent().unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        temporary.as_file().set_permissions(meta.permissions())?;
+    }
+    std::io::Write::write_all(temporary.as_file_mut(), text.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&target).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// Whether a JSE expression contains a `$similar` operator anywhere.
@@ -715,6 +841,111 @@ mod backfill_tests {
             "$knowledge",
             ["$has", "tags", ["$similar"]]
         ])));
+    }
+    #[test]
+    fn a_model_is_attached_only_where_it_strands_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("shelf.toml");
+        std::fs::write(
+            &config,
+            "# my shelf\n[embedding]\ndimensions = 3\ntokenizer_path = 'old-tokenizer.json'\n\n[storage]\nbackend = 'sqlite'\n",
+        )
+        .unwrap();
+        // It may hold a database password: its permissions must survive the rewrite.
+        #[cfg(unix)]
+        std::fs::set_permissions(&config, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        lab.create_knowledge("test", "k", Content::new("x"))
+            .unwrap();
+
+        // No vectors yet: the model is named, and the reopened shelf uses it.
+        assert_eq!(
+            lab.attach_model("test", "org/model").unwrap(),
+            Attached::Configured {
+                config: config.clone(),
+                kept: vec!["dimensions".to_string()],
+            }
+        );
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            text.contains("# my shelf") && text.contains("[storage]"),
+            "{text}"
+        );
+        assert!(text.contains("model = \"org/model\""), "{text}");
+        assert!(!text.contains("tokenizer_path"), "{text}");
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&config).unwrap().permissions()
+            ) & 0o777,
+            0o600
+        );
+        let identity = |lab: &Lab| {
+            lab.shelf_manager
+                .get("test")
+                .unwrap()
+                .settings
+                .embedding
+                .model_identity()
+                .to_string()
+        };
+        assert!(identity(&lab).contains("org/model"));
+        assert_eq!(
+            lab.attach_model("test", "org/model").unwrap(),
+            Attached::AlreadyConfigured
+        );
+
+        // With vectors of that model, another one is only reported on.
+        lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
+        assert_eq!(lab.backfill_vectors("test").unwrap().created, 1);
+        assert_eq!(
+            lab.attach_model("test", "other/model").unwrap(),
+            Attached::HasVectors {
+                config: config.clone()
+            }
+        );
+        assert!(
+            !std::fs::read_to_string(&config)
+                .unwrap()
+                .contains("other/model")
+        );
+        assert!(identity(&lab).contains("org/model"));
+
+        // A shelf without a shelf.toml gets one; a remote shelf is left alone.
+        let bare = tempfile::tempdir().unwrap();
+        lab.connect_shelf(bare.path(), Some("bare")).unwrap();
+        assert!(matches!(
+            lab.attach_model("bare", "org/model").unwrap(),
+            Attached::Configured { .. }
+        ));
+        // A section of its own, not an inline table, so settings can be added beside it.
+        let created = std::fs::read_to_string(bare.path().join("shelf.toml")).unwrap();
+        assert!(
+            created.contains("[embedding]") && created.contains("model = \"org/model\""),
+            "{created}"
+        );
+        let remote = tempfile::tempdir().unwrap();
+        let remote_config = remote.path().join("shelf.toml");
+        let remote_text =
+            "[embedding]\nprovider = 'remote'\napi_key_env = 'PATH'\ndimensions = 3\n";
+        std::fs::write(&remote_config, remote_text).unwrap();
+        lab.connect_shelf(remote.path(), Some("remote")).unwrap();
+        assert_eq!(
+            lab.attach_model("remote", "org/model").unwrap(),
+            Attached::Remote {
+                config: remote_config.clone()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&remote_config).unwrap(),
+            remote_text
+        );
     }
 }
 

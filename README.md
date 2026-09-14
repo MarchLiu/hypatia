@@ -53,15 +53,10 @@ hypatia repl
 
 ### 3. Optional: enable semantic search
 
-`similar` needs an embedding model. Either configure a [remote OpenAI-compatible API](#remote-api-openai-compatible), or download BGE-M3 (about 2.3 GB) into the shelf directory:
+`similar` needs an embedding model. Either configure a [remote OpenAI-compatible API](#remote-api-openai-compatible), or install BGE-M3 (about 2.3 GB) for the default shelf:
 
 ```bash
-mkdir -p ~/.hypatia/default
-hf download BAAI/bge-m3 --local-dir /tmp/bge-m3
-cp /tmp/bge-m3/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
-cp /tmp/bge-m3/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
-cp /tmp/bge-m3/onnx/tokenizer.json ~/.hypatia/default/tokenizer.json
-
+hypatia model install BAAI/bge-m3        # resumes if interrupted; -s <shelf> for another shelf
 hypatia backfill                         # optional: embed everything written so far, at once
 hypatia similar "programming language"   # semantic search
 ```
@@ -74,10 +69,11 @@ Hypatia supports multiple embedding backends, configured via `shelf.toml` in the
 
 ### Default: BAAI/bge-m3 (Local ONNX)
 
-No configuration needed — place model files in the shelf directory and Hypatia auto-detects them.
+`hypatia model install BAAI/bge-m3` downloads the ONNX export into `~/.hypatia/models/BAAI/bge-m3/` (large files verified against the Hub's sha256) and names it in the shelf's `shelf.toml` (`-s <shelf>`, default `default`). Running it again fetches only files that changed upstream; if any did, re-embed the shelves that already use the model (`hypatia backfill --reembed`). A shelf that already holds vectors of another model, or uses a remote API, is left unchanged, with instructions to switch. Set `HF_ENDPOINT` to use a mirror, and `HF_TOKEN` for gated repositories.
+
+Model files placed directly in the shelf directory are picked up without any configuration too:
 
 ```bash
-# Download from HuggingFace
 hf download BAAI/bge-m3 --local-dir /tmp/bge-m3
 cp /tmp/bge-m3/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
 cp /tmp/bge-m3/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
@@ -125,12 +121,7 @@ hf download google/embedding-gemma-300M --local-dir /tmp/embedding-gemma
 #### jinaai/jina-embeddings-v5-text-small
 
 ```bash
-hf download jinaai/jina-embeddings-v5-text-small-text-matching \
-  onnx/model.onnx onnx/model.onnx_data tokenizer.json \
-  --local-dir /tmp/jina-v5-small
-cp /tmp/jina-v5-small/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
-cp /tmp/jina-v5-small/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
-cp /tmp/jina-v5-small/tokenizer.json ~/.hypatia/default/tokenizer.json
+hypatia model install jinaai/jina-embeddings-v5-text-small-text-matching
 ```
 
 shelf.toml:
@@ -149,12 +140,7 @@ pooling = "last_token"
 #### jinaai/jina-embeddings-v5-text-nano
 
 ```bash
-hf download jinaai/jina-embeddings-v5-text-nano-text-matching \
-  onnx/model.onnx onnx/model.onnx_data tokenizer.json \
-  --local-dir /tmp/jina-v5-nano
-cp /tmp/jina-v5-nano/onnx/model.onnx ~/.hypatia/default/embedding_model.onnx
-cp /tmp/jina-v5-nano/onnx/model.onnx_data ~/.hypatia/default/model.onnx_data
-cp /tmp/jina-v5-nano/tokenizer.json ~/.hypatia/default/tokenizer.json
+hypatia model install jinaai/jina-embeddings-v5-text-nano-text-matching
 ```
 
 shelf.toml:
@@ -259,6 +245,9 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
 | `hypatia similar <query> [--limit N]` | Vector similarity search |
 | `hypatia backfill [--reembed] [-s <shelf>]` | Generate embeddings for entries missing vectors (or regenerate all) |
+| `hypatia backfill --status [-s <shelf>]` | Report pending entries and why embedding may be stuck, as JSON |
+| `hypatia model install <org/name> [-s <shelf>] [--revision <rev>]` | Download an ONNX embedding model from Hugging Face and use it on a shelf |
+| `hypatia model list` / `model show <name>` / `model register <name> <path>` | List, inspect or register local models |
 | `hypatia import <source> [-s <shelf>] [--reembed]` | Import an exported snapshot into an empty shelf |
 | `hypatia archive-store <file> [-n <name>] [-s <shelf>]` | Store a file in archives with auto-metadata |
 | `hypatia archive-get <name> [-o <output>] [-s <shelf>]` | Get an archive file path or copy it |

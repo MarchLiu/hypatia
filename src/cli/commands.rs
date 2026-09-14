@@ -202,6 +202,17 @@ enum ModelCommands {
         /// Model name or path
         name: String,
     },
+    /// Download an ONNX model from Hugging Face into ~/.hypatia/models/ and use it on a shelf
+    Install {
+        /// Model name in Org/Name format (e.g. "BAAI/bge-m3")
+        name: String,
+        /// Shelf to use the model on; left unchanged if it holds vectors of another model
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+        /// Branch, tag or commit to download
+        #[arg(long, default_value = "main")]
+        revision: String,
+    },
 }
 
 impl Commands {
@@ -612,19 +623,26 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 println!("  ({} unsummarized messages)", result.rows.len());
             }
         }
-        Commands::Model(cmd) => execute_model_command(cmd)?,
+        Commands::Model(cmd) => execute_model_command(lab, cmd)?,
         Commands::Repl => unreachable!(),
     }
     Ok(())
 }
 
-fn execute_model_command(cmd: ModelCommands) -> crate::error::Result<()> {
+fn execute_model_command(lab: &mut Lab, cmd: ModelCommands) -> crate::error::Result<()> {
     match cmd {
+        ModelCommands::Install {
+            name,
+            shelf,
+            revision,
+        } => super::model_install::run(lab, &name, &shelf, &revision)?,
         ModelCommands::List => {
             let models = crate::embedding::config::list_local_models();
             if models.is_empty() {
                 println!("No models found in ~/.hypatia/models/");
-                println!("Use 'hypatia model register <name> <path>' to register a model.");
+                println!(
+                    "Use 'hypatia model install BAAI/bge-m3' to download one, or 'hypatia model register <name> <path>' to register a local directory."
+                );
             } else {
                 for (name, path) in &models {
                     // Show symlink target if applicable
