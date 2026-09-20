@@ -31,6 +31,7 @@ pub(super) fn definitions() -> Vec<Value> {
     let scopes = strings(
         "Scopes; include \"\" for the global scope. An entry without \"\" is invisible to global lookups",
     );
+    let embed = json!({ "type": "boolean", "description": "false keeps the entry out of the vector index: it is still stored, still found by search and JSE, but never embedded. Defaults to true, and the shelf may skip whole tags of its own" });
     let knowledge_fields = |data: &str| {
         json!({
             "name": { "type": "string", "description": "Knowledge entry name" },
@@ -39,6 +40,7 @@ pub(super) fn definitions() -> Vec<Value> {
             "synonyms": synonyms,
             "figures": figures,
             "scopes": scopes,
+            "embed": embed,
             "shelf": shelf
         })
     };
@@ -158,7 +160,8 @@ pub(super) fn definitions() -> Vec<Value> {
                     "properties": { "head": strings("Synonyms of the head"), "relation": strings("Synonyms of the relation"), "tail": strings("Synonyms of the tail") },
                     "additionalProperties": false
                 },
-                "scopes": scopes
+                "scopes": scopes,
+                "embed": embed
             })),
             &["head", "relation", "tail"],
             write(true),
@@ -336,6 +339,7 @@ struct KnowledgeArgs {
     synonyms: Option<Vec<String>>,
     figures: Option<Vec<String>>,
     scopes: Option<Vec<String>>,
+    embed: Option<bool>,
     shelf: Option<String>,
 }
 
@@ -355,6 +359,7 @@ struct StatementArgs {
     data: Option<String>,
     synonyms: Option<PositionalSynonyms>,
     scopes: Option<Vec<String>>,
+    embed: Option<bool>,
     shelf: Option<String>,
 }
 
@@ -576,7 +581,8 @@ fn knowledge_create(lab: &mut Lab, args: Value) -> ToolResult {
         .with_tags(clean_list(args.tags.unwrap_or_default()))
         .with_synonyms(flat_synonyms(args.synonyms.unwrap_or_default()))
         .with_figures(clean_list(args.figures.unwrap_or_default()))
-        .with_scopes(clean_scopes(args.scopes.unwrap_or_default()));
+        .with_scopes(clean_scopes(args.scopes.unwrap_or_default()))
+        .with_embed(args.embed);
     let k = lab
         .create_knowledge(&shelf, &args.name, content)
         .map_err(|e| e.to_string())?;
@@ -605,10 +611,12 @@ fn knowledge_update(lab: &mut Lab, args: Value) -> ToolResult {
         synonyms: args.synonyms.map(flat_synonyms),
         figures: args.figures.map(clean_list),
         scopes: args.scopes.map(clean_scopes),
+        embed: args.embed,
     };
     if patch.is_empty() {
         return Err(
-            "nothing to update: pass at least one of data, tags, synonyms, figures, scopes".into(),
+            "nothing to update: pass at least one of data, tags, synonyms, figures, scopes, embed"
+                .into(),
         );
     }
     enter(lab, &shelf);
@@ -638,7 +646,8 @@ fn statement_create(lab: &mut Lab, args: Value) -> ToolResult {
     let key = StatementKey::new(&args.head, &args.relation, &args.tail);
     let content = Content::new(args.data.unwrap_or_default())
         .with_synonyms(args.synonyms.and_then(positional_synonyms))
-        .with_scopes(clean_scopes(args.scopes.unwrap_or_default()));
+        .with_scopes(clean_scopes(args.scopes.unwrap_or_default()))
+        .with_embed(args.embed);
     let outcome = lab
         .create_statement(&shelf, &key, content, None, None)
         .map_err(|e| e.to_string())?;

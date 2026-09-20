@@ -41,9 +41,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new(index: &str) -> Self {
+        Self::with_embedding(index, "")
+    }
+    /// `extra` adds `[embedding]` keys that leave the model identity alone, such as
+    /// `skip_tags`, so a second store can open the same schema under a different rule.
+    fn with_embedding(index: &str, extra: &str) -> Self {
         std::env::var("HYPATIA_TEST_POSTGRES_URL").expect("set HYPATIA_TEST_POSTGRES_URL to a disposable PostgreSQL database with pgvector installed");
         let settings = ShelfSettings::parse(
-            "[embedding]\nprovider='remote'\napi_model='pg-store-test'\ndimensions=3",
+            &format!(
+                "[embedding]\nprovider='remote'\napi_model='pg-store-test'\ndimensions=3\n{extra}"
+            ),
             std::path::Path::new("."),
         )
         .unwrap();
@@ -466,6 +473,175 @@ fn pending_entries_and_meta_values() {
     // Extra meta keys never disturb opening.
     drop(store);
     assert!(f.open().stored_identity_mismatch().is_none());
+}
+
+#[test]
+#[ignore = "requires a disposable PostgreSQL database with pgvector"]
+fn entries_the_shelf_does_not_embed_are_never_pending() {
+    // Written while the shelf embedded everything.
+    let f = Fixture::new("none");
+    let store = f.open();
+    let message = Content::new("a turn").with_tags(vec!["message".into()]);
+    for (name, content) in [
+        ("msg-1", &message),
+        ("msg-2", &message),
+        ("fact", &Content::new("distilled")),
+    ] {
+        let version = store.insert_knowledge(name, content).unwrap();
+        assert!(
+            store
+                .install_embedding("knowledge", name, version, &[1., 0., 0.])
+                .unwrap()
+        );
+    }
+    assert_eq!(store.embedding_row_count("knowledge").unwrap(), 3);
+    drop(store);
+
+    // The same schema, opened by a shelf that skips that tag.
+    let skipping = ShelfSettings::parse(
+        "[embedding]\nprovider='remote'\napi_model='pg-store-test'\ndimensions=3\nskip_tags=['message']\n",
+        std::path::Path::new("."),
+    )
+    .unwrap()
+    .embedding;
+    let store = PgStore::open(&f.config, &f.vector, &skipping).unwrap();
+    assert!(store.stored_identity_mismatch().is_none());
+
+    // New writes of either kind owe nothing and can be given nothing.
+    for (name, content) in [
+        ("msg-3", message.clone()),
+        ("quiet", Content::new("x").with_embed(Some(false))),
+    ] {
+        let version = store.insert_knowledge(name, &content).unwrap();
+        assert!(
+            !store
+                .install_embedding("knowledge", name, version, &[1., 0., 0.])
+                .unwrap()
+        );
+    }
+    assert_eq!(store.pending_count("knowledge").unwrap(), 0);
+    let listed: Vec<String> = store
+        .newest_missing_embeddings(10)
+        .unwrap()
+        .into_iter()
+        .map(|(_, key, _, _)| key)
+        .collect();
+    assert!(listed.is_empty(), "{listed:?}");
+    assert!(
+        store
+            .missing_embeddings("knowledge", None, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Content with no `tags` key at all: `jsonb_exists_any` is strict, so a naive test
+    // would decide NULL here — neither embeddable nor clearable, and silently so.
+    f.admin()
+        .execute(
+            &format!(
+                "INSERT INTO \"{}\".knowledge(name,content,payload,tokens) VALUES('legacy','{{\"format\":\"markdown\",\"data\":\"x\"}}'::jsonb,'{{}}'::jsonb,'{{}}'::jsonb)",
+                f.config.schema
+            ),
+            &[],
+        )
+        .unwrap();
+
+    // The vectors the old rule left behind come out, and only those.
+    assert_eq!(store.clear_skipped_embeddings().unwrap(), 2);
+    // Read the column rather than the store's own listing: content predating `tags` does
+    // not deserialize, which is exactly why the SQL side must decide it without help.
+    let decided: Option<bool> = f
+        .admin()
+        .query_one(
+            &format!(
+                "SELECT embeddable FROM \"{}\".knowledge WHERE name='legacy'",
+                f.config.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(decided, Some(true), "content with no tags key still embeds");
+    f.admin()
+        .execute(
+            &format!(
+                "DELETE FROM \"{}\".knowledge WHERE name='legacy'",
+                f.config.schema
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(store.clear_skipped_embeddings().unwrap(), 0);
+    assert_eq!(store.embedding_row_count("knowledge").unwrap(), 1);
+    assert_eq!(store.pending_count("knowledge").unwrap(), 0);
+    // An entry that still embeds is untouched, and a new one is still owed a vector.
+    let version = store
+        .insert_knowledge("another-fact", &Content::new("also distilled"))
+        .unwrap();
+    assert_eq!(store.pending_count("knowledge").unwrap(), 1);
+    assert!(
+        store
+            .is_pending("knowledge", "another-fact", version)
+            .unwrap()
+    );
+    assert!(
+        store
+            .install_embedding("knowledge", "another-fact", version, &[1., 0., 0.])
+            .unwrap()
+    );
+}
+
+#[test]
+#[ignore = "requires a disposable PostgreSQL database with pgvector"]
+fn a_schema_written_before_the_embeddable_column_gains_it_in_place() {
+    let f = Fixture::new("none");
+    let store = f.open();
+    let version = store
+        .insert_knowledge("before", &Content::new("written by an older binary"))
+        .unwrap();
+    drop(store);
+
+    // Put the schema back the way a binary without the column left it.
+    let schema = &f.config.schema;
+    f.admin()
+        .batch_execute(&format!(
+            "ALTER TABLE \"{schema}\".knowledge DROP COLUMN embeddable;
+             ALTER TABLE \"{schema}\".statement DROP COLUMN embeddable;
+             CREATE INDEX knowledge_missing_embedding_idx ON \"{schema}\".knowledge(name) WHERE embedding IS NULL;
+             CREATE INDEX statement_missing_embedding_idx ON \"{schema}\".statement(triple) WHERE embedding IS NULL;"
+        ))
+        .unwrap();
+
+    // Opening it again adds the column and the indexes it belongs to; structure validation
+    // accepts the result, and the row that predates the column is embeddable.
+    let store = f.open();
+    assert_eq!(store.pending_count("knowledge").unwrap(), 1);
+    assert!(
+        store
+            .install_embedding("knowledge", "before", version, &[1., 0., 0.])
+            .unwrap()
+    );
+    let stale: i64 = f
+        .admin()
+        .query_one(
+            "SELECT count(*) FROM pg_catalog.pg_indexes WHERE schemaname=$1 AND indexname LIKE '%missing_embedding%'",
+            &[schema],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(stale, 0, "indexes that ignore the column are dropped");
+    let current: i64 = f
+        .admin()
+        .query_one(
+            "SELECT count(*) FROM pg_catalog.pg_indexes WHERE schemaname=$1 AND indexname LIKE '%\\_pending\\_%' AND indexdef LIKE '%embeddable%'",
+            &[schema],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        current, 4,
+        "two pending indexes per catalog, both on the column"
+    );
 }
 
 #[test]

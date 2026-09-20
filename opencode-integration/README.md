@@ -37,3 +37,11 @@ Restart OpenCode. The plugin requires the `hypatia` CLI on `PATH`
 State (turn counters, last user prompt) lives in
 `~/.opencode/hypatia-memory/state.json`; extraction signals are written
 to `~/.opencode/hypatia-memory/extract-needed`.
+
+The plugin writes one entry per turn, which is bulk the vector index does not
+want. Keep that layer out of it once, in the shelf's `shelf.toml`:
+
+```toml
+[embedding]
+skip_tags = ["message", "session"]
+```

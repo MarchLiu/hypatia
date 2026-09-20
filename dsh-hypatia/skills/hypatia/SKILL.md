@@ -75,14 +75,17 @@ Knowledge entries are independent information points with a name, content, and t
 ### Create
 
 ```
-hypatia knowledge-create <name> -d "<data>" -t "<tag1,tag2>" --figures "archive://path/to/file"
+hypatia knowledge-create <name> -d "<data>" -t "<tag1,tag2>" --figures "archive://path/to/file" [--no-embed]
 ```
+
+`--no-embed` keeps the entry out of the vector index: it is still stored and still found by `search` and `query`, but it is never embedded, so it costs no model call on the way in and is not a `similar` result. Use it for raw session logs and other bulk that carries no distilled knowledge. A shelf can skip whole tags instead, with `embedding.skip_tags` in `shelf.toml`.
 
 | User says | Command |
 |---|---|
 | "remember Rust as a systems programming language" | `hypatia knowledge-create "Rust" -d "systems programming language" -t "language,compiled"` |
 | "save knowledge about Go with tags language and compiled" | `hypatia knowledge-create "Go" -d "" -t "language,compiled"` |
 | "store that Python is a scripting language, tag it as dynamic" | `hypatia knowledge-create "Python" -d "scripting language" -t "dynamic"` |
+| "log this turn but don't make it searchable by meaning" | `hypatia knowledge-create "msg-42" -d "<turn>" -t "message" --no-embed` |
 
 ### Read
 
@@ -97,8 +100,10 @@ hypatia knowledge-get <name>
 ### Update
 
 ```
-hypatia knowledge-update <name> [-d "<data>"] [-t "<tags>"] [--synonyms "<csv>"] [--figures "<refs>"] [--scopes "<scopes>"]
+hypatia knowledge-update <name> [-d "<data>"] [-t "<tags>"] [--synonyms "<csv>"] [--figures "<refs>"] [--scopes "<scopes>"] [--no-embed | --embed]
 ```
+
+`--no-embed` takes the entry out of the vector index and discards the vector it had; `--embed` puts it back, and it is embedded on the next flush. The two are mutually exclusive. `--embed` does not override the shelf's `embedding.skip_tags`: an entry can ask for less indexing than its shelf, never more.
 
 Only the fields you pass change. An omitted field keeps its stored value, and exactly `""` clears a field, such as `-t ""`; for tags, `","` or `" "` would store blank tags instead. `--scopes` replaces the stored scopes and is parsed as on create: end the list with a comma, such as `"q,"`, to include the global scope, or the entry drops out of global lookups. The entry keeps its `created_at`. Its old vector is discarded, and a new one is generated on the next flush, as after `knowledge-create`. Updating an entry that does not exist is an error. An update that changes nothing prints `Knowledge unchanged: <name>` and writes nothing.
 
@@ -129,8 +134,10 @@ When the user asks to store or remember information, **always create statements 
 **Pattern**: After creating a knowledge entry, identify entities mentioned in the content and create `$triple` relationships between them. At minimum, create one `is_a` statement for every new knowledge entry.
 
 ```
-hypatia statement-create <head> <relation> <tail> -d "<data>"
+hypatia statement-create <head> <relation> <tail> -d "<data>" [--no-embed]
 ```
+
+`--no-embed` works as it does on `knowledge-create`: the triple is still stored and still traversable, but gets no vector. Two differences: statements carry no tags, so a shelf's `embedding.skip_tags` cannot reach them and bulk links must say `--no-embed` themselves; and there is no `statement-update`, so the choice is made once at creation.
 
 ### Triple Extraction Patterns
 
@@ -347,6 +354,8 @@ hypatia similar <query> [--limit N]
 Requires an embedding model configured in `shelf.toml` (default: BAAI/bge-m3).
 
 Entries are embedded in batches after they are written or updated. With a remote embedding API, `similar` can miss entries changed in the last minute; `search` finds them at once.
+
+Entries written with `--no-embed`, and entries carrying a tag the shelf lists in `embedding.skip_tags`, are never embedded and so are never `similar` results. `search` and `query` still find them. Each entry keeps the answer it was written with, so after changing `skip_tags` run `hypatia backfill` once to settle what is already stored.
 
 ### Examples
 

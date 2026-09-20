@@ -37,6 +37,13 @@ pub struct Content {
     /// Empty string `""` represents global scope.
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
+    /// `Some(false)` keeps the entry out of the vector index: it is still stored and still
+    /// found by full-text search and JSE, but no vector is ever generated for it. Absent
+    /// means the shelf decides, by `embedding.skip_tags`, so the field is written only when
+    /// it opts out: older binaries reading a newer shelf ignore what they do not know. An
+    /// entry can only ask for less indexing than its shelf, never more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,6 +63,7 @@ impl Default for Content {
             synonyms: None,
             figures: None,
             scopes: None,
+            embed: None,
         }
     }
 }
@@ -99,6 +107,28 @@ impl Content {
             Some(scopes)
         };
         self
+    }
+
+    /// Opts the entry out of the vector index, or back in. Opting in is the default, so it
+    /// is stored as "absent" rather than written out.
+    pub fn with_embed(mut self, embed: Option<bool>) -> Self {
+        self.embed = embed.filter(|&e| !e);
+        self
+    }
+
+    /// Whether this entry asks for a vector of its own. The shelf may still keep it out of
+    /// the vector index by tag: see [`Content::embeds_under`].
+    pub fn embeds(&self) -> bool {
+        self.embed != Some(false)
+    }
+
+    /// Whether a shelf that skips `skip_tags` gives this entry a vector: the entry has not
+    /// opted out, and none of its tags is a skipped one. Either alone is enough to keep it
+    /// out — an entry can ask for less indexing than its shelf, never more. This is the one
+    /// rule; the stores record its answer per row so a skipped entry costs nothing to skip
+    /// again, and recompute it when the shelf's own configuration changes.
+    pub fn embeds_under(&self, skip_tags: &[String]) -> bool {
+        self.embeds() && !skip_tags.iter().any(|tag| self.tags.contains(tag))
     }
 
     /// Resolve an `archive://` reference to a filesystem path relative to a shelf root.
@@ -214,6 +244,32 @@ mod tests {
     fn scopes_empty_becomes_none() {
         let c = Content::new("data").with_scopes(vec![]);
         assert!(c.scopes.is_none());
+    }
+
+    #[test]
+    fn opting_out_of_embedding_is_stored_and_opting_in_is_the_absence_of_it() {
+        let out = Content::new("data").with_embed(Some(false));
+        assert!(!out.embeds());
+        let json = out.to_json_string();
+        assert!(json.contains(r#""embed":false"#), "{json}");
+        assert_eq!(Content::from_json_str(&json).unwrap(), out);
+
+        // The default is written as nothing at all, so an older binary reads what it knows.
+        for content in [
+            Content::new("data"),
+            Content::new("data").with_embed(Some(true)),
+            out.clone().with_embed(None),
+        ] {
+            assert!(content.embeds());
+            assert_eq!(content.embed, None);
+            assert!(!content.to_json_string().contains("embed"));
+        }
+    }
+
+    #[test]
+    fn content_written_before_the_embed_field_still_embeds() {
+        let json = r#"{"format":"markdown","data":"hello","tags":[]}"#;
+        assert!(Content::from_json_str(json).unwrap().embeds());
     }
 
     #[test]

@@ -48,6 +48,8 @@
 
 **欠账与状态。** 每个作用于 shelf 的工具先还逾期的 embedding 欠账，与每条 CLI 命令一致。写工具返回 shelf 级的欠账快照：待补数、跳过数、欠账开始时间、锁定与暂停的原因。延迟 embedding 下逐条状态几乎总是「待补」，没有信息量。shelf_status 工具与 `hypatia://{shelf}/status` resource 返回同一份文档，因为模型能否自主读取 resource 因宿主而异。
 
+**写入时可以声明不嵌入。** knowledge_create、knowledge_update 与 statement_create 接受 `embed: false`：条目照常存储、照常进全文索引与 JSE，但不进向量索引，也不计入欠账。会话日志层的 knowledge 条目通常不必逐条声明——把标签写进书架 `shelf.toml` 的 `embedding.skip_tags`，现有协议实现不改调用就能获得同样的行为；statement 不带标签，`skip_tags` 够不着，逐轮写入的链接边仍要自己传 `embed: false`。写入、自动 flush 与 backfill 用的是同一条规则。
+
 **backfill 限批。** 每次最多补 64 条，上限 512，避免超出宿主的工具调用超时（Codex 默认 60 s）。向量被锁定时报错并说明原因。按从新到旧取条目：若最新一批总是失败，会挡住更早的欠账，这时应改用终端里完整的 `hypatia backfill`。
 
 **resources。** 列出 `hypatia://{shelf}/status`，另有 `hypatia://{shelf}/knowledge/{name}` 与 `hypatia://{shelf}/statement/{head}/{relation}/{tail}` 两个模板，路径段百分号编码。不列出条目，否则大库会把列表撑爆。

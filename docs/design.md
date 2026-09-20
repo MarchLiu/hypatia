@@ -33,6 +33,7 @@ Hypatia 面向局部环境，因此数据管理也遵循简单原则，例如 kn
 其中
 - format 可以是 markdown、json等，data保存对应格式的内容
 - tags 是字符串列表，可以为空
+- 可选的 `embed` 只在取值为 `false` 时写入，表示该条目不进向量索引——它照常存储、照常进全文索引与 JSE，只是永不生成向量。默认（字段缺席）由书架决定
 - knowledge 保存时，向 sqlite 的 fts 库中插入/更新一条记录，其 key 对应 knowledge 的 name，catalog 是 knowledge，content 是 knowledge 的 content 字典加上 name 和 日期
 - statement 保存时，向 sqlite 的 fts 库中插入/更新一条记录，其key 对应 statement 的三元组可读形式 `head, relation, tail`，注意这里没有左右括号，这是因为它们不对搜索提供有意义的信息
 - 三元组中的信息可能本身就包含,或"等字符，因此fts表中保存三元组时，key需要按照csv的规范处理成一行三列的文本
@@ -73,7 +74,10 @@ provider = "local"           # "local" (ONNX) 或 "remote" (HTTP API)
 dimensions = 1024            # 向量维度
 max_seq_length = 8192        # 最大序列长度
 pooling = "mean"             # "mean" / "cls" / "last_token"
+skip_tags = []               # 带这些标签的条目不进向量索引，例如 ["message", "session"]
 ```
+
+`skip_tags` 与条目自己的 `embed: false` 是同一条规则的两种入口，写入、自动 flush 与 `backfill` 三处一致执行。判定结果随行落在 `embeddable` 列上（并进入 pending 的局部索引，因此跳过一个很大的日志层不需要逐行扫描），所以改动 `skip_tags` 对此后写入的条目立即生效，已存的条目则由一次 `hypatia backfill` 统一结算：新规则不要的向量被撤出，新规则允许的条目被补上。
 
 默认使用 BAAI/bge-m3 (568M params, 1024d, mean pooling)。也支持 EmbeddingGemma-300M、gte 系列、Jina v5 等模型，以及 OpenAI 兼容的远程 API。
 

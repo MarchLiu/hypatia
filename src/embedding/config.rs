@@ -14,6 +14,10 @@ pub struct EmbeddingConfig {
     /// Embed writes later, a batch at a time (the default); `false` embeds each write as it
     /// is saved.
     pub defer: bool,
+    /// Tags whose entries the shelf keeps out of the vector index. A session log written
+    /// under a tag named here is stored and full-text searchable as always, but never
+    /// costs an embedding. Empty by default, so nothing is skipped.
+    pub skip_tags: Vec<String>,
     /// Which provider to use: "local" (ONNX) or "remote" (HTTP API).
     pub provider: ProviderKind,
     /// Local ONNX settings.
@@ -83,6 +87,8 @@ pub(crate) struct EmbeddingToml {
     api_model: Option<String>,
     /// Write it to shelf.toml only to opt out: older binaries refuse unknown keys.
     defer: Option<bool>,
+    /// Likewise: write it only to skip tags, so older binaries still open the shelf.
+    skip_tags: Option<Vec<String>>,
 }
 
 impl Default for EmbeddingToml {
@@ -99,6 +105,7 @@ impl Default for EmbeddingToml {
             api_key_env: None,
             api_model: None,
             defer: None,
+            skip_tags: None,
         }
     }
 }
@@ -676,6 +683,7 @@ impl EmbeddingConfig {
             model: toml.model.clone(),
             local_unavailable,
             defer: toml.defer.unwrap_or(true),
+            skip_tags: normalize_tags(toml.skip_tags),
             provider,
             local,
             remote,
@@ -694,6 +702,15 @@ impl EmbeddingConfig {
         }
     }
 
+    /// Whether the shelf keeps this entry out of the vector index; see
+    /// [`crate::model::Content::embeds_under`], which the stores apply to each row as they
+    /// write it. The same rule decides at write time, in automatic flushes, and in
+    /// `backfill`, so a skipped entry never turns up owing a vector. Full-text search and
+    /// JSE still index it.
+    pub fn skips(&self, content: &crate::model::Content) -> bool {
+        !content.embeds_under(&self.skip_tags)
+    }
+
     /// Check if the local model files exist.
     pub fn local_files_exist(&self) -> bool {
         self.local.model_path.exists() && self.local.tokenizer_path.exists()
@@ -710,6 +727,19 @@ impl EmbeddingConfig {
             );
         }
     }
+}
+
+/// Trimmed, deduplicated, without the empty tag, which no entry can carry: a list that
+/// costs nothing to test against, and is empty whenever nothing was configured.
+fn normalize_tags(tags: Option<Vec<String>>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in tags.unwrap_or_default() {
+        let tag = tag.trim().to_string();
+        if !tag.is_empty() && !out.contains(&tag) {
+            out.push(tag);
+        }
+    }
+    out
 }
 
 /// Resolve paths from legacy model_path/tokenizer_path fields or shelf directory defaults.

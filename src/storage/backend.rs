@@ -224,7 +224,8 @@ impl ShelfBackend {
         let inner = match settings.storage.backend {
             BackendKind::Sqlite => {
                 // Vector files are a disposable cache; disk failure must not disable CRUD.
-                let store = open_or_migrate(config)?;
+                let mut store = open_or_migrate(config)?;
+                store.set_skip_tags(&settings.embedding.skip_tags);
                 if settings.embedding.model_identity_trusted {
                     stored = store.configure_embedding(&configured)?;
                 }
@@ -480,6 +481,20 @@ impl ShelfBackend {
         state
     }
 
+    /// Drops the vectors of entries the shelf no longer embeds; see the stores' own method.
+    pub fn clear_skipped_embeddings(&self) -> Result<usize> {
+        match &self.inner {
+            Backend::Local(l) => {
+                let cleared = l.store.clear_skipped_embeddings()?;
+                if cleared > 0 {
+                    l.cache_clock.set(-1);
+                }
+                Ok(cleared)
+            }
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.clear_skipped_embeddings(),
+        }
+    }
     /// Explicit reembed: drops every vector and rebinds the identity to `metadata`.
     pub fn reset_embeddings(&mut self, metadata: &EmbeddingMetadata) -> Result<()> {
         match &mut self.inner {

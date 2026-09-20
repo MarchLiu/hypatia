@@ -106,6 +106,44 @@ fn update_changes_only_named_fields_and_keeps_created_at() {
 }
 
 #[test]
+fn the_vector_index_can_be_declined_on_create_and_turned_back_on() {
+    let home = TempDir::new().unwrap();
+    assert_ok(&hypatia(
+        &home,
+        &["knowledge-create", "msg", "-d", "a turn", "--no-embed"],
+    ));
+    assert_eq!(
+        get(&home, "msg")["content"]["embed"],
+        serde_json::json!(false)
+    );
+    // Declining is stored, never an empty field: an entry that embeds says nothing at all.
+    assert_ok(&hypatia(&home, &["knowledge-create", "fact", "-d", "x"]));
+    assert_eq!(
+        get(&home, "fact")["content"]["embed"],
+        serde_json::Value::Null
+    );
+
+    assert_ok(&hypatia(&home, &["knowledge-update", "msg", "--embed"]));
+    assert_eq!(
+        get(&home, "msg")["content"]["embed"],
+        serde_json::Value::Null
+    );
+    let same = hypatia(&home, &["knowledge-update", "msg", "--embed"]);
+    assert_ok(&same);
+    assert_eq!(stdout(&same), "Knowledge unchanged: msg\n");
+
+    assert_ok(&hypatia(&home, &["knowledge-update", "msg", "--no-embed"]));
+    assert_eq!(
+        get(&home, "msg")["content"]["embed"],
+        serde_json::json!(false)
+    );
+
+    // The two flags name opposite outcomes, so asking for both is a usage error.
+    let both = hypatia(&home, &["knowledge-update", "msg", "--embed", "--no-embed"]);
+    assert_eq!(both.status.code(), Some(2));
+}
+
+#[test]
 fn update_rejects_missing_entries_and_empty_patches() {
     let home = TempDir::new().unwrap();
     let missing = hypatia(&home, &["knowledge-update", "nope", "-d", "x"]);

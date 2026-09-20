@@ -238,7 +238,10 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `api_url` | OpenAI URL | API endpoint URL (remote only) |
 | `api_key_env` | `OPENAI_API_KEY` | Environment variable name for API key (remote only) |
 | `api_model` | `text-embedding-3-small` | Model name sent to API (remote only) |
+| `skip_tags` | `[]` | Tags whose entries stay out of the vector index. A session-log layer written under, say, `["message", "session"]` is stored and full-text searchable as always, but costs no embedding and never crowds out the knowledge distilled from it. Each entry carries the answer it was written with, so a change here applies to entries written after it; `hypatia backfill` settles the ones already stored, dropping the vectors the new rule forbids and embedding the entries it now allows. An entry can ask for less indexing than its shelf (`--no-embed`), never more. Statements carry no tags, so `skip_tags` reaches knowledge entries only; a statement opts out per write |
 | `defer` | `true` | Embed writes later, in batches. A local model embeds a batch of the newest entries before each semantic search. A remote API embeds once 128 entries are waiting, or when a command runs on the shelf a minute after the oldest was written: usually one request, and never more than 30 s, even when entries the server rejects have to be singled out. `false` embeds every write as it is saved; with a remote API the write then waits on the network |
+
+`shelf.toml` is parsed strictly, so a binary older than a field refuses to open the shelf rather than ignoring it. Write `skip_tags` and `defer` only when you want them, and upgrade every binary that shares the shelf first.
 
 ## CLI Reference
 
@@ -248,11 +251,11 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia connect <path> [-n <name>]` | Connect to a shelf directory |
 | `hypatia disconnect <name>` | Disconnect from a shelf |
 | `hypatia list` | List connected shelves |
-| `hypatia knowledge-create <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>]` | Create a knowledge entry |
+| `hypatia knowledge-create <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>] [--no-embed]` | Create a knowledge entry; `--no-embed` keeps it out of the vector index |
 | `hypatia knowledge-get <name>` | Get a knowledge entry |
-| `hypatia knowledge-update <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>] [--scopes <scopes>]` | Update a knowledge entry; omitted fields are kept, an empty value clears one |
+| `hypatia knowledge-update <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>] [--scopes <scopes>] [--no-embed\|--embed]` | Update a knowledge entry; omitted fields are kept, an empty value clears one |
 | `hypatia knowledge-delete <name>` | Delete a knowledge entry |
-| `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple; exits 0 without changes if it already exists |
+| `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>] [--no-embed]` | Create a triple; exits 0 without changes if it already exists |
 | `hypatia statement-delete <subj> <pred> <obj>` | Delete a triple |
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
 | `hypatia similar <query> [--limit N]` | Vector similarity search |
