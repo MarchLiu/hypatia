@@ -559,15 +559,17 @@ even read-only SQLite needs to create WAL/journal temp files next to the databas
 go straight to the immutable read-only URI, which needs no journal and no directory writes:
 
 ```bash
-sqlite3 "file:$HOME/.hypatia/default/hypatia.sqlite?mode=ro&immutable=1" "SELECT count(*) FROM knowledge;"
+sqlite3 "file:<shelf-dir>/hypatia.sqlite?mode=ro&immutable=1" "SELECT count(*) FROM knowledge;"
 ```
 
 - Use only for **reads** (SELECT). Never write through this path — `immutable=1` tells SQLite the
   file never changes, so writes would corrupt state or be lost.
-- Adjust the shelf path for non-default shelves (`~/.hypatia/<shelf>/<db>.sqlite`).
-- First, locate the actual DB file: `ls ~/.hypatia/*/` (also check `-wal`/`-shm` siblings; if a
-  WAL exists and is non-empty, `immutable=1` may miss recent un-checkpointed rows — in that case
-  prefer requesting wider sandbox permissions for a normal read instead).
+- First, get `<shelf-dir>` from `hypatia list`, which prints the directory each shelf is open at.
+  Do not assume `~/.hypatia/<shelf>/`: any shelf, `default` included, can be registered elsewhere.
+  If the CLI itself cannot run, read the paths from `~/.hypatia/shelves.json`.
+- Then check the `-wal`/`-shm` siblings; if a WAL exists and is non-empty, `immutable=1` may miss
+  recent un-checkpointed rows — in that case prefer requesting wider sandbox permissions for a
+  normal read instead.
 - Schema hints: tables include `knowledge` and `statement`; statement triples are stored in
   `head` / `relation` / `tail` columns.
 
