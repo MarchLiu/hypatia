@@ -23,10 +23,12 @@
  *    "Pure" means: the invoked binary is `hypatia` (basename match, so
  *    absolute paths like `/usr/local/bin/hypatia` qualify), optionally
  *    preceded by `KEY=VALUE` env assignments, and the command contains no
- *    unquoted shell composition (`&&`, `;`, pipes, redirections, command
- *    substitution), so `hypatia ... && rm -rf x` still prompts. Quoted
- *    payloads (JSON data, JSE queries like '["$knowledge"]') are scanned
- *    quote-aware and never blocked.
+ *    shell composition (`&&`, `;`, pipes, redirections, command
+ *    substitution) outside single quotes, so `hypatia ... && rm -rf x`
+ *    still prompts. Bash expands $() and backticks inside double quotes,
+ *    so those are composition there too and also prompt; only single-quoted
+ *    payloads (JSON data, JSE queries like '["$knowledge"]') pass as
+ *    literal arguments.
  *
  * 2. **Bundled skills** (`skills`, default on): registers the packaged
  *    `hypatia` and `hypatia-memory` skills into `ctx.skills` as runtime
@@ -58,7 +60,7 @@ export const name = 'dsh-hypatia'
 /* ------------------------------------------------------------------------ */
 
 /** True when the command's executable word (after env assignments) is trusted. */
-function invokesTrustedBinary(command, binaries) {
+export function invokesTrustedBinary(command, binaries) {
   let rest = command.trimStart()
   // Skip leading KEY=VALUE environment assignments (e.g. HYPATIA_BIN=...).
   for (;;) {
@@ -71,8 +73,9 @@ function invokesTrustedBinary(command, binaries) {
   return binaries.some((bin) => word === bin || word.endsWith(`/${bin}`))
 }
 
-/** True when the command contains shell composition OUTSIDE quotes. */
-function hasShellComposition(command) {
+/** True when the command contains shell composition outside single quotes
+ * (double quotes do not neutralize $() or backticks — bash expands them). */
+export function hasShellComposition(command) {
   let single = false
   let double = false
   let escaped = false
@@ -94,7 +97,13 @@ function hasShellComposition(command) {
       double = !double
       continue
     }
-    if (single || double) continue
+    if (single) continue
+    // Only single quotes neutralize shell composition. Bash expands $() and
+    // backticks inside double quotes, so those stay composition there.
+    if (double) {
+      if ((char === '$' && command[index + 1] === '(') || char === '`') return true
+      continue
+    }
     if (char === '&' || char === ';' || char === '|' || char === '<' || char === '>' || char === '`' || char === '\n') {
       return true
     }
