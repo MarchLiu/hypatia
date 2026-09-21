@@ -3,7 +3,11 @@ use serde_json::{Map, Value};
 use super::ast::AstNode;
 use crate::error::{HypatiaError, Result};
 
-/// Recognized Hypatia JSE operators.
+/// Recognized Hypatia JSE operators. A bare `"$name"` listed here parses as a
+/// literal operator name, any other as a field reference; the condition-context
+/// error relies on that to tell a flattened call from a stray field. It must
+/// name exactly the operators the backends dispatch on (checked by
+/// `whitelist_matches_the_operators_the_backends_dispatch`).
 pub(super) const OPERATORS: &[&str] = &[
     "$knowledge",
     "$statement",
@@ -22,7 +26,10 @@ pub(super) const OPERATORS: &[&str] = &[
     "$ne",
     "$like",
     "$contains",
+    "$has",
+    "$json-contains",
     "$content",
+    "$triple",
     "$quote",
 ];
 
@@ -252,5 +259,79 @@ mod tests {
             }
             _ => panic!("expected Operator node"),
         }
+    }
+
+    /// Names handled by `"$a" | "$b" =>` match arms in `source`, including
+    /// or-patterns rustfmt wrapped onto `| "$c"` continuation lines.
+    fn dispatched_operators(source: &str) -> std::collections::BTreeSet<&str> {
+        let mut dispatched = std::collections::BTreeSet::new();
+        let mut pending = Vec::new();
+        for line in source.lines() {
+            let line = line.trim();
+            let line = line.strip_prefix('|').map_or(line, str::trim_start);
+            let (pattern, is_arm) = match line.split_once(" =>") {
+                Some((pattern, _)) => (pattern, true),
+                None => (line, false),
+            };
+            let names: Option<Vec<_>> = pattern
+                .split(" | ")
+                .map(|p| {
+                    let name = p.strip_prefix('"')?.strip_suffix('"')?;
+                    let bare = name.strip_prefix('$')?;
+                    (!bare.is_empty() && bare.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+                        .then_some(name)
+                })
+                .collect();
+            match names {
+                Some(names) => {
+                    pending.extend(names);
+                    if is_arm {
+                        dispatched.extend(pending.drain(..));
+                    }
+                }
+                None => pending.clear(),
+            }
+        }
+        dispatched
+    }
+
+    #[test]
+    fn dispatched_operators_reads_only_match_arm_patterns() {
+        let source = r#"
+            match operator {
+                "$a" | "$b" => x,
+                "$c" | "$d"
+                | "$e" => y,
+                s if s == "$f" => z,
+                AstNode::Symbol(s) if s == "$*" => w,
+                _ => json!([
+                    "$g",
+                    "$h"
+                ]),
+            }
+        "#;
+        let found: Vec<_> = dispatched_operators(source).into_iter().collect();
+        assert_eq!(found, ["$a", "$b", "$c", "$d", "$e"]);
+    }
+
+    /// #28: $has, $json-contains and $triple were implemented by both
+    /// backends but missing from the whitelist, so a flattened call to one
+    /// got no hint. Hold the whitelist to exactly the names the dispatchers
+    /// handle, so a new operator cannot be left out again.
+    #[test]
+    fn whitelist_matches_the_operators_the_backends_dispatch() {
+        let mut dispatched = std::collections::BTreeSet::new();
+        for source in [
+            include_str!("evaluator.rs"),
+            include_str!("operators.rs"),
+            include_str!("postgres.rs"),
+        ] {
+            dispatched.extend(dispatched_operators(source));
+        }
+        // The parser itself turns both forms of $quote into `AstNode::Quote`,
+        // whether or not a backend keeps an arm for it.
+        dispatched.insert("$quote");
+        let listed: std::collections::BTreeSet<_> = OPERATORS.iter().copied().collect();
+        assert_eq!(listed, dispatched);
     }
 }

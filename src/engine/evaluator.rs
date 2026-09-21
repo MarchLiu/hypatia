@@ -314,19 +314,32 @@ pub(super) fn too_many_nested_operands(operator: &str, operands: &[AstNode]) -> 
 pub(super) fn dropped_filter_cases() -> Vec<(serde_json::Value, &'static str)> {
     use serde_json::json;
     const NOT_A_CONDITION: &str = "unexpected node in condition context";
+    const FLATTENED: &str = "a nested call needs its own array";
     const NESTED: &str = "takes at most one condition";
     const ONE_QUERY: &str = "expects exactly one query argument";
     vec![
-        // The issue: a call that lost its array flattens into literals.
+        // The issue: a call that lost its array flattens into literals. Every
+        // operator name gets the hint (#28: $has, $json-contains and $triple
+        // parsed as field references, so theirs went without).
         (
             json!({"$knowledge": ["$contains", "scopes", "zzz-absent"], "limit": -1}),
-            NOT_A_CONDITION,
+            FLATTENED,
         ),
-        // Its control: $has is not whitelisted, so it arrives as a symbol.
         (
             json!({"$knowledge": ["$has", "scopes", "zzz-absent"], "limit": -1}),
-            NOT_A_CONDITION,
+            FLATTENED,
         ),
+        (
+            json!({"$knowledge": ["$json-contains", {"scopes": "zzz-absent"}], "limit": -1}),
+            FLATTENED,
+        ),
+        (
+            json!({"$statement": ["$triple", "alice", "knows", "$*"], "limit": -1}),
+            FLATTENED,
+        ),
+        // Its control: any other $-string is a field reference, a symbol, and
+        // no condition either.
+        (json!(["$knowledge", "$name"]), NOT_A_CONDITION),
         (
             json!(["$knowledge", ["$and", ["$eq", "name", "a"], "stray"]]),
             NOT_A_CONDITION,
