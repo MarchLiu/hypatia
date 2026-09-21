@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{HypatiaError, Result};
 use crate::lab::{Lab, ShelfStatus};
 use crate::model::ShelfId;
+use crate::storage::shelf_manager::same_dir;
 
 pub(crate) fn run(lab: &mut Lab, path: Option<&Path>, name: Option<&str>) -> Result<()> {
     let shelf = target_shelf(lab, path, name)?;
@@ -36,13 +37,11 @@ fn target_shelf(lab: &mut Lab, path: Option<&Path>, name: Option<&str>) -> Resul
             // Named and registered as typed, with `..` resolved; compared through links.
             let path = resolve(path)?;
             match registered.iter().find(|(_, dir, _)| same_dir(dir, &path)) {
-                Some((existing, _, _)) if name.is_some_and(|name| name != existing) => {
-                    return Err(HypatiaError::Shelf(format!(
-                        "{} is already connected as '{existing}'",
-                        path.display()
-                    )));
+                Some((existing, _, _)) if name.is_none_or(|name| name == existing) => {
+                    existing.clone()
                 }
-                Some((existing, _, _)) => existing.clone(),
+                // Under another name: connecting refuses it, as `hypatia connect` does.
+                Some(_) => return lab.connect_shelf(&path, name),
                 None => {
                     let wanted = name.map_or_else(|| ShelfId::new(path.clone()).name, String::from);
                     // Connecting would re-point that name, even at a shelf that failed to open.
@@ -79,12 +78,6 @@ fn resolve(path: &Path) -> std::io::Result<PathBuf> {
             .join(name),
         _ => std::fs::canonicalize(&path).unwrap_or(path),
     })
-}
-
-/// Whether two paths name one directory, through symlinks too (macOS `/tmp` is `/private/tmp`).
-fn same_dir(a: &Path, b: &Path) -> bool {
-    let key = |p: &Path| std::fs::canonicalize(p).or_else(|_| std::path::absolute(p));
-    matches!((key(a), key(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// What `hypatia init` prints: what works, what does not yet, and the command that fixes it.
