@@ -200,9 +200,12 @@ pub fn evaluate_operator(
                     }
                 }
             }
+            // An empty disjunction is false, unlike an empty $and. Callers
+            // that build ["$or", ...] from a list get no rows for an empty
+            // list, not the whole table.
             if fragments.is_empty() {
                 Ok(OperatorResult::SqlCondition {
-                    fragment: "1=1".to_string(),
+                    fragment: "1=0".to_string(),
                     params: Vec::new(),
                 })
             } else {
@@ -291,8 +294,14 @@ pub fn evaluate_operator(
                 params.append(&mut p);
                 fragments.push(f);
             }
+            // Any-of an empty list matches nothing, as on PG. Joined, the
+            // empty list rendered `()`, which is a syntax error.
             Ok(OperatorResult::SqlCondition {
-                fragment: format!("({})", fragments.join(" OR ")),
+                fragment: if fragments.is_empty() {
+                    "1=0".to_string()
+                } else {
+                    format!("({})", fragments.join(" OR "))
+                },
                 params,
             })
         }
@@ -1182,6 +1191,35 @@ mod tests {
                 assert!(params.is_empty());
             }
             _ => panic!("expected SqlCondition"),
+        }
+    }
+
+    /// Empty operand lists: $and is vacuously true, while $or and an any-of
+    /// over nothing match no row. $or used to answer true and return the
+    /// whole table; $has rendered `()` and failed to parse.
+    #[test]
+    fn empty_operands_follow_their_logic() {
+        let tags = AstNode::Literal(json!("tags"));
+        for (operator, operands, expected) in [
+            ("$and", vec![], "1=1"),
+            ("$or", vec![], "1=0"),
+            ("$has", vec![tags, AstNode::Array(vec![])], "1=0"),
+        ] {
+            let result = evaluate_operator(
+                operator,
+                &operands,
+                &serde_json::Map::new(),
+                &kctx(),
+                &|_| Err(HypatiaError::Eval("should not recurse".to_string())),
+            )
+            .unwrap();
+            match result {
+                OperatorResult::SqlCondition { fragment, params } => {
+                    assert_eq!(fragment, expected, "{operator}");
+                    assert!(params.is_empty(), "{operator}");
+                }
+                _ => panic!("expected SqlCondition"),
+            }
         }
     }
 }

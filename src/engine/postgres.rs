@@ -118,7 +118,8 @@ impl Compiler<'_> {
                     .map(|n| self.condition(n))
                     .collect::<Result<Vec<_>>>()?;
                 if parts.is_empty() {
-                    return Ok("TRUE".into());
+                    // Empty $and is true, empty $or false — see `operators.rs`.
+                    return Ok(if operator == "$and" { "TRUE" } else { "FALSE" }.into());
                 }
                 Ok(format!(
                     "({})",
@@ -852,6 +853,25 @@ mod tests {
         assert!(q.0.contains("jse_json_contains(q.content, $1::text::jsonb)"));
         assert!(q.0.contains("AND FALSE"));
         assert_eq!(q.1[0], json!(r#"{"tags":"rust"}"#));
+    }
+
+    /// Mirrors `empty_operands_follow_their_logic` in `operators.rs`: an
+    /// empty $or shared $and's TRUE and returned every row.
+    #[test]
+    fn empty_or_is_false_and_empty_and_is_true() {
+        let store = RecordingStore::default();
+        for (expression, expected) in [
+            (json!(["$knowledge", ["$or"]]), "WHERE FALSE"),
+            (json!(["$knowledge", ["$and"]]), "WHERE TRUE"),
+            (
+                json!(["$knowledge", ["$not", ["$or"]]]),
+                "WHERE NOT (FALSE)",
+            ),
+        ] {
+            Evaluator::execute(&expression, &store).unwrap();
+            let q = store.query.borrow();
+            assert!(q.0.contains(expected), "{expression}: {}", q.0);
+        }
     }
 
     #[test]

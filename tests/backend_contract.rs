@@ -591,6 +591,21 @@ fn contract(shelf: &mut OpenShelf) {
                 .is_err()
         );
     }
+    // Empty operand lists follow their logic on every backend: an empty $and
+    // is true, an empty $or and an any-of over nothing are false. SQLite
+    // returned the whole shelf for the $or and failed to parse the $has.
+    for (expression, rows) in [
+        (json!(["$knowledge", ["$and"]]), 1),
+        (json!(["$knowledge", ["$or"]]), 0),
+        (json!(["$knowledge", ["$not", ["$or"]]]), 1),
+        (json!(["$knowledge", ["$has", "tags", []]]), 0),
+    ] {
+        assert_eq!(
+            Evaluator::execute(&expression, shelf).unwrap().rows.len(),
+            rows,
+            "{expression}"
+        );
+    }
     for expression in [
         json!(["$knowledge", ["$has", "tags", "rust"]]),
         json!(["$knowledge", ["$eq", "$name", "first"]]),
