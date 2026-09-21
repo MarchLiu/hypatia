@@ -1,7 +1,10 @@
 //! PostgreSQL JSE compiler. Bindings are allocated while walking the AST, never
 //! by rewriting SQLite SQL. Install schema_functions when creating a PG shelf.
 use super::ast::AstNode;
-use super::evaluator::{ast_to_value, extract_query_opts, query_opts_to_search_opts};
+use super::evaluator::{
+    ast_to_value, extract_query_opts, not_a_condition, query_opts_to_search_opts,
+    too_many_nested_operands,
+};
 use super::operators::validate_field_path;
 use crate::error::{HypatiaError, Result};
 use crate::model::{QueryResult, QueryTarget, StatementKey};
@@ -90,7 +93,7 @@ impl Compiler<'_> {
             operator, operands, ..
         } = node
         else {
-            return Err(HypatiaError::Eval("expected SQL condition".into()));
+            return Err(not_a_condition(node));
         };
         let arity = |n| {
             if operands.len() == n {
@@ -102,13 +105,13 @@ impl Compiler<'_> {
             }
         };
         match operator.as_str() {
-            "$knowledge" | "$statement" => {
-                if operands.len() == 1 {
-                    self.condition(&operands[0])
-                } else {
-                    Ok("TRUE".into())
-                }
-            }
+            "$knowledge" | "$statement" => match operands.len() {
+                // See the matching arm in `operators.rs`: extra operands have
+                // nowhere to go here, and dropping them returned every row.
+                0 => Ok("TRUE".into()),
+                1 => self.condition(&operands[0]),
+                _ => Err(too_many_nested_operands(operator, operands)),
+            },
             "$and" | "$or" => {
                 let parts = operands
                     .iter()
@@ -345,24 +348,23 @@ impl Compiler<'_> {
         node: &AstNode,
         metadata: &Map<String, Value>,
         not_summaried: bool,
-    ) -> Result<Option<String>> {
+    ) -> Result<String> {
         let AstNode::Operator {
             operator, operands, ..
         } = node
         else {
-            return match node {
-                AstNode::Quote(_) | AstNode::Literal(_) => Ok(None),
-                _ => Err(HypatiaError::Eval(
-                    "unexpected node in condition context".into(),
-                )),
-            };
+            return Err(not_a_condition(node));
         };
         let opts = query_opts_to_search_opts(&extract_query_opts(metadata), self.target);
         let (result, key) = match operator.as_str() {
             "$search" | "$similar" => {
-                let n = operands.first().ok_or_else(|| {
-                    HypatiaError::Eval(format!("{operator} expects a query argument"))
-                })?;
+                // See `operators.rs`: a second operand used to vanish.
+                let [n] = operands.as_slice() else {
+                    return Err(HypatiaError::Eval(format!(
+                        "{operator} expects exactly one query argument, got {}",
+                        operands.len()
+                    )));
+                };
                 let v = ast_to_value(n);
                 let text = v
                     .as_str()
@@ -405,7 +407,7 @@ impl Compiler<'_> {
                     "triple",
                 )
             }
-            _ => return self.condition(node).map(Some),
+            _ => return self.condition(node),
         };
         let mut keys = Vec::new();
         for row in result.rows {
@@ -413,11 +415,11 @@ impl Compiler<'_> {
                 keys.push(self.text(k));
             }
         }
-        Ok(Some(if keys.is_empty() {
+        Ok(if keys.is_empty() {
             "FALSE".into()
         } else {
             format!("q.{} IN ({})", self.target.key_column(), keys.join(", "))
-        }))
+        })
     }
 }
 
@@ -465,9 +467,7 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
         operands.as_slice()
     };
     for n in rest {
-        if let Some(condition) = c.operand(n, metadata, not_summaried)? {
-            conditions.push(condition);
-        }
+        conditions.push(c.operand(n, metadata, not_summaried)?);
     }
     let select = match target {
         QueryTarget::Knowledge => "q.name, q.content, q.created_at",
@@ -629,6 +629,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingStore {
         query: RefCell<(String, Vec<Value>)>,
+        /// Searches, similarity lookups and traversals that reached the store.
+        lookups: std::cell::Cell<usize>,
         candidates: Vec<Map<String, Value>>,
         schema: Option<String>,
     }
@@ -649,12 +651,15 @@ mod tests {
             Ok(QueryResult::new(vec![]))
         }
         fn execute_search(&self, _: &str, _: &SearchOpts) -> Result<QueryResult> {
+            self.lookups.set(self.lookups.get() + 1);
             Ok(QueryResult::new(self.candidates.clone()))
         }
         fn execute_similar(&self, _: &str, _: &SearchOpts, _: QueryTarget) -> Result<QueryResult> {
+            self.lookups.set(self.lookups.get() + 1);
             Ok(QueryResult::new(self.candidates.clone()))
         }
         fn execute_khop(&self, _: &str, _: Option<&str>, _: i64) -> Result<QueryResult> {
+            self.lookups.set(self.lookups.get() + 1);
             Ok(QueryResult::new(self.candidates.clone()))
         }
     }
@@ -703,6 +708,50 @@ mod tests {
         assert!(q.0.contains("$10::bigint"));
         assert!(q.0.contains("$11::bigint"));
         assert!(!q.0.contains("json_extract"));
+    }
+
+    /// Regression for #22: this path answered `Ok(None)` for a literal or
+    /// quote in condition position, so a condition that lost its own array
+    /// compiled to a SELECT with no WHERE clause at all. Runs the same case
+    /// table as the SQLite path, since the two must reject the same shapes
+    /// with the same messages.
+    #[test]
+    fn no_operand_is_silently_dropped() {
+        let store = RecordingStore::default();
+        for (expression, expected) in super::super::evaluator::dropped_filter_cases() {
+            let msg = Evaluator::execute(&expression, &store)
+                .expect_err(&format!("must not match every row: {expression}"))
+                .to_string();
+            assert!(msg.contains(expected), "{expression}: {msg}");
+        }
+        assert_eq!(
+            store.query.borrow().0,
+            "",
+            "a rejected query must not compile to SQL"
+        );
+        assert_eq!(store.lookups.get(), 0, "a rejected query must not search");
+    }
+
+    /// The arity check must not swallow the forms that do mean something.
+    #[test]
+    fn an_empty_nested_query_operator_is_still_no_filter() {
+        let store = RecordingStore::default();
+        Evaluator::execute(&json!(["$knowledge", ["$knowledge"]]), &store).expect("no filter");
+        assert!(
+            store.query.borrow().0.contains("WHERE TRUE"),
+            "{}",
+            store.query.borrow().0
+        );
+        Evaluator::execute(
+            &json!(["$knowledge", ["$knowledge", ["$eq", "name", "a"]]]),
+            &store,
+        )
+        .expect("one nested condition still passes through");
+        assert!(
+            store.query.borrow().0.contains("q.name = $1::text"),
+            "nested condition lost: {}",
+            store.query.borrow().0
+        );
     }
 
     #[test]
