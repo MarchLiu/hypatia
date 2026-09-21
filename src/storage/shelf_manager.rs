@@ -739,13 +739,15 @@ impl ShelfManager {
         Ok(manager)
     }
 
-    /// Restore all shelves from the registry (except "default", already connected).
+    /// Restore every registered shelf that is not connected yet.
     fn restore_registered(&mut self) {
         let entries: Vec<(String, std::path::PathBuf)> = self
             .registry
             .shelves
             .iter()
-            .filter(|(name, _)| *name != "default")
+            // What is already open decides this, rather than the name "default":
+            // assuming where a name lives is what let the registry go unread.
+            .filter(|(name, _)| !self.shelves.contains_key(name.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
@@ -819,11 +821,17 @@ impl ShelfManager {
 
     /// List all registered shelves with their paths.
     /// Returns (name, path, is_connected) tuples.
+    ///
+    /// A connected shelf reports the path it is open at rather than the registered one:
+    /// when the two disagree, the path being written to is the one worth showing.
     pub fn list(&self) -> Vec<(&str, &std::path::PathBuf, bool)> {
         self.registry
             .list()
             .into_iter()
-            .map(|(name, path)| (name, path, self.shelves.contains_key(name)))
+            .map(|(name, registered)| match self.shelves.get(name) {
+                Some(shelf) => (name, &shelf.config.id.path, true),
+                None => (name, registered, false),
+            })
             .collect()
     }
 
@@ -959,19 +967,37 @@ impl ShelfManager {
     }
 
     /// Ensure the default shelf is registered and connected.
+    ///
+    /// The registry says where `default` lives; `~/.hypatia/default` is only where it is
+    /// put when nothing is registered yet. Reading that registration back is the whole
+    /// point: connecting to the built-in path regardless would send every `-s default`
+    /// write to a shelf other than the one `list` reports.
     pub fn ensure_default(&mut self) -> Result<String> {
-        let default_path = self.home.join(".hypatia").join("default");
         if self.shelves.contains_key("default") {
             return Ok("default".to_string());
         }
 
-        // Register in registry if not present
-        if !self.registry.contains("default") {
-            self.registry.register("default", &default_path);
+        let Some(registered) = self.registry.get("default").cloned() else {
+            let builtin = self.home.join(".hypatia").join("default");
+            self.registry.register("default", &builtin);
             self.registry.save(&self.registry_path)?;
-        }
+            return self.connect_internal(&builtin, Some("default"));
+        };
 
-        self.connect_internal(&default_path, Some("default"))
+        // A default that cannot be opened stops the run, as it always has. Falling back to
+        // the built-in path would put this session's writes in a shelf other than the
+        // registered one -- the split this registration is now read to prevent, and what
+        // `docs/pgvector-backend.md` rules out for a shelf whose database is merely down.
+        // Naming the path and where it is configured is what was missing.
+        self.connect_internal(&registered, Some("default"))
+            .map_err(|e| {
+                HypatiaError::Shelf(format!(
+                    "cannot open the default shelf at {}: {e}; that path is the \"default\" \
+                     entry in {}",
+                    registered.display(),
+                    self.registry_path.display(),
+                ))
+            })
     }
 }
 
@@ -1118,6 +1144,116 @@ mod tests {
         mgr.export("ar-export", dest.path()).unwrap();
         assert!(dest.path().join("hypatia.sqlite").exists());
         assert!(dest.path().join("archives/test.png").exists());
+    }
+
+    /// Writes a `shelves.json` under `home` before a manager reads it.
+    fn register(home: &TempDir, entries: &[(&str, &std::path::Path)]) {
+        let shelves: serde_json::Map<String, serde_json::Value> = entries
+            .iter()
+            .map(|(name, path)| (name.to_string(), serde_json::json!(path)))
+            .collect();
+        let dir = home.path().join(".hypatia");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shelves.json"),
+            serde_json::json!({ "shelves": shelves }).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn default_connects_where_the_registry_says() {
+        let home = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        register(&home, &[("default", elsewhere.path())]);
+
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        assert_eq!(mgr.get("default").unwrap().id.path, elsewhere.path());
+
+        // The write follows, rather than landing in the built-in shelf unseen.
+        mgr.get_mut("default")
+            .unwrap()
+            .backend
+            .insert_knowledge("probe", &Content::new("which dir?"))
+            .unwrap();
+        assert!(elsewhere.path().join("hypatia.sqlite").exists());
+        assert!(!home.path().join(".hypatia/default/hypatia.sqlite").exists());
+    }
+
+    #[test]
+    fn default_registers_the_built_in_path_when_unregistered() {
+        let home = TempDir::new().unwrap();
+        let mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+
+        let builtin = home.path().join(".hypatia").join("default");
+        assert_eq!(mgr.get("default").unwrap().id.path, builtin);
+        assert_eq!(mgr.registry.get("default"), Some(&builtin));
+    }
+
+    #[test]
+    fn an_unopenable_registered_default_stops_the_run() {
+        let home = TempDir::new().unwrap();
+        let unopenable = TempDir::new().unwrap();
+        // Refused by ShelfSettings::load, before anything is created on disk.
+        std::fs::write(unopenable.path().join("shelf.toml"), "embedding = 1").unwrap();
+        register(&home, &[("default", unopenable.path())]);
+
+        let e = match ShelfManager::with_home(home.path().to_path_buf()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an unopenable default must not be papered over"),
+        };
+        // Naming the path and the file holding it is the whole recovery hint.
+        assert!(e.contains(unopenable.path().to_str().unwrap()), "{e}");
+        assert!(e.contains("shelves.json"), "{e}");
+        // Quietly opening the built-in shelf instead is the split being fixed here.
+        assert!(!home.path().join(".hypatia/default").exists());
+    }
+
+    #[test]
+    fn every_registered_shelf_opens_at_its_registered_path() {
+        let home = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        register(
+            &home,
+            &[("default", elsewhere.path()), ("other", other.path())],
+        );
+
+        let mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        assert_eq!(mgr.get("default").unwrap().id.path, elsewhere.path());
+        assert_eq!(mgr.get("other").unwrap().id.path, other.path());
+        assert_eq!(mgr.list().len(), 2);
+    }
+
+    #[test]
+    fn list_reports_the_path_the_shelf_is_open_at() {
+        let open_at = TempDir::new().unwrap();
+        let stale = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        mgr.connect(open_at.path(), Some("s")).unwrap();
+        // Only an edit behind the CLI's back can still part the two, but printing the
+        // registry path beside a `[connected]` taken from the name is what hid the split.
+        mgr.registry.register("s", &stale.path().to_path_buf());
+
+        let shelves = mgr.list();
+        let (_, path, connected) = shelves.iter().find(|(n, _, _)| *n == "s").unwrap();
+        assert_eq!(**path, open_at.path());
+        assert!(connected);
+    }
+
+    #[test]
+    fn list_reports_the_registered_path_when_disconnected() {
+        let home = TempDir::new().unwrap();
+        let never_opened = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        mgr.registry
+            .register("gone", &never_opened.path().to_path_buf());
+
+        let shelves = mgr.list();
+        let (_, path, connected) = shelves.iter().find(|(n, _, _)| *n == "gone").unwrap();
+        assert_eq!(**path, never_opened.path());
+        assert!(!connected);
     }
 
     #[test]
