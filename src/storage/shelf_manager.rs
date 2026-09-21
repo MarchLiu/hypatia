@@ -770,7 +770,7 @@ impl ShelfManager {
 
     /// Restore every registered shelf that is not connected yet.
     fn restore_registered(&mut self) {
-        let entries: Vec<(String, std::path::PathBuf)> = self
+        let mut entries: Vec<(String, std::path::PathBuf)> = self
             .registry
             .shelves
             .iter()
@@ -779,16 +779,40 @@ impl ShelfManager {
             .filter(|(name, _)| !self.shelves.contains_key(name.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // In name order, so which of two names for one directory opens does not vary by run.
+        entries.sort();
 
         for (name, path) in entries {
             if let Err(e) = self.connect_internal(&path, Some(&name)) {
-                eprintln!("warning: failed to restore shelf '{}': {}", name, e);
+                // Printed on every run until it is dealt with, so say how, either way round.
+                let hint = match self.connected_as(&path) {
+                    Some(open) => format!(
+                        "; use `-s {open}`, or keep one name: `hypatia disconnect {name}` \
+                         keeps '{open}', `hypatia disconnect {open}` keeps '{name}'"
+                    ),
+                    None => String::new(),
+                };
+                eprintln!("warning: failed to restore shelf '{name}': {e}{hint}");
             }
         }
     }
 
     /// Connect to a shelf and persist the registration.
     pub fn connect(&mut self, path: &Path, name: Option<&str>) -> Result<String> {
+        // Registered absolute: relative, it would name another directory from elsewhere.
+        let path = &std::path::absolute(path)?;
+        // Checked against the registry, not only what is open: a second name registered now
+        // would be refused at every later start.
+        let wanted = ShelfConfig::from_path(path, name).id.name;
+        if let Some((existing, _)) = self
+            .registry
+            .list()
+            .into_iter()
+            .find(|(known, dir)| *known != wanted && same_dir(dir, path))
+        {
+            let open = self.shelves.contains_key(existing);
+            return Err(second_name(path, existing, open));
+        }
         let shelf_name = self.connect_internal(path, name)?;
         self.registry.register(&shelf_name, &path.to_path_buf());
         self.registry.save(&self.registry_path)?;
@@ -804,15 +828,30 @@ impl ShelfManager {
                 "shelf '{shelf_name}' is already connected"
             )));
         }
+        // One directory is one shelf. Opened under a second name it would be listed as a
+        // second shelf, isolated from nothing, with its own vector caches to flush over the
+        // first one's. Separate processes sharing a shelf are unaffected.
+        if let Some(existing) = self.connected_as(path) {
+            return Err(second_name(path, existing, true));
+        }
         let shelf = OpenShelf::open(path, name)?;
 
         self.shelves.insert(shelf_name.clone(), shelf);
         Ok(shelf_name)
     }
 
-    /// Disconnect a shelf and remove from the persistent registry.
+    /// The name the directory at `path` is open under, if it is open.
+    fn connected_as(&self, path: &Path) -> Option<&str> {
+        self.shelves
+            .iter()
+            .find(|(_, shelf)| same_dir(&shelf.id.path, path))
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Disconnect a shelf and remove from the persistent registry. A registered shelf that
+    /// failed to open is removed too, such as a second name for a directory already open.
     pub fn disconnect(&mut self, name: &str) -> Result<()> {
-        if self.shelves.remove(name).is_none() {
+        if self.shelves.remove(name).is_none() && !self.registry.contains(name) {
             return Err(HypatiaError::Shelf(format!(
                 "shelf '{name}' is not connected"
             )));
@@ -1037,6 +1076,21 @@ fn dirs_home() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+/// Whether two paths name one directory, through symlinks too (macOS `/tmp` is `/private/tmp`).
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| std::fs::canonicalize(p).or_else(|_| std::path::absolute(p));
+    matches!((key(a), key(b)), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Refuses `path` a second name: `existing` names it already, open in this process or not.
+fn second_name(path: &Path, existing: &str, open: bool) -> HypatiaError {
+    let state = if open { "connected" } else { "registered" };
+    HypatiaError::Shelf(format!(
+        "{} is already {state} as '{existing}'",
+        path.display()
+    ))
+}
+
 /// Recursively copy a directory tree.
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
     if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -1105,6 +1159,113 @@ mod tests {
         let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
         mgr.connect(dir.path(), Some("dup")).unwrap();
         assert!(mgr.connect(dir.path(), Some("dup")).is_err());
+    }
+
+    #[test]
+    fn a_directory_connects_under_one_name() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        mgr.connect(dir.path(), Some("a")).unwrap();
+
+        let err = mgr.connect(dir.path(), Some("b")).unwrap_err().to_string();
+        assert!(err.contains("already connected as 'a'"), "{err}");
+        // Nor under the name the directory would get by default.
+        assert!(mgr.connect(dir.path(), None).is_err());
+        #[cfg(unix)]
+        {
+            let link = home.path().join("link");
+            std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+            let err = mgr.connect(&link, Some("c")).unwrap_err().to_string();
+            assert!(err.contains("already connected as 'a'"), "{err}");
+        }
+        let default = home.path().join(".hypatia/default");
+        let err = mgr.connect(&default, Some("main")).unwrap_err().to_string();
+        assert!(err.contains("already connected as 'default'"), "{err}");
+
+        let names: Vec<&str> = mgr.list().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, ["a", "default"]);
+        assert!(!mgr.registry.contains("b"));
+    }
+
+    #[test]
+    fn a_registered_directory_takes_no_second_name_even_unopened() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        // Registered, but not open: it failed to open when this process started.
+        mgr.registry.register("a", &dir.path().to_path_buf());
+
+        let err = mgr.connect(dir.path(), Some("b")).unwrap_err().to_string();
+        assert!(err.contains("already registered as 'a'"), "{err}");
+        assert!(mgr.get("b").is_none());
+        // Connecting it again under its own name is how it is retried.
+        assert_eq!(mgr.connect(dir.path(), Some("a")).unwrap(), "a");
+    }
+
+    #[test]
+    fn a_second_name_registered_earlier_stays_closed_until_disconnected() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let builtin = home.path().join(".hypatia/default");
+        // As an older version left it: many names for one directory, and one for the default.
+        let aliases: Vec<String> = ('a'..='l').map(String::from).collect();
+        let mut shelves = serde_json::Map::new();
+        for alias in &aliases {
+            shelves.insert(alias.clone(), serde_json::json!(dir.path()));
+        }
+        shelves.insert("default".into(), serde_json::json!(builtin));
+        shelves.insert("main".into(), serde_json::json!(builtin));
+        std::fs::create_dir_all(home.path().join(".hypatia")).unwrap();
+        std::fs::write(
+            home.path().join(".hypatia/shelves.json"),
+            serde_json::json!({ "shelves": shelves }).to_string(),
+        )
+        .unwrap();
+
+        // The first name in order opens. The registry holds them in no order, a new one on
+        // every start, so a few starts would catch one opened by chance.
+        for _ in 0..5 {
+            let mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+            let open: Vec<&str> = mgr
+                .list()
+                .into_iter()
+                .filter(|(_, _, connected)| *connected)
+                .map(|(n, _, _)| n)
+                .collect();
+            assert_eq!(open, ["a", "default"]);
+        }
+
+        // Their registrations are what disconnecting removes.
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        for alias in aliases.iter().skip(1).map(String::as_str).chain(["main"]) {
+            mgr.disconnect(alias).unwrap();
+        }
+        assert!(mgr.disconnect("b").is_err());
+        let mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        let names: Vec<&str> = mgr.list().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, ["a", "default"]);
+    }
+
+    #[test]
+    fn disconnect_removes_a_registered_shelf_that_does_not_open() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("shelf.toml"), "[embedding\n").unwrap();
+        std::fs::create_dir_all(home.path().join(".hypatia")).unwrap();
+        std::fs::write(
+            home.path().join(".hypatia/shelves.json"),
+            serde_json::json!({ "shelves": { "broken": dir.path() } }).to_string(),
+        )
+        .unwrap();
+
+        let mut mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        assert!(mgr.get("broken").is_none());
+        mgr.disconnect("broken").unwrap();
+        // Only the registration goes; the directory is left as it was.
+        assert!(dir.path().join("shelf.toml").exists());
+        let mgr = ShelfManager::with_home(home.path().to_path_buf()).unwrap();
+        assert!(!mgr.list().iter().any(|(n, _, _)| *n == "broken"));
     }
 
     #[test]

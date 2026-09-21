@@ -245,8 +245,8 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | Command | Description |
 |---------|-------------|
 | `hypatia init [<path>] [-n <name>]` | Set up a shelf (the default one, or the directory given) and show what works on it |
-| `hypatia connect <path> [-n <name>]` | Connect to a shelf directory |
-| `hypatia disconnect <name>` | Disconnect from a shelf |
+| `hypatia connect <path> [-n <name>]` | Connect to a shelf directory; a directory is connected under one name only |
+| `hypatia disconnect <name>` | Disconnect from a shelf; also removes a registered shelf that failed to open |
 | `hypatia list` | List connected shelves |
 | `hypatia knowledge-create <name> [-d <data>] [-t <tags>] [--synonyms <csv>] [--figures <refs>]` | Create a knowledge entry |
 | `hypatia knowledge-get <name>` | Get a knowledge entry |
