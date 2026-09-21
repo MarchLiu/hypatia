@@ -186,6 +186,65 @@ fn crud_versions_fts_vectors_and_isolation() {
 }
 #[test]
 #[ignore = "requires a disposable PostgreSQL database with pgvector"]
+fn field_values_enumerate_declared_array_elements_across_catalogs() {
+    let f = Fixture::new("none");
+    let store = f.open();
+    let with = |tags: &[&str], scopes: &[&str]| {
+        Content::new("x")
+            .with_tags(tags.iter().map(|t| t.to_string()).collect())
+            .with_scopes(scopes.iter().map(|s| s.to_string()).collect())
+    };
+    store
+        .insert_knowledge("alpha", &with(&["rule", "memory"], &["proj-a", ""]))
+        .unwrap();
+    store
+        .insert_knowledge("beta", &with(&["rule"], &["proj-a"]))
+        .unwrap();
+    // Entries with neither field must not break the array expansion.
+    store
+        .insert_knowledge("bare", &Content::new("nothing"))
+        .unwrap();
+    store
+        .insert_statement(
+            &StatementKey::new("alpha", "relatesTo", "beta"),
+            &with(&[], &["proj-b"]),
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.field_values("scopes").unwrap(),
+        [
+            (String::new(), 1),
+            ("proj-a".to_string(), 2),
+            ("proj-b".to_string(), 1),
+        ],
+        "statements are enumerated with knowledge, and counts are per entry"
+    );
+    assert_eq!(
+        store.field_values("tags").unwrap(),
+        [("memory".to_string(), 1), ("rule".to_string(), 2)]
+    );
+    assert!(store.field_values("figures").unwrap().is_empty());
+
+    assert!(store.field_value_exists("scopes", "").unwrap());
+    assert!(store.field_value_exists("scopes", "proj-b").unwrap());
+    assert!(!store.field_value_exists("scopes", "proj_a").unwrap());
+    assert!(store.field_value_exists("tags", "rule").unwrap());
+    assert!(!store.field_value_exists("tags", "proj-a").unwrap());
+
+    store.delete_knowledge("alpha").unwrap();
+    assert_eq!(
+        store.field_values("tags").unwrap(),
+        [("rule".to_string(), 1)],
+        "a deleted entry takes its values with it"
+    );
+    assert!(!store.field_value_exists("scopes", "").unwrap());
+}
+
+#[test]
+#[ignore = "requires a disposable PostgreSQL database with pgvector"]
 fn graph_native_parameters_payload_and_snapshots() {
     let f = Fixture::new("none");
     let a = f.open();

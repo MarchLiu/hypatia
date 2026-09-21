@@ -80,7 +80,25 @@ hypatia query '["$knowledge", ["$contains", "tags", "rule"], ["$or", ["$contains
 hypatia query '["$knowledge", ["$contains", "tags", "taboo"], ["$or", ["$contains", "scopes", "<PROJECT>"], ["$contains", "scopes", ""]]]'
 ```
 
-3. Internalize these rules and taboos for the current session. Follow rules and avoid taboos in all interactions.
+3. Confirm the scope spelling this shelf already uses, so the session's writes land
+   in the same scope its reads come from:
+
+```bash
+hypatia scope exists "<PROJECT>" || hypatia scope list --count
+```
+
+   `exists` exits 0 when the scope is in use and 1 when it is not. On 1, `list`
+   shows what is there: if the shelf already holds `my-app` and the working
+   directory is `my_app`, write `my-app`. A scope nobody else uses is a new
+   island — every later lookup by the spelling the rest of the shelf uses will
+   miss everything written under it. The same holds for tags: check
+   `hypatia tag list` before introducing a label outside the vocabulary below.
+
+   `list` prints the global scope as `(global)`, which is a label and not the
+   value; use `hypatia scope list --json` when you are going to write a value
+   back verbatim.
+
+4. Internalize these rules and taboos for the current session. Follow rules and avoid taboos in all interactions.
 
 ---
 
@@ -422,7 +440,7 @@ When the user explicitly asks to remember or forget:
 
 1. Identify what to remember
 2. Classify as `rule`, `taboo`, or general `memory`
-3. Determine scopes: `"<PROJECT>"` for this project only, or `"<PROJECT>,"` with a trailing comma to also make it global
+3. Determine scopes: `"<PROJECT>"` for this project only, or `"<PROJECT>,"` with a trailing comma to also make it global. If `hypatia scope exists "<PROJECT>"` exits 1, run `hypatia scope list` and reuse the spelling already there rather than adding a second one
 4. Create:
    ```bash
    hypatia knowledge-create "<name>" \
@@ -481,7 +499,7 @@ When the user explicitly asks to remember or forget:
 7. **Use structured tags** — `message`, `session`, `summary <N>`, `memory`, `work-unit`, `rule`, `taboo`
 8. **Don't interrupt the user** — memory operations are background tasks
 9. **Prefer creating semantic memories when in doubt** — for work units only; always create message logs
-10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules add a trailing comma (`"<PROJECT>,"`, or `","` for global only), because `--scopes ""` stores no scope
+10. **Tag and scope discipline** — every entry includes `--scopes "<PROJECT>"`; global rules add a trailing comma (`"<PROJECT>,"`, or `","` for global only), because `--scopes ""` stores no scope. Read the shelf's vocabulary with `hypatia scope list` / `hypatia tag list` before introducing a value: a new spelling is stored without complaint and is then invisible to every lookup that uses the old one
 
 ## Graph Schema Reference
 

@@ -119,6 +119,38 @@ pub(super) fn definitions() -> Vec<Value> {
             read.clone(),
         ),
         tool(
+            "scope_list",
+            "List scopes",
+            "List every scope in use on the shelf, with how many entries carry each. Read this before writing an entry: reusing an existing spelling is what keeps the entry findable, and a new one silently creates an island. The global scope is the empty string.",
+            json!({ "shelf": shelf }),
+            &[],
+            read.clone(),
+        ),
+        tool(
+            "scope_exists",
+            "Check a scope",
+            "Whether any entry already carries this scope. Cheaper than scope_list when you only want to confirm the spelling you are about to write.",
+            json!({ "value": { "type": "string", "description": "Scope to look for; \"\" is the global scope" }, "shelf": shelf }),
+            &["value"],
+            read.clone(),
+        ),
+        tool(
+            "tag_list",
+            "List tags",
+            "List every tag in use on the shelf, with how many entries carry each. Read this before writing an entry so it joins the vocabulary already in the shelf instead of starting a synonym of it.",
+            json!({ "shelf": shelf }),
+            &[],
+            read.clone(),
+        ),
+        tool(
+            "tag_exists",
+            "Check a tag",
+            "Whether any entry already carries this tag. Cheaper than tag_list when you only want to confirm the spelling you are about to write.",
+            json!({ "value": { "type": "string", "description": "Tag to look for" }, "shelf": shelf }),
+            &["value"],
+            read.clone(),
+        ),
+        tool(
             "knowledge_create",
             "Create knowledge",
             "Create a knowledge entry. Fails if the name exists; use knowledge_update to change an entry.",
@@ -255,6 +287,10 @@ pub(super) fn call(lab: &mut Lab, params: &Value) -> Result<Value, RpcError> {
         "search" => search(lab, args),
         "similar" => similar(lab, args),
         "session_current" => session_current(lab, args),
+        "scope_list" => field_list(lab, "scopes", args),
+        "scope_exists" => field_exists(lab, "scopes", args),
+        "tag_list" => field_list(lab, "tags", args),
+        "tag_exists" => field_exists(lab, "tags", args),
         "knowledge_create" => knowledge_create(lab, args),
         "knowledge_get" => knowledge_get(lab, args),
         "knowledge_update" => knowledge_update(lab, args),
@@ -332,6 +368,13 @@ struct SimilarArgs {
 #[serde(deny_unknown_fields)]
 struct SessionArgs {
     scope: Option<String>,
+    shelf: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldValueArgs {
+    value: String,
     shelf: Option<String>,
 }
 
@@ -575,6 +618,29 @@ fn session_current(lab: &mut Lab, args: Value) -> ToolResult {
     enter(lab, &shelf);
     let jse = crate::cli::commands::session_current_query(args.scope.as_deref());
     Ok(rows(lab.query(&shelf, &jse).map_err(|e| e.to_string())?))
+}
+
+/// Enumeration reads the content index, which embedding never writes to, so these two
+/// skip the overdue flush the other shelf tools run first.
+fn field_list(lab: &mut Lab, field: &str, args: Value) -> ToolResult {
+    let args: ShelfArgs = parse(args)?;
+    let shelf = shelf_name(args.shelf);
+    let values: Vec<Value> = lab
+        .field_values(&shelf, field)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(value, entries)| json!({ "value": value, "entries": entries }))
+        .collect();
+    Ok(json!({ "field": field, "total_count": values.len(), "values": values }))
+}
+
+fn field_exists(lab: &mut Lab, field: &str, args: Value) -> ToolResult {
+    let args: FieldValueArgs = parse(args)?;
+    let shelf = shelf_name(args.shelf);
+    let exists = lab
+        .field_value_exists(&shelf, field, &args.value)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "field": field, "value": args.value, "exists": exists }))
 }
 
 fn knowledge_create(lab: &mut Lab, args: Value) -> ToolResult {

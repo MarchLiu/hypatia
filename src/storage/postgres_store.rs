@@ -706,6 +706,69 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             .map_err(pg_error)?
             == 1)
     }
+    /// The rows whose `field` really is an array, and the canonical tokens of
+    /// its elements. The elements come from `tokens`, which spells them exactly
+    /// as the SQLite index does; `content` decides which rows qualify, because a
+    /// field an entry left out is stored as JSON null and tokenized as the empty
+    /// string, indistinguishable in `tokens` from a declared global scope.
+    fn array_elements(&self, table: &str) -> String {
+        format!(
+            "SELECT v.value FROM {t} q, LATERAL jsonb_array_elements_text(q.tokens -> $1) AS v(value) \
+             WHERE jsonb_typeof(q.content -> $1) = 'array'",
+            t = self.table(table)
+        )
+    }
+
+    /// Distinct values of an array content field across both catalogs, with the
+    /// number of entries carrying each, ordered by value.
+    ///
+    /// A sequential scan: no PostgreSQL index can enumerate the elements of a
+    /// JSONB array. GIN answers membership, not enumeration, and `jsonb_path_ops`
+    /// stores hashes, so the values could not be read back from it at all. A
+    /// shelf would need a posting table of its own before this gets faster, which
+    /// only pays off in the millions of entries.
+    pub fn field_values(&self, field: &str) -> Result<Vec<(String, i64)>> {
+        let (knowledge, _) = catalog_info("knowledge")?;
+        let (statement, _) = catalog_info("statement")?;
+        // Every path in tokens holds a de-duplicated array, so one row
+        // contributes each of its values exactly once.
+        Ok(self
+            .client
+            .borrow_mut()
+            .query(
+                &format!(
+                    "SELECT t.value, count(*) FROM ({} UNION ALL {}) t GROUP BY t.value ORDER BY t.value",
+                    self.array_elements(knowledge),
+                    self.array_elements(statement)
+                ),
+                &[&field],
+            )
+            .map_err(pg_error)?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect())
+    }
+
+    /// Whether any entry lists `value` in `field`. Agrees with `field_values`
+    /// on what counts as a value.
+    pub fn field_value_exists(&self, field: &str, value: &str) -> Result<bool> {
+        let (knowledge, _) = catalog_info("knowledge")?;
+        let (statement, _) = catalog_info("statement")?;
+        Ok(self
+            .client
+            .borrow_mut()
+            .query_one(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM ({} UNION ALL {}) t WHERE t.value = $2)",
+                    self.array_elements(knowledge),
+                    self.array_elements(statement)
+                ),
+                &[&field, &value],
+            )
+            .map_err(pg_error)?
+            .get(0))
+    }
+
     /// Entries still waiting for a vector; served by the `*_missing_embedding_idx` indexes.
     pub fn pending_count(&self, catalog: &str) -> Result<usize> {
         let (table, _) = catalog_info(catalog)?;

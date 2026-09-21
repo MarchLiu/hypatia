@@ -1,6 +1,11 @@
-fn main() {
-    if let Err(e) = hypatia::cli::run() {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match hypatia::cli::run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }

@@ -517,6 +517,19 @@ impl SqliteStore {
                 key: name.to_string(),
             });
         }
+        // json_index has no foreign key on docs, so its postings have to go
+        // first, exactly as delete_statement drops them.
+        let doc_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM docs WHERE catalog = 'knowledge' AND key = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = doc_id {
+            tx.execute("DELETE FROM json_index WHERE doc_id = ?1", params![id])
+                .map_err(StorageError::from)?;
+        }
         tx.execute(
             "DELETE FROM docs WHERE catalog = 'knowledge' AND key = ?1",
             params![name],
@@ -759,6 +772,59 @@ impl SqliteStore {
             result.push(row.map_err(StorageError::from)?);
         }
         Ok(result)
+    }
+
+    // ── Content value enumeration ────────────────────────────────────
+
+    /// Distinct values of an array content field across both catalogs, with the
+    /// number of entries carrying each, ordered by value.
+    ///
+    /// The join on `docs` is load-bearing: shelves written before knowledge
+    /// deletion cleaned up after itself still hold postings whose document is
+    /// gone, and those are not values any entry carries.
+    ///
+    /// `array_index IS NOT NULL` is belt and braces. A field an entry leaves out
+    /// is walked as JSON null, whose token is the empty string — the same token
+    /// a declared global scope has — but such a posting never reaches the table:
+    /// `json_index` is WITHOUT ROWID with `array_index` in its primary key, so
+    /// the column is implicitly NOT NULL and `replace_postings_in`'s
+    /// `INSERT OR IGNORE` drops the row. Saying so here means relaxing that key
+    /// cannot quietly turn every scope-less entry into a global scope.
+    pub fn field_values(&self, field: &str) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT j.value, COUNT(DISTINCT j.doc_id) \
+                 FROM json_index j JOIN docs d ON d.id = j.doc_id \
+                 WHERE j.path = ?1 AND j.value IS NOT NULL AND j.array_index IS NOT NULL \
+                 GROUP BY j.value ORDER BY j.value",
+            )
+            .map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map(params![field], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(StorageError::from)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(StorageError::from)?);
+        }
+        Ok(out)
+    }
+
+    /// Whether any entry lists `value` in `field`. Stops at the first posting
+    /// instead of counting them, and agrees with `field_values` on what counts
+    /// as a value.
+    pub fn field_value_exists(&self, field: &str, value: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM json_index j JOIN docs d ON d.id = j.doc_id \
+                 WHERE j.path = ?1 AND j.value = ?2 AND j.array_index IS NOT NULL)",
+                params![field, value],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::from)?)
     }
 
     pub fn embedding_version(&self, catalog: &str, key: &str) -> Result<Option<i64>> {
@@ -1525,6 +1591,156 @@ mod tests {
     #[test]
     fn schema_init() {
         let (_dir, _store) = setup();
+    }
+
+    fn scoped(data: &str, tags: &[&str], scopes: &[&str]) -> Content {
+        Content::new(data)
+            .with_tags(tags.iter().map(|t| t.to_string()).collect())
+            .with_scopes(scopes.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn field_values_span_both_catalogs_and_count_entries_not_postings() {
+        let (_dir, store) = setup();
+        store
+            .insert_knowledge("alpha", &scoped("a", &["rule", "memory"], &["proj-a", ""]))
+            .unwrap();
+        store
+            .insert_knowledge("beta", &scoped("b", &["rule"], &["proj-a"]))
+            .unwrap();
+        // No scopes and no tags: walked as JSON null, whose token is the same
+        // empty string a declared global scope has, and must not be counted as one.
+        store
+            .insert_knowledge("bare", &Content::new("nothing"))
+            .unwrap();
+        store
+            .insert_statement(
+                &StatementKey::new("alpha", "relatesTo", "beta"),
+                &scoped("s", &[], &["proj-b"]),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.field_values("scopes").unwrap(),
+            [
+                (String::new(), 1),
+                ("proj-a".to_string(), 2),
+                ("proj-b".to_string(), 1),
+            ],
+            "the global scope sorts first and statements are counted too"
+        );
+        assert_eq!(
+            store.field_values("tags").unwrap(),
+            [("memory".to_string(), 1), ("rule".to_string(), 2)]
+        );
+        assert!(store.field_values("figures").unwrap().is_empty());
+        assert!(store.field_values("synonyms").unwrap().is_empty());
+
+        assert!(store.field_value_exists("scopes", "").unwrap());
+        assert!(store.field_value_exists("tags", "rule").unwrap());
+        assert!(!store.field_value_exists("tags", "rules").unwrap());
+        // A value of one field is not a value of another.
+        assert!(!store.field_value_exists("tags", "proj-a").unwrap());
+    }
+
+    #[test]
+    fn deleting_an_entry_takes_its_values_with_it() {
+        let (_dir, store) = setup();
+        store
+            .insert_knowledge("alpha", &scoped("a", &["rule"], &["proj-a"]))
+            .unwrap();
+        store
+            .insert_statement(
+                &StatementKey::new("alpha", "relatesTo", "beta"),
+                &scoped("s", &[], &["proj-b"]),
+                None,
+                None,
+            )
+            .unwrap();
+        store.delete_knowledge("alpha").unwrap();
+        store
+            .delete_statement(&StatementKey::new("alpha", "relatesTo", "beta"))
+            .unwrap();
+        // Left behind: an entry that declares no scopes and no tags at all.
+        store
+            .insert_knowledge("bare", &Content::new("nothing"))
+            .unwrap();
+
+        assert!(store.field_values("scopes").unwrap().is_empty());
+        assert!(store.field_values("tags").unwrap().is_empty());
+        assert!(!store.field_value_exists("scopes", "proj-a").unwrap());
+        assert!(!store.field_value_exists("scopes", "").unwrap());
+        // No posting outlived its document, so json_index does not grow forever.
+        let orphans: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM json_index j LEFT JOIN docs d ON d.id = j.doc_id \
+                 WHERE d.id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn a_field_an_entry_leaves_out_never_reaches_the_index() {
+        let (_dir, store) = setup();
+        store
+            .insert_knowledge("bare", &Content::new("nothing"))
+            .unwrap();
+        let doc = store.doc_id_by_key("knowledge", "bare").unwrap().unwrap();
+        // content_postings emits `scopes`, `figures` and `synonyms` as JSON nulls
+        // and `format` as a scalar, all with no array index. None of them lands:
+        // the primary key of this WITHOUT ROWID table covers array_index, which
+        // makes it NOT NULL, and the walk inserts OR IGNORE.
+        let postings: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM json_index WHERE doc_id = ?1",
+                params![doc],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(postings, 0);
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO json_index(doc_id, path, kind, value, array_index) \
+                     VALUES(?1, 'scopes', 'null', '', NULL)",
+                    params![doc],
+                )
+                .is_err(),
+            "the schema is what keeps the null placeholder out"
+        );
+        assert!(store.field_values("scopes").unwrap().is_empty());
+        assert!(!store.field_value_exists("scopes", "").unwrap());
+    }
+
+    #[test]
+    fn postings_left_behind_by_an_older_hypatia_are_not_reported_as_values() {
+        let (_dir, store) = setup();
+        store
+            .insert_knowledge("alpha", &scoped("a", &["rule"], &["proj-a"]))
+            .unwrap();
+        // Before knowledge deletion cleaned up json_index, deleting an entry left
+        // its postings behind. Such a shelf must not report a scope no entry carries.
+        store
+            .conn
+            .execute(
+                "INSERT INTO json_index(doc_id, path, kind, value, array_index) \
+                 VALUES(9999, 'scopes', 'string', 'ghost', 0)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.field_values("scopes").unwrap(),
+            [("proj-a".to_string(), 1)]
+        );
+        assert!(!store.field_value_exists("scopes", "ghost").unwrap());
     }
 
     fn identity(model: &str, dimensions: usize) -> crate::storage::transfer::EmbeddingMetadata {

@@ -202,6 +202,25 @@ impl Lab {
         shelf_ref.execute_search(query, &opts)
     }
 
+    // --- Content value enumeration ---
+
+    /// Distinct values of an array content field (`scopes`, `tags`, …) on the
+    /// shelf, with the number of entries carrying each, ordered by value.
+    pub fn field_values(&self, shelf: &str, field: &str) -> Result<Vec<(String, i64)>> {
+        let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        shelf_ref.backend.field_values(field)
+    }
+
+    /// Whether any entry on the shelf carries `value` in `field`.
+    pub fn field_value_exists(&self, shelf: &str, field: &str, value: &str) -> Result<bool> {
+        let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
+            crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
+        })?;
+        shelf_ref.backend.field_value_exists(field, value)
+    }
+
     // --- Similarity search ---
 
     pub fn similar(

@@ -68,6 +68,38 @@ hypatia knowledge-create "prefer immutable" -d "always create new objects" --tag
 hypatia knowledge-create "no mock DB" -d "never mock database in tests" --tags "taboo" --scopes "my-project,"
 ```
 
+### Listing the scopes and tags already in use
+
+A scope or tag you invent is not an error — the entry is stored, and every later
+lookup by the value you meant misses it. Check before you write:
+
+```bash
+# What this shelf already uses, with how many entries carry each
+hypatia scope list --count
+hypatia tag list --count
+
+# Exact values, when you are going to write one back
+hypatia scope list --json      # [{"value":"","entries":12},{"value":"my-project",…}]
+
+# Confirm one spelling; exit 0 if in use, 1 if not
+hypatia tag exists rule
+hypatia scope exists my-project
+hypatia scope exists ""        # the global scope
+```
+
+The plain listing prints the global scope as `(global)`. That is a label for the
+terminal, not the value — the value is the empty string, and `--json` and
+`exists` both give it back verbatim. Never copy `(global)` into `--scopes`.
+
+Both cover knowledge and statements. An entry that declares no scopes at all is
+not listed as global.
+
+| User says | Command |
+|---|---|
+| "what scopes/projects are in here?" | `hypatia scope list --count` |
+| "what tags exist?" / "which labels are used?" | `hypatia tag list --count` |
+| "is there already a `rule` tag?" | `hypatia tag exists rule` |
+
 ## Knowledge CRUD
 
 Knowledge entries are independent information points with a name, content, and tags.

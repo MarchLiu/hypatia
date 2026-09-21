@@ -264,6 +264,10 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia archive-store <file> [-n <name>] [-s <shelf>]` | Store a file in archives with auto-metadata |
 | `hypatia archive-get <name> [-o <output>] [-s <shelf>]` | Get an archive file path or copy it |
 | `hypatia archive-list [-s <shelf>]` | List all archive files |
+| `hypatia scope list [--count\|--json] [-s <shelf>]` | List the scopes in use; `--count` adds how many entries carry each, `--json` emits exact values |
+| `hypatia scope exists <name> [-s <shelf>]` | Exit 0 if the scope is in use, 1 if not; `""` is the global scope |
+| `hypatia tag list [--count\|--json] [-s <shelf>]` | List the tags in use; `--count` adds how many entries carry each, `--json` emits exact values |
+| `hypatia tag exists <name> [-s <shelf>]` | Exit 0 if the tag is in use, 1 if not |
 | `hypatia query '<jse-json>'` | Execute a JSE query |
 | `hypatia export <name> <dest>` | Export a shelf |
 | `hypatia skill install --agent <host> [--dir <dir>] [--skill <name>] [--force]` | Install the bundled agent skills (hosts: `claude`, `codex`, `opencode`) |
@@ -355,6 +359,42 @@ hypatia query '["$statement", ["$k-hop", "Alice", "$*", 2]]'
 hypatia query '["$statement", ["$k-hop", "Alice", "knows", 3]]'
 ```
 
+## Scopes and Tags
+
+`scopes` and `tags` are the vocabulary a shelf is filtered by, and both are
+filled in by whoever writes an entry. A misspelled value is not an error: the
+entry is stored, and every later lookup by that scope or tag misses it. `scope`
+and `tag` list what a shelf already uses, so a writer can reuse a value instead
+of inventing a second spelling of it.
+
+```bash
+# What scopes does this shelf use, and how many entries carry each?
+hypatia scope list --count
+#   (global)  12
+#   hypatia    8
+#   my-app    41
+#   (3 scopes)
+
+# Is this the spelling already in use? Exit 0 for yes, 1 for no.
+hypatia tag exists rule && hypatia knowledge-create "API convention" -t "rule" --scopes "my-app"
+
+# Exact values, for a script or an agent
+hypatia scope list --json
+# [ { "value": "", "entries": 12 }, { "value": "hypatia", "entries": 8 }, … ]
+```
+
+Both cover knowledge and statements, and count entries rather than occurrences.
+The global scope is stored as an empty string: `--json` and the MCP tools return
+it as `""`, and `exists` echoes the value quoted. The plain listing prints it as
+`(global)`, which is a label for the terminal and not the value — read `--json`
+when you are going to write the value back.
+
+Only values an entry declares are listed. An entry that leaves `scopes` out
+entirely is not in the global scope.
+
+The MCP tools `scope_list`, `scope_exists`, `tag_list` and `tag_exists` give the
+same answers to an agent, and never relabel.
+
 ## Agent Skills
 
 The binary carries three agent skills: `hypatia` turns natural language into CLI calls, `hypatia-memory` is the automatic memory protocol, and `hypatia-dream` consolidates the graph at the end of a work period.
@@ -391,7 +431,7 @@ command = "hypatia"
 args = ["mcp"]
 ```
 
-- Tools: `query`, `search`, `similar`, `session_current`, knowledge and statement create/read/update/delete, archives, `list_shelves`, `shelf_status`, and a bounded `backfill`. `connect`, `init`, `model install`, `export` and `import` stay in the CLI.
+- Tools: `query`, `search`, `similar`, `session_current`, `scope_list`/`scope_exists`/`tag_list`/`tag_exists`, knowledge and statement create/read/update/delete, archives, `list_shelves`, `shelf_status`, and a bounded `backfill`. `connect`, `init`, `model install`, `export` and `import` stay in the CLI.
 - Resources: `hypatia://{shelf}/status`, `hypatia://{shelf}/knowledge/{name}` and `hypatia://{shelf}/statement/{head}/{relation}/{tail}`.
 - Writes return the shelf's embedding debt, so an agent knows when new entries are not yet found by `similar`.
 - The local model is loaded only for the request that needs it and released afterwards. The server reads shelf configuration once at start: restart it after `model install`, `connect` or `init`.
