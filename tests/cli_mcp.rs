@@ -379,6 +379,75 @@ fn a_host_can_drive_the_data_plane_over_stdio() {
 }
 
 #[test]
+fn an_agent_can_read_the_vocabulary_of_a_shelf_before_writing_into_it() {
+    let home = TempDir::new().unwrap();
+    let lines = vec![
+        call(
+            1,
+            "knowledge_create",
+            json!({ "name": "alpha", "tags": ["rule", "memory"], "scopes": ["proj-a", ""] }),
+        ),
+        call(
+            2,
+            "knowledge_create",
+            json!({ "name": "beta", "tags": ["rule"], "scopes": ["proj-a"] }),
+        ),
+        call(
+            3,
+            "statement_create",
+            json!({ "head": "alpha", "relation": "relatesTo", "tail": "beta", "scopes": ["proj-b"] }),
+        ),
+        call(4, "scope_list", json!({})),
+        call(5, "tag_list", json!({})),
+        call(6, "scope_exists", json!({ "value": "proj-a" })),
+        call(7, "scope_exists", json!({ "value": "" })),
+        call(8, "scope_exists", json!({ "value": "proj_a" })),
+        call(9, "tag_exists", json!({ "value": "rule" })),
+        call(10, "tag_exists", json!({ "value": "proj-a" })),
+        call(11, "scope_list", json!({ "shelf": "no-such-shelf" })),
+        call(12, "tag_exists", json!({ "name": "rule" })),
+    ];
+    let (replies, _) = session(&home, &lines);
+
+    // The global scope stays the empty string here: this output is read by a model,
+    // which passes it straight back to knowledge_create.
+    assert_eq!(
+        ok(&replies, 4),
+        json!({
+            "field": "scopes",
+            "total_count": 3,
+            "values": [
+                { "value": "", "entries": 1 },
+                { "value": "proj-a", "entries": 2 },
+                { "value": "proj-b", "entries": 1 }
+            ]
+        }),
+        "statements are enumerated with knowledge, and counts are per entry"
+    );
+    assert_eq!(
+        ok(&replies, 5)["values"],
+        json!([
+            { "value": "memory", "entries": 1 },
+            { "value": "rule", "entries": 2 }
+        ])
+    );
+
+    assert_eq!(ok(&replies, 6)["exists"], true);
+    assert_eq!(ok(&replies, 7)["exists"], true);
+    // A near miss is reported, not guessed at: this is the check that stops an
+    // agent from inventing a second spelling of a scope it already has.
+    assert_eq!(
+        ok(&replies, 8),
+        json!({ "field": "scopes", "value": "proj_a", "exists": false })
+    );
+    assert_eq!(ok(&replies, 9)["exists"], true);
+    assert_eq!(ok(&replies, 10)["exists"], false, "a scope is not a tag");
+
+    assert!(tool_error(&replies, 11).contains("no-such-shelf"));
+    assert!(tool_error(&replies, 12).contains("unknown field"));
+}
+
+#[test]
 fn malformed_messages_get_errors_and_the_server_keeps_serving() {
     let home = TempDir::new().unwrap();
     let mut input = Vec::new();

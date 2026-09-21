@@ -41,12 +41,20 @@
 
 **协议。** 支持带 initialize 握手的 2025-11-25、2025-06-18、2025-03-26、2024-11-05。请求的版本受支持就原样返回，否则返回 2025-11-25。2026-07-28 版取消了握手，当前宿主仍在用握手，暂不实现。不支持批量请求。参数与业务错误作为 tool 结果的 `isError` 返回，让模型能自行纠正；未知方法、未知工具、resource 不存在分别返回 -32601、-32602、-32002。
 
-**工具只覆盖数据面。** query、search、similar、session_current、knowledge 与 statement 的增删改查、archive 的存取列、list_shelves、shelf_status、backfill。
+**工具只覆盖数据面。** query、search、similar、session_current、scope 与 tag 的枚举、knowledge 与 statement 的增删改查、archive 的存取列、list_shelves、shelf_status、backfill。
 
 - 不做 `remember(text)` 这类「智能记忆」端点：判断需要完整的对话上下文，只能在 agent 一侧做。
 - connect、disconnect、init、model install、export、import 与 re-embed 留在 CLI。长驻进程只在启动时读注册表，写回时会冲掉其他会话期间的注册；下载与整库操作也会长时间占住同步循环。
 
-**欠账与状态。** 每个作用于 shelf 的工具先还逾期的 embedding 欠账，与每条 CLI 命令一致。写工具返回 shelf 级的欠账快照：待补数、跳过数、欠账开始时间、锁定与暂停的原因。延迟 embedding 下逐条状态几乎总是「待补」，没有信息量。shelf_status 工具与 `hypatia://{shelf}/status` resource 返回同一份文档，因为模型能否自主读取 resource 因宿主而异。
+**scope / tag 枚举。** `scope_list`、`scope_exists`、`tag_list`、`tag_exists`，CLI 对应 `hypatia scope|tag list|exists`。scopes 与 tags 由写入方自己填，拼错不报错，只是此后按该值的召回全部落空；agent 手里没有 jq，把整个 shelf 拉出来去重的代价对一个记忆系统是自毁式的。两者都覆盖 knowledge 与 statement，计数按条目而非出现次数。
+
+全局 scope 存的是空字符串。MCP 原样返回 `""`；CLI 默认打印为 `(global)`，那是给终端看的标签而不是值——要拿回原值用 `--json`，`exists` 则打印带引号的原值。真有条目把 scope 取名叫 `(global)` 时，两者在默认输出里长得一样，这正是 `--json` 存在的理由。
+
+枚举只认「条目自己声明的数组元素」。完全没声明 scopes 的条目不算在全局 scope 里：SQLite 上它根本没有 `scopes` posting（`json_index` 是 WITHOUT ROWID，`array_index` 在主键里因而隐式 NOT NULL，JSON null 那条占位 posting 在 `INSERT OR IGNORE` 时被丢掉），枚举与 `["$contains", "scopes", ""]` 的答案一致。PostgreSQL 上 `membership_tokens` 保留了 null token，`$contains` 会把这类条目也捞出来，枚举则按 `content` 里该字段是不是数组来判定，因此与 SQLite 一致。这条过滤侧的后端差异先于本功能存在，应当单独处理。
+
+实现走顺序扫描：SQLite 读已有的 `json_index`（`idx_json_path_value` 直接可用），PostgreSQL 展开 `tokens` 的数组。两边都与规模严格线性，SQLite 100 万条目下 tags 约 130 ms，PostgreSQL 100 万行约 310 ms，按每天数百条的写入速率要跑到那里需要以年计。倒排表加递归 CTE 跳跃扫描能把 PG 侧压到 1.7 ms，但那是百万级 shelf 才值得的工程，留给真出现需求时再补。PG 上的 `exists` 同样是顺序扫描：`tokens` 列没有索引，这是既有的 membership 过滤就有的问题（见 issue #24 第三节），需要单独处理。
+
+**欠账与状态。** 每个作用于 shelf 的工具先还逾期的 embedding 欠账，与每条 CLI 命令一致。scope 与 tag 的枚举是例外：它们只读内容索引，向量碰不到那里，为列四个名字加载一次模型比列举本身贵得多。写工具返回 shelf 级的欠账快照：待补数、跳过数、欠账开始时间、锁定与暂停的原因。延迟 embedding 下逐条状态几乎总是「待补」，没有信息量。shelf_status 工具与 `hypatia://{shelf}/status` resource 返回同一份文档，因为模型能否自主读取 resource 因宿主而异。
 
 **backfill 限批。** 每次最多补 64 条，上限 512，避免超出宿主的工具调用超时（Codex 默认 60 s）。向量被锁定时报错并说明原因。按从新到旧取条目：若最新一批总是失败，会挡住更早的欠账，这时应改用终端里完整的 `hypatia backfill`。
 

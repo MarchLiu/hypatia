@@ -522,6 +522,19 @@ impl ShelfBackend {
         }
     }
 }
+/// Enumeration covers top-level fields only. A dotted path such as `synonyms.head`
+/// is a path in the SQLite postings table but not a key of the PostgreSQL content
+/// document, so the two backends would answer differently; refusing it keeps them
+/// from disagreeing silently.
+fn top_level_array_field(field: &str) -> Result<()> {
+    if field.is_empty() || field.contains('.') {
+        return Err(HypatiaError::Validation(format!(
+            "cannot enumerate '{field}': only top-level fields such as tags and scopes"
+        )));
+    }
+    Ok(())
+}
+
 impl Drop for ShelfBackend {
     fn drop(&mut self) {
         let _ = self.flush();
@@ -622,6 +635,25 @@ impl ShelfBackend {
             Backend::Local(l) => l.store.query_khop(head, relation, depth),
             #[cfg(feature = "postgres-backend")]
             Backend::Postgres(pg) => pg.query_khop(head, relation, depth),
+        }
+    }
+    /// Distinct values of a top-level array content field (`tags`, `scopes`,
+    /// `figures`, `synonyms`) across knowledge and statements, with how many
+    /// entries carry each.
+    pub fn field_values(&self, field: &str) -> Result<Vec<(String, i64)>> {
+        top_level_array_field(field)?;
+        match &self.inner {
+            Backend::Local(l) => l.store.field_values(field),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.field_values(field),
+        }
+    }
+    pub fn field_value_exists(&self, field: &str, value: &str) -> Result<bool> {
+        top_level_array_field(field)?;
+        match &self.inner {
+            Backend::Local(l) => l.store.field_value_exists(field, value),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.field_value_exists(field, value),
         }
     }
     pub fn search(&self, query: &str, opts: &SearchOpts) -> Result<Vec<super::FtsResult>> {

@@ -700,8 +700,50 @@ fn contract(shelf: &mut OpenShelf) {
             .len(),
         2
     );
+    // Value enumeration: both catalogs, counted per entry, and the JSON null of
+    // an undeclared field is not the empty-string global scope.
+    shelf
+        .backend
+        .update_knowledge(
+            "first",
+            &Content::new("scoped")
+                .with_tags(vec!["rust".into(), "shared".into()])
+                .with_scopes(vec!["proj".into(), String::new()]),
+        )
+        .unwrap();
+    shelf
+        .backend
+        .update_statement(
+            &b,
+            &Content::new("cycle").with_scopes(vec!["proj".into()]),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        shelf.backend.field_values("scopes").unwrap(),
+        [(String::new(), 1), ("proj".to_string(), 2)],
+        "statement a declares no scopes and must not count as global"
+    );
+    assert_eq!(
+        shelf.backend.field_values("tags").unwrap(),
+        [("rust".to_string(), 1), ("shared".to_string(), 1)]
+    );
+    assert!(shelf.backend.field_value_exists("scopes", "").unwrap());
+    assert!(!shelf.backend.field_value_exists("scopes", "Proj").unwrap());
+    assert!(!shelf.backend.field_value_exists("tags", "proj").unwrap());
+    // A nested path means different things to the two backends, so neither answers it.
+    assert!(shelf.backend.field_values("synonyms.head").is_err());
+    assert!(shelf.backend.field_value_exists("data.mixed", "1").is_err());
+
     shelf.backend.delete_knowledge("first").unwrap();
     assert!(shelf.backend.delete_knowledge("first").is_err());
+    assert_eq!(
+        shelf.backend.field_values("scopes").unwrap(),
+        [("proj".to_string(), 1)],
+        "a deleted entry takes its values with it"
+    );
+    assert!(shelf.backend.field_values("tags").unwrap().is_empty());
     let recreated = shelf.backend.insert_knowledge("first", &initial).unwrap();
     assert_ne!(recreated, next);
     assert!(

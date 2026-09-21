@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
@@ -201,6 +202,12 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
+    /// List the scopes in use, or check one before writing with it
+    #[command(subcommand)]
+    Scope(FieldCommands),
+    /// List the tags in use, or check one before writing with it
+    #[command(subcommand)]
+    Tag(FieldCommands),
     /// Manage embedding models
     #[command(subcommand)]
     Model(ModelCommands),
@@ -220,6 +227,31 @@ enum Commands {
     Skill(super::skill::SkillCommands),
     /// Enter interactive REPL mode
     Repl,
+}
+
+/// `scope` and `tag` differ only in the content field they read.
+#[derive(Subcommand)]
+enum FieldCommands {
+    /// List the distinct values in use, one per line
+    List {
+        /// Show how many entries carry each value
+        #[arg(long)]
+        count: bool,
+        /// Emit [{"value":…,"entries":N}] instead; the global scope stays the empty string
+        #[arg(long, conflicts_with = "count")]
+        json: bool,
+        /// Shelf to read
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
+    /// Report whether a value is in use; exits 1 when it is not
+    Exists {
+        /// The value to look for; "" is the global scope
+        name: String,
+        /// Shelf to read
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,8 +285,10 @@ enum ModelCommands {
 
 impl Commands {
     /// The shelf whose overdue embedding debt a command pays before it runs. `backfill` and
-    /// `import` handle vectors themselves, `export` copies the shelf as it is, and
-    /// `disconnect` and the archive file lookups never read entries.
+    /// `import` handle vectors themselves, `export` copies the shelf as it is,
+    /// `disconnect` and the archive file lookups never read entries, and `scope` and `tag`
+    /// read the content index, which vectors never reach — loading a model to list four
+    /// names would cost more than the listing.
     fn shelf(&self) -> Option<&str> {
         match self {
             Self::Query { shelf, .. }
@@ -277,6 +311,8 @@ impl Commands {
             | Self::Backfill { .. }
             | Self::ArchiveGet { .. }
             | Self::ArchiveList { .. }
+            | Self::Scope(_)
+            | Self::Tag(_)
             | Self::Model(_)
             | Self::Mcp
             | Self::Skill(_)
@@ -285,26 +321,34 @@ impl Commands {
     }
 }
 
-pub fn run() -> crate::error::Result<()> {
+/// The process exit code, so `scope exists` and `tag exists` can answer "no" without
+/// an error message. The shelves still close through `Lab`'s drop, which persists the
+/// vector cache.
+pub fn run() -> crate::error::Result<ExitCode> {
     let cli = Cli::parse();
     // Skill management touches no shelf: dispatch it before Lab::new(), which
     // opens every registered shelf and creates the default one on first run.
     if let Some(Commands::Skill(cmd)) = cli.command {
-        return super::skill::execute(cmd);
+        super::skill::execute(cmd)?;
+        return Ok(ExitCode::SUCCESS);
     }
     let mut lab = Lab::new()?;
 
     match cli.command {
         None | Some(Commands::Repl) => {
             let mut repl = super::repl::Repl::new(lab)?;
-            repl.run()
+            repl.run()?;
+            Ok(ExitCode::SUCCESS)
         }
-        Some(Commands::Mcp) => super::mcp::serve(lab),
+        Some(Commands::Mcp) => {
+            super::mcp::serve(lab)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(cmd) => execute_command(&mut lab, cmd),
     }
 }
 
-fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
+fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCode> {
     // Reject an update with nothing to change before paying any embedding debt.
     if let Commands::KnowledgeUpdate {
         data: None,
@@ -519,7 +563,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             if status {
                 let debt = lab.embedding_debt(&shelf)?;
                 println!("{}", serde_json::to_string_pretty(&debt)?);
-                return Ok(());
+                return Ok(ExitCode::SUCCESS);
             }
             let stats = lab.backfill_vectors_with_reembed(&shelf, reembed)?;
             println!(
@@ -584,6 +628,8 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
                 println!("  ({} unsummarized messages)", result.rows.len());
             }
         }
+        Commands::Scope(cmd) => return execute_field_command(lab, "scopes", cmd),
+        Commands::Tag(cmd) => return execute_field_command(lab, "tags", cmd),
         Commands::Model(cmd) => execute_model_command(lab, cmd)?,
         Commands::Repl => unreachable!(),
         Commands::Mcp => {
@@ -594,7 +640,70 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
         // Normally dispatched before Lab::new(); still correct if routed here.
         Commands::Skill(cmd) => super::skill::execute(cmd)?,
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A label for the terminal: the global scope is stored as an empty string, which
+/// would otherwise print as a blank line. It is not the value — a caller that needs
+/// the value back verbatim reads `--json`, or the MCP tools, which never relabel.
+fn display_value(field: &str, value: &str) -> String {
+    match (field, value) {
+        ("scopes", "") => "(global)".to_string(),
+        (_, "") => "(empty)".to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn execute_field_command(
+    lab: &mut Lab,
+    field: &str,
+    cmd: FieldCommands,
+) -> crate::error::Result<ExitCode> {
+    // `scope` / `tag`, as the command the user typed, for messages and hints.
+    let noun = field.trim_end_matches('s');
+    match cmd {
+        FieldCommands::List { count, json, shelf } => {
+            let values = lab.field_values(&shelf, field)?;
+            if json {
+                let rows: Vec<serde_json::Value> = values
+                    .iter()
+                    .map(|(value, entries)| serde_json::json!({ "value": value, "entries": entries }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if values.is_empty() {
+                println!("No {field} in shelf '{shelf}'.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let width = values
+                .iter()
+                .map(|(v, _)| display_value(field, v).chars().count())
+                .max()
+                .unwrap_or(0);
+            for (value, entries) in &values {
+                let shown = display_value(field, value);
+                if count {
+                    println!("  {shown:width$}  {entries}");
+                } else {
+                    println!("  {shown}");
+                }
+            }
+            println!("  ({} {field})", values.len());
+        }
+        FieldCommands::Exists { name, shelf } => {
+            // Quoted, so the global scope reads as "" and cannot be confused with a
+            // scope whose name happens to be the label `list` prints for it.
+            if lab.field_value_exists(&shelf, field, &name)? {
+                println!("{name:?}");
+            } else {
+                // Not an error: asking is how a writer avoids inventing a spelling.
+                eprintln!("no such {noun}: {name:?} (hypatia {noun} list -s {shelf})");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn execute_model_command(lab: &mut Lab, cmd: ModelCommands) -> crate::error::Result<()> {
@@ -841,6 +950,46 @@ mod tests {
         assert_eq!(shelf(&["hypatia", "list"]), None);
         assert_eq!(shelf(&["hypatia", "init", "/tmp/shelf"]), None);
         assert_eq!(shelf(&["hypatia", "archive-list", "-s", "work"]), None);
+        // Enumeration reads the content index; a vector flush would add nothing.
+        assert_eq!(shelf(&["hypatia", "scope", "list", "-s", "work"]), None);
+        assert_eq!(shelf(&["hypatia", "tag", "exists", "rule"]), None);
+    }
+
+    #[test]
+    fn scope_and_tag_take_the_same_subcommands_on_a_named_shelf() {
+        let parsed = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command.unwrap() {
+            Commands::Scope(cmd) => ("scopes", cmd),
+            Commands::Tag(cmd) => ("tags", cmd),
+            other => panic!("not a field command: {:?}", other.shelf()),
+        };
+        assert!(matches!(
+            parsed(&["hypatia", "scope", "list"]),
+            ("scopes", FieldCommands::List { count: false, json: false, ref shelf }) if shelf == "default"
+        ));
+        assert!(matches!(
+            parsed(&["hypatia", "tag", "list", "--count", "-s", "work"]),
+            ("tags", FieldCommands::List { count: true, ref shelf, .. }) if shelf == "work"
+        ));
+        assert!(matches!(
+            parsed(&["hypatia", "scope", "list", "--json"]),
+            ("scopes", FieldCommands::List { json: true, .. })
+        ));
+        // --json is the exact-value form; pairing it with a column layout is a mistake.
+        assert!(Cli::try_parse_from(["hypatia", "tag", "list", "--json", "--count"]).is_err());
+        assert!(matches!(
+            parsed(&["hypatia", "scope", "exists", ""]),
+            ("scopes", FieldCommands::Exists { ref name, .. }) if name.is_empty()
+        ));
+        // `exists` needs its value: an accidental bare call must not answer "no".
+        assert!(Cli::try_parse_from(["hypatia", "tag", "exists"]).is_err());
+    }
+
+    #[test]
+    fn the_global_scope_prints_as_a_label_rather_than_a_blank_line() {
+        assert_eq!(display_value("scopes", ""), "(global)");
+        assert_eq!(display_value("scopes", "proj"), "proj");
+        assert_eq!(display_value("tags", ""), "(empty)");
+        assert_eq!(display_value("tags", "rule"), "rule");
     }
 
     fn check_subcommand(cmd: &clap::Command) {
