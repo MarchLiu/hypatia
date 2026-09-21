@@ -341,8 +341,10 @@ hypatia search <query> [-c <catalog>] [--limit N] [--offset N]
 Semantic search using embedding vectors. Finds entries with similar meaning, even when keywords don't match.
 
 ```
-hypatia similar <query> [--limit N]
+hypatia similar <query> [--limit N] [-t knowledge|statement|both] [--tags <a,b>] [--exclude-tags <a,b>] [--where '<JSE condition>']
 ```
+
+`--tags` keeps entries carrying at least one of the tags, `--exclude-tags` drops entries carrying any of them, and `--where` takes a JSE condition such as `["$contains", "scopes", "project-a"]` (`$eq`, `$like`, `$contains`, `$and`/`$or`/`$not` and the other filters `$knowledge` takes, but not `$search`, `$similar` or `$k-hop`). They narrow the entries before ranking, so `--limit N` still returns N entries whenever that many qualify. `--exclude-tags message,summary,session` keeps the session-log layer from crowding out the knowledge distilled from it. With the default target `both` the filter applies to statements too, so a condition on `name` needs `-t knowledge`.
 
 Requires an embedding model configured in `shelf.toml` (default: BAAI/bge-m3).
 
@@ -354,6 +356,8 @@ Entries are embedded in batches after they are written or updated. With a remote
 |---|---|
 | "find similar to distributed systems" | `hypatia similar "distributed systems"` |
 | "semantic search for memory management" | `hypatia similar "memory management" --limit 5` |
+| "what do we know about auth, not the chat logs" | `hypatia similar "auth" --exclude-tags message,summary,session` |
+| "rules like this one for project-a" | `hypatia similar "<rule text>" -t knowledge --tags rule --where '["$contains", "scopes", "project-a"]'` |
 
 ## JSE Query Translation
 

@@ -211,6 +211,20 @@ impl Lab {
         target: &str,
         limit: i64,
     ) -> Result<QueryResult> {
+        self.similar_where(shelf, query, target, limit, None)
+    }
+
+    /// [`similar`](Self::similar) among the entries that satisfy `condition`, a JSE
+    /// filter applied to each target before it is ranked; see
+    /// [`crate::engine::filter::similar_filter`] for the one the CLI builds.
+    pub fn similar_where(
+        &mut self,
+        shelf: &str,
+        query: &str,
+        target: &str,
+        limit: i64,
+        condition: Option<&serde_json::Value>,
+    ) -> Result<QueryResult> {
         let shelf_ref = self.shelf_manager.get_mut(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
@@ -223,14 +237,21 @@ impl Lab {
         };
 
         match target {
-            "knowledge" => shelf_ref.execute_similar(query, &opts, QueryTarget::Knowledge),
-            "statement" => shelf_ref.execute_similar(query, &opts, QueryTarget::Statement),
+            "knowledge" => shelf_ref.similar_where(query, &opts, QueryTarget::Knowledge, condition),
+            "statement" => shelf_ref.similar_where(query, &opts, QueryTarget::Statement, condition),
             "both" => {
+                // Each search embeds the query, so check the filter against both
+                // catalogs before either one runs.
+                if let Some(condition) = condition {
+                    for t in [QueryTarget::Knowledge, QueryTarget::Statement] {
+                        shelf_ref.compile_filter(t, condition)?;
+                    }
+                }
                 let mut knowledge_rows = shelf_ref
-                    .execute_similar(query, &opts, QueryTarget::Knowledge)?
+                    .similar_where(query, &opts, QueryTarget::Knowledge, condition)?
                     .rows;
                 let mut statement_rows = shelf_ref
-                    .execute_similar(query, &opts, QueryTarget::Statement)?
+                    .similar_where(query, &opts, QueryTarget::Statement, condition)?
                     .rows;
 
                 for row in &mut knowledge_rows {

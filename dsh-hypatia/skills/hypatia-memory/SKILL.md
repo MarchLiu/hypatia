@@ -284,6 +284,7 @@ hypatia query '["$not-summaried", "message", ["$contains", "scopes", "<PROJECT>"
    - Search for related past messages: `["$not-summaried", "message", ["$contains", "scopes", "<PROJECT>"]]` + filter in reasoning
    - Full-text search: `["$knowledge", ["$search", "<derived keywords>"]]`
    - Vector similarity: `["$knowledge", ["$similar", "<conceptual query>"]]`
+   - Distilled knowledge by meaning, without the session log (`message`, `summary`, `session`) crowding it out: `hypatia similar "<conceptual query>" -t knowledge --exclude-tags message,summary,session --limit 5`
    - Statement graph exploration: `["$statement", ["$triple", "<entity>", "$*", "$*"]]`
 3. Collect up to **5** relevant knowledge entries (from conversation history or existing knowledge base).
 4. Format them as a reference message placed as the **second-to-last** message:

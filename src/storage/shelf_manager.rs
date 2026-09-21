@@ -80,6 +80,29 @@ impl Storage for OpenShelf {
         opts: &SearchOpts,
         target: QueryTarget,
     ) -> Result<QueryResult> {
+        self.similar_where(query_text, opts, target, None)
+    }
+    fn execute_khop(&self, head: &str, relation: Option<&str>, depth: i64) -> Result<QueryResult> {
+        Ok(QueryResult::new(
+            self.backend
+                .query_khop(head, relation, depth)?
+                .iter()
+                .map(statement_to_row)
+                .collect(),
+        ))
+    }
+}
+impl OpenShelf {
+    /// Semantic search ranked only among the entries that satisfy `condition`, a JSE
+    /// filter such as `["$not", ["$contains", "tags", "message"]]`. The filter applies
+    /// before ranking, so `opts.limit` entries come back whenever that many qualify.
+    pub fn similar_where(
+        &self,
+        query_text: &str,
+        opts: &SearchOpts,
+        target: QueryTarget,
+        condition: Option<&serde_json::Value>,
+    ) -> Result<QueryResult> {
         // Say how to turn semantic search on first: re-embedding after a model change needs
         // a usable model too.
         if let Some(off) = self.semantic_search_off_error() {
@@ -89,10 +112,14 @@ impl Storage for OpenShelf {
         if let Some(m) = self.backend.identity_mismatch() {
             return Err(m.to_error());
         }
+        // A malformed filter fails before it costs an embedding.
+        let filter = condition
+            .map(|c| self.compile_filter(target, c))
+            .transpose()?;
         let vector = self.embedder.embed(query_text)?;
         let rows = self
             .backend
-            .vector_search(target, &vector, opts.limit)?
+            .vector_search_where(target, &vector, opts.limit, filter.as_ref())?
             .into_iter()
             .map(|(key, content, distance)| {
                 let mut m = serde_json::Map::new();
@@ -108,14 +135,16 @@ impl Storage for OpenShelf {
             .collect();
         Ok(QueryResult::new(rows))
     }
-    fn execute_khop(&self, head: &str, relation: Option<&str>, depth: i64) -> Result<QueryResult> {
-        Ok(QueryResult::new(
-            self.backend
-                .query_khop(head, relation, depth)?
-                .iter()
-                .map(statement_to_row)
-                .collect(),
-        ))
+    /// `condition` compiled for `target` and checked against its table, so a filter
+    /// naming a field the target lacks fails as early as a malformed one.
+    pub fn compile_filter(
+        &self,
+        target: QueryTarget,
+        condition: &serde_json::Value,
+    ) -> Result<crate::engine::filter::SqlFilter> {
+        let filter = crate::engine::filter::compile(condition, target, self)?;
+        self.backend.check_filter(target, &filter)?;
+        Ok(filter)
     }
 }
 /// Why a row of an automatic batch got no vector.

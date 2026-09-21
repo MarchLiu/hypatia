@@ -118,6 +118,32 @@ impl VectorFileIndex {
             .collect())
     }
 
+    /// [`search`](Self::search) among the doc_ids `keep` accepts. The graph walk
+    /// passes over the others instead of returning them, and can still end with
+    /// fewer than `k` hits when enough accepted vectors exist; callers that need
+    /// every one check the count.
+    pub fn filtered_search(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: impl Fn(i64) -> bool,
+    ) -> Result<Vec<(i64, f64)>> {
+        if self.index.size() == 0 {
+            return Ok(Vec::new());
+        }
+        let k = k.min(self.index.size());
+        let results = self
+            .index
+            .filtered_search(query, k, |key| keep(key as i64))
+            .map_err(|e| StorageError::Vector(e.to_string()))?;
+        Ok(results
+            .keys
+            .iter()
+            .zip(results.distances.iter())
+            .map(|(key, dist)| (*key as i64, *dist as f64))
+            .collect())
+    }
+
     /// Atomic snapshot with a uniquely reserved temporary file per writer.
     pub fn save(&mut self) -> Result<()> {
         if !self.dirty {
@@ -286,5 +312,28 @@ mod tests {
         index.upsert(65, &[0.0, 0.0, 1.0]).unwrap();
         assert_eq!(index.size(), 65);
         assert!(index.capacity() >= 65);
+    }
+
+    #[test]
+    fn filtered_search_ranks_only_the_keys_it_keeps() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The nearest 50 vectors are all rejected; the kept ones lie further out.
+        let items: Vec<_> = (1..=200i64)
+            .map(|i| (i, vec![1.0, i as f32 / 100.0, 0.0]))
+            .collect();
+        let index = VectorFileIndex::build(&dir.path().join("f.usearch"), 3, &items).unwrap();
+        let hits = index
+            .filtered_search(&[1.0, 0.0, 0.0], 5, |id| id > 50)
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [51, 52, 53, 54, 55]
+        );
+        assert!(
+            index
+                .filtered_search(&[1.0, 0.0, 0.0], 5, |_| false)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

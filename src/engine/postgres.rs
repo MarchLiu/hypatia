@@ -448,18 +448,7 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
             )));
         }
     };
-    let schema = store
-        .sql_schema()
-        .filter(|s| !s.is_empty() && !s.contains('\0'))
-        .ok_or_else(|| {
-            HypatiaError::Config("PostgreSQL storage requires an explicit SQL schema".into())
-        })?;
-    let mut c = Compiler {
-        schema: quote_identifier(schema),
-        target,
-        store,
-        params: Vec::new(),
-    };
+    let mut c = compiler(target, store)?;
     let mut conditions = Vec::new();
     let not_summaried = operator == "$not-summaried";
     let rest = if not_summaried {
@@ -503,6 +492,36 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
         " LIMIT CASE WHEN {limit} < 0 THEN NULL ELSE {limit} END OFFSET GREATEST({offset}, 0)"
     ));
     store.execute_query(target, &sql, c.params)
+}
+
+fn compiler(target: QueryTarget, store: &dyn Storage) -> Result<Compiler<'_>> {
+    let schema = store
+        .sql_schema()
+        .filter(|s| !s.is_empty() && !s.contains('\0'))
+        .ok_or_else(|| {
+            HypatiaError::Config("PostgreSQL storage requires an explicit SQL schema".into())
+        })?;
+    Ok(Compiler {
+        schema: quote_identifier(schema),
+        target,
+        store,
+        params: Vec::new(),
+    })
+}
+
+/// One condition as a WHERE fragment over `q`, the target table; see
+/// [`super::filter::compile`]. Its bindings are `$1`…`$n`.
+pub(super) fn compile_filter(
+    ast: &AstNode,
+    target: QueryTarget,
+    store: &dyn Storage,
+) -> Result<super::filter::SqlFilter> {
+    let mut c = compiler(target, store)?;
+    let fragment = c.condition(ast)?;
+    Ok(super::filter::SqlFilter {
+        fragment,
+        params: c.params,
+    })
 }
 
 /// Canonical membership tokens derived before JSONB normalizes numeric text.

@@ -12,8 +12,9 @@ use std::path::Path;
 use chrono::NaiveDateTime;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::engine::filter::SqlFilter;
 use crate::error::{HypatiaError, Result, StorageError};
-use crate::model::{Content, Knowledge, SearchOpts, Statement, StatementKey};
+use crate::model::{Content, Knowledge, QueryTarget, SearchOpts, Statement, StatementKey};
 use crate::storage::json_index::{json_contains_str, rebuild_all, replace_postings_in};
 
 const SCHEMA_VERSION: &str = "3";
@@ -1277,6 +1278,7 @@ impl SqliteStore {
     ) -> Result<Vec<(String, String, f64)>> {
         self.brute_force_search(
             "SELECT name, content, embedding FROM knowledge WHERE embedding IS NOT NULL",
+            &[],
             query_vector,
             limit,
         )
@@ -1289,19 +1291,89 @@ impl SqliteStore {
     ) -> Result<Vec<(String, String, f64)>> {
         self.brute_force_search(
             "SELECT triple, content, embedding FROM statement WHERE embedding IS NOT NULL",
+            &[],
             query_vector,
             limit,
         )
     }
 
+    /// Exact search among the `target` entries that satisfy `filter`.
+    pub fn vector_search_where(
+        &self,
+        target: QueryTarget,
+        query_vector: &[f32],
+        limit: i64,
+        filter: &SqlFilter,
+    ) -> Result<Vec<(String, String, f64)>> {
+        let (table, pk) = (target.table_name(), target.key_column());
+        self.brute_force_search(
+            &format!(
+                "SELECT {pk}, content, embedding FROM {table} \
+                 WHERE embedding IS NOT NULL AND ({})",
+                filter.fragment
+            ),
+            &filter.params,
+            query_vector,
+            limit,
+        )
+    }
+
+    /// Prepares `filter` against `target`'s table, so a field the table lacks fails
+    /// before anything is embedded.
+    pub fn check_filter(&self, target: QueryTarget, filter: &SqlFilter) -> Result<()> {
+        let (table, pk) = (target.table_name(), target.key_column());
+        match self.conn.prepare(&format!(
+            "SELECT {pk} FROM {table} WHERE ({})",
+            filter.fragment
+        )) {
+            Ok(_) => Ok(()),
+            // SQLite's own message, without the statement it quotes.
+            Err(rusqlite::Error::SqlInputError { msg, .. })
+                if msg.starts_with("no such column") =>
+            {
+                Err(crate::engine::filter::unknown_field(table, &msg))
+            }
+            Err(e) => Err(StorageError::from(e).into()),
+        }
+    }
+
+    /// doc_ids of the `target` entries with a vector that satisfy `filter`: the only
+    /// ones a filtered search may return.
+    pub fn filtered_doc_ids(
+        &self,
+        target: QueryTarget,
+        filter: &SqlFilter,
+    ) -> Result<std::collections::HashSet<i64>> {
+        let (table, pk) = (target.table_name(), target.key_column());
+        // The fragment names `{table}` for its own correlations, so it runs in a
+        // subquery over that table alone.
+        let sql = format!(
+            "SELECT d.id FROM docs d WHERE d.catalog = '{table}' AND d.key IN \
+             (SELECT {pk} FROM {table} WHERE embedding IS NOT NULL AND ({}))",
+            filter.fragment
+        );
+        let params: Vec<_> = filter.params.iter().map(json_to_sql).collect();
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::from)?;
+        let ids = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+            .map_err(StorageError::from)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(StorageError::from)?;
+        Ok(ids)
+    }
+
     fn brute_force_search(
         &self,
         sql: &str,
+        params: &[serde_json::Value],
         query_vector: &[f32],
         limit: i64,
     ) -> Result<Vec<(String, String, f64)>> {
+        let params: Vec<_> = params.iter().map(json_to_sql).collect();
         let mut stmt = self.conn.prepare(sql).map_err(StorageError::from)?;
-        let mut rows = stmt.query([]).map_err(StorageError::from)?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(params.iter()))
+            .map_err(StorageError::from)?;
         let mut scored: Vec<(String, String, f64)> = Vec::new();
         while let Some(row) = rows.next().map_err(StorageError::from)? {
             let key: String = row.get(0)?;
