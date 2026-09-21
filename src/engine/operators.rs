@@ -132,16 +132,21 @@ pub fn evaluate_operator(
 ) -> Result<OperatorResult> {
     match operator {
         "$knowledge" | "$statement" => {
-            // These are handled by the evaluator at the top level.
-            // When evaluated as operators, they just pass through their first operand.
-            if operands.len() == 1 {
-                eval_fn(&operands[0])
-            } else {
-                // No conditions — return a tautology
-                Ok(OperatorResult::SqlCondition {
+            // The evaluator handles these at the top level, where sibling
+            // operands are ANDed. Nested, there is nowhere to put the
+            // conjunction, and returning a tautology for the extras dropped
+            // them from the WHERE clause — the same silent full-table result
+            // a literal used to cause. Only the empty form is really "no
+            // filter"; ask for an explicit $and rather than guessing.
+            match operands.len() {
+                0 => Ok(OperatorResult::SqlCondition {
                     fragment: "1=1".to_string(),
                     params: Vec::new(),
-                })
+                }),
+                1 => eval_fn(&operands[0]),
+                _ => Err(super::evaluator::too_many_nested_operands(
+                    operator, operands,
+                )),
             }
         }
         "$and" => {
@@ -376,34 +381,25 @@ pub fn evaluate_operator(
                 params,
             })
         }
-        "$search" => {
-            let query = if operands.is_empty() {
-                return Err(HypatiaError::Eval(
-                    "$search expects a query argument".to_string(),
-                ));
-            } else {
-                expect_literal(&operands[0])?
+        "$search" | "$similar" => {
+            // Exactly one: extra operands used to be dropped without a word,
+            // and when one was a filter the query matched more than written.
+            let [query] = operands else {
+                return Err(HypatiaError::Eval(format!(
+                    "{operator} expects exactly one query argument, got {}",
+                    operands.len()
+                )));
             };
-            let query_str = match &query {
-                serde_json::Value::String(s) => s.clone(),
+            let query_str = match expect_literal(query)? {
+                serde_json::Value::String(s) => s,
                 other => other.to_string(),
             };
-            Ok(OperatorResult::FtsQuery { query: query_str })
-        }
-        "$similar" => {
-            let query = if operands.is_empty() {
-                return Err(HypatiaError::Eval(
-                    "$similar expects a query argument".to_string(),
-                ));
+            Ok(if operator == "$search" {
+                OperatorResult::FtsQuery { query: query_str }
             } else {
-                expect_literal(&operands[0])?
-            };
-            let query_str = match &query {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            Ok(OperatorResult::VectorQuery {
-                query_text: query_str,
+                OperatorResult::VectorQuery {
+                    query_text: query_str,
+                }
             })
         }
         "$k-hop" => {
@@ -464,6 +460,11 @@ pub fn evaluate_operator(
                 depth,
             })
         }
+        // Unreachable through the parser, which yields `AstNode::Quote` for
+        // both `["$quote", x]` and `{"$quote": x}` and never an operator
+        // node — so `OperatorResult::Value` has no live producer today. A
+        // hand-built one lands in condition position and is rejected there
+        // like any other literal; this arm only keeps the message specific.
         "$quote" => {
             if operands.len() != 1 {
                 return Err(HypatiaError::Eval(

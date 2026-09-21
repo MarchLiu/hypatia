@@ -4,7 +4,7 @@ use super::ast::AstNode;
 use crate::error::{HypatiaError, Result};
 
 /// Recognized Hypatia JSE operators.
-const OPERATORS: &[&str] = &[
+pub(super) const OPERATORS: &[&str] = &[
     "$knowledge",
     "$statement",
     "$and",

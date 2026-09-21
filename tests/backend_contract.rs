@@ -602,6 +602,22 @@ fn contract(shelf: &mut OpenShelf) {
             "{expression}"
         );
     }
+    // A condition that lost its own array is a literal, not a filter. Every
+    // backend must say so: dropping it left a WHERE-less query that returned
+    // the whole shelf while the caller believed the filter had applied.
+    for expression in [
+        json!({"$knowledge": ["$contains", "tags", "rust"], "limit": -1}),
+        json!({"$knowledge": ["$has", "tags", "rust"], "limit": -1}),
+    ] {
+        let err = Evaluator::execute(&expression, shelf).expect_err(&format!(
+            "flattened condition must be rejected: {expression}"
+        ));
+        assert!(
+            err.to_string()
+                .contains("unexpected node in condition context"),
+            "{expression}: {err}"
+        );
+    }
     let next = shelf
         .backend
         .update_knowledge("first", &Content::new("更新正文 storage"))

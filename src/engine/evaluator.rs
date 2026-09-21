@@ -123,9 +123,7 @@ impl Evaluator {
                         builder.add_condition(fragment, params);
                     }
                 }
-                OperatorResult::Value(_) => {
-                    // Ignore literal values in condition context
-                }
+                OperatorResult::Value(_) => return Err(not_a_condition(operand)),
             }
         }
 
@@ -214,7 +212,7 @@ impl Evaluator {
                         "$k-hop is not valid inside $not-summaried".to_string(),
                     ));
                 }
-                OperatorResult::Value(_) => {}
+                OperatorResult::Value(_) => return Err(not_a_condition(operand)),
             }
         }
 
@@ -249,6 +247,10 @@ impl Evaluator {
         store.execute_query(QueryTarget::Knowledge, &sql, all_params)
     }
 
+    /// Evaluate a node that must contribute a WHERE fragment. Only an
+    /// operator carries a filter, so everything else is an error: a literal,
+    /// symbol or quote accepted here would leave the WHERE clause narrower
+    /// than written — or empty — and quietly return rows the caller excluded.
     fn eval_condition(ast: &AstNode, ctx: &OpContext) -> Result<OperatorResult> {
         match ast {
             AstNode::Operator {
@@ -258,14 +260,132 @@ impl Evaluator {
             } => super::operators::evaluate_operator(operator, operands, metadata, ctx, &|node| {
                 Self::eval_condition(node, ctx)
             }),
-            AstNode::Quote(inner) => Ok(OperatorResult::Value(ast_to_value(inner))),
-            AstNode::Literal(v) => Ok(OperatorResult::Value(v.clone())),
-            _ => Err(HypatiaError::Eval(format!(
-                "unexpected node in condition context: {:?}",
-                ast
-            ))),
+            _ => Err(not_a_condition(ast)),
         }
     }
+}
+
+/// A node that carries no filter turned up where a condition was required.
+/// Both backends raise this, so a mis-shaped query fails identically on
+/// SQLite and PostgreSQL instead of silently matching every row.
+pub(super) fn not_a_condition(node: &AstNode) -> HypatiaError {
+    // A whitelisted operator name arriving as a literal is proof that a call
+    // lost its own array and flattened into sibling operands. Other
+    // $-strings — a field reference like "$name", a wildcard, an escaped
+    // "$$foo" — are not, so they get no hint rather than a misleading one.
+    // (The parser drops the escape, so "$$contains" does get the hint; it is
+    // indistinguishable here from a flattened "$contains".)
+    let hint = match node {
+        AstNode::Literal(serde_json::Value::String(s))
+            if super::parser::OPERATORS.contains(&s.as_str()) =>
+        {
+            " — a nested call needs its own array, as in [\"$knowledge\", [\"$contains\", ...]]"
+        }
+        _ => "",
+    };
+    HypatiaError::Eval(format!(
+        "unexpected node in condition context: {node:?}{hint}"
+    ))
+}
+
+/// A nested `$knowledge`/`$statement` got more than one operand. If one of
+/// them is not a condition, that is the real mistake — usually a call that
+/// lost its array — so name it rather than suggest an `$and` that would only
+/// fail again. Otherwise the caller meant several conditions.
+pub(super) fn too_many_nested_operands(operator: &str, operands: &[AstNode]) -> HypatiaError {
+    match operands
+        .iter()
+        .find(|n| !matches!(n, AstNode::Operator { .. }))
+    {
+        Some(node) => not_a_condition(node),
+        None => HypatiaError::Eval(format!(
+            "nested {operator} takes at most one condition, got {}; \
+             combine them with [\"$and\", ...]",
+            operands.len()
+        )),
+    }
+}
+
+/// Shapes that used to drop a filter and quietly widen the result, each with
+/// the error it must now raise instead. One table for both backends, so the
+/// SQLite and PostgreSQL paths are held to the same list rather than two
+/// hand-synced copies (see `no_operand_is_silently_dropped` in each).
+#[cfg(test)]
+pub(super) fn dropped_filter_cases() -> Vec<(serde_json::Value, &'static str)> {
+    use serde_json::json;
+    const NOT_A_CONDITION: &str = "unexpected node in condition context";
+    const NESTED: &str = "takes at most one condition";
+    const ONE_QUERY: &str = "expects exactly one query argument";
+    vec![
+        // The issue: a call that lost its array flattens into literals.
+        (
+            json!({"$knowledge": ["$contains", "scopes", "zzz-absent"], "limit": -1}),
+            NOT_A_CONDITION,
+        ),
+        // Its control: $has is not whitelisted, so it arrives as a symbol.
+        (
+            json!({"$knowledge": ["$has", "scopes", "zzz-absent"], "limit": -1}),
+            NOT_A_CONDITION,
+        ),
+        (
+            json!(["$knowledge", ["$and", ["$eq", "name", "a"], "stray"]]),
+            NOT_A_CONDITION,
+        ),
+        (json!(["$knowledge", ["$or", "stray"]]), NOT_A_CONDITION),
+        (json!(["$knowledge", ["$not", "stray"]]), NOT_A_CONDITION),
+        (json!(["$knowledge", ["$quote", "stray"]]), NOT_A_CONDITION),
+        (json!(["$statement", 42]), NOT_A_CONDITION),
+        (
+            json!(["$not-summaried", "message", "stray"]),
+            NOT_A_CONDITION,
+        ),
+        // A nested query operator answered 1=1/TRUE and dropped every
+        // condition; under $not that became "exclude everything".
+        (
+            json!([
+                "$knowledge",
+                [
+                    "$knowledge",
+                    ["$contains", "tags", "a"],
+                    ["$contains", "tags", "b"]
+                ]
+            ]),
+            NESTED,
+        ),
+        (
+            json!([
+                "$knowledge",
+                [
+                    "$not",
+                    ["$knowledge", ["$eq", "name", "a"], ["$eq", "name", "b"]]
+                ]
+            ]),
+            NESTED,
+        ),
+        // Flattened literals inside one: name the literal, don't suggest $and.
+        (
+            json!(["$knowledge", {"$knowledge": ["$contains", "scopes", "zzz"]}]),
+            NOT_A_CONDITION,
+        ),
+        // $search/$similar kept the first operand and dropped the rest, a
+        // filter included.
+        (
+            json!(["$knowledge", ["$search", "rust", ["$eq", "name", "a"]]]),
+            ONE_QUERY,
+        ),
+        (
+            json!(["$knowledge", {"$search": ["rust", "async"]}]),
+            ONE_QUERY,
+        ),
+        (
+            json!(["$statement", ["$similar", "rust", "async"]]),
+            ONE_QUERY,
+        ),
+        (
+            json!(["$not-summaried", "message", ["$search", "rust", "async"]]),
+            ONE_QUERY,
+        ),
+    ]
 }
 
 pub(super) fn extract_query_opts(
@@ -341,6 +461,9 @@ mod tests {
     struct MockStorage {
         query_results: Vec<serde_json::Map<String, serde_json::Value>>,
         search_results: Vec<serde_json::Map<String, serde_json::Value>>,
+        /// Every call that reached the store — SQL, searches, traversals —
+        /// so a test can assert a rejected query touched nothing.
+        executed: std::cell::RefCell<Vec<String>>,
     }
 
     impl MockStorage {
@@ -348,6 +471,7 @@ mod tests {
             Self {
                 query_results: results.clone(),
                 search_results: results,
+                executed: Default::default(),
             }
         }
 
@@ -358,6 +482,7 @@ mod tests {
             Self {
                 query_results,
                 search_results,
+                executed: Default::default(),
             }
         }
     }
@@ -369,30 +494,34 @@ mod tests {
             sql: &str,
             _params: Vec<serde_json::Value>,
         ) -> Result<QueryResult> {
-            // Just verify the SQL looks right and return mock results
-            let _ = sql; // use the sql to avoid warning
+            self.executed.borrow_mut().push(sql.to_string());
             Ok(QueryResult::new(self.query_results.clone()))
         }
 
-        fn execute_search(&self, _query: &str, _opts: &SearchOpts) -> Result<QueryResult> {
+        fn execute_search(&self, query: &str, _opts: &SearchOpts) -> Result<QueryResult> {
+            self.executed.borrow_mut().push(format!("search: {query}"));
             Ok(QueryResult::new(self.search_results.clone()))
         }
 
         fn execute_similar(
             &self,
-            _query_text: &str,
+            query_text: &str,
             _opts: &SearchOpts,
             _target: QueryTarget,
         ) -> Result<QueryResult> {
+            self.executed
+                .borrow_mut()
+                .push(format!("similar: {query_text}"));
             Ok(QueryResult::new(self.search_results.clone()))
         }
 
         fn execute_khop(
             &self,
-            _subject: &str,
+            subject: &str,
             _predicate: Option<&str>,
             _depth: i64,
         ) -> Result<QueryResult> {
+            self.executed.borrow_mut().push(format!("k-hop: {subject}"));
             Ok(QueryResult::new(self.search_results.clone()))
         }
     }
@@ -679,6 +808,79 @@ mod tests {
             fragment.ends_with("AND json_contains(knowledge.content, ?)"),
             "unqualified content in: {fragment}"
         );
+    }
+
+    /// Regression for #22: an operator call that loses its own array
+    /// flattens into sibling operands — `{"$knowledge": ["$contains", ...]}`
+    /// parses as three literals — and ignoring them left the WHERE clause
+    /// empty, returning the whole table while looking filtered. The cases
+    /// cover that and the neighbouring paths that dropped a filter the same
+    /// way. Each must fail with its own message before touching the store.
+    #[test]
+    fn no_operand_is_silently_dropped() {
+        let leaked = json!({"name": "everything"}).as_object().unwrap().clone();
+        for (expression, expected) in super::dropped_filter_cases() {
+            let mock = MockStorage::new(vec![leaked.clone()]);
+            let msg = Evaluator::execute(&expression, &mock)
+                .expect_err(&format!("must not match every row: {expression}"))
+                .to_string();
+            assert!(msg.contains(expected), "{expression}: {msg}");
+            assert!(
+                mock.executed.borrow().is_empty(),
+                "{expression}: reached the store anyway: {:?}",
+                mock.executed.borrow()
+            );
+        }
+    }
+
+    /// The empty nested form really does mean "no filter", so it must keep
+    /// working — the arity check above must not swallow it.
+    #[test]
+    fn an_empty_nested_query_operator_is_still_no_filter() {
+        let mock = MockStorage::new(vec![]);
+        Evaluator::execute(&json!(["$knowledge", ["$knowledge"]]), &mock).expect("no filter");
+        Evaluator::execute(
+            &json!(["$knowledge", ["$knowledge", ["$eq", "name", "a"]]]),
+            &mock,
+        )
+        .expect("one nested condition still passes through");
+        assert!(
+            mock.executed.borrow()[1].contains("name = ?"),
+            "nested condition lost: {:?}",
+            mock.executed.borrow()
+        );
+    }
+
+    /// The error names the node so a mis-shaped query can be located, and
+    /// points at the missing brackets when an operator name is the literal.
+    #[test]
+    fn condition_context_error_names_the_node() {
+        let mock = MockStorage::new(vec![]);
+        let err = Evaluator::execute(&json!({"$knowledge": ["$contains", "scopes", "x"]}), &mock)
+            .expect_err("flattened condition");
+        let msg = err.to_string();
+        let (node, hint) = msg.split_once(" — ").expect("a flattened call gets a hint");
+        assert!(node.contains(r#""$contains""#), "node not named: {msg}");
+        assert!(hint.contains("a nested call needs its own array"), "{msg}");
+
+        // Only a whitelisted operator name earns the hint. A field reference,
+        // a wildcard and an escaped literal are not flattened calls, and
+        // pointing them at brackets would send the caller the wrong way.
+        for expression in [
+            json!(["$knowledge", ["$not", "plain"]]),
+            json!(["$knowledge", "$name"]),
+            json!(["$knowledge", "$*"]),
+            json!(["$knowledge", "$$foo"]),
+        ] {
+            let msg = Evaluator::execute(&expression, &mock)
+                .expect_err(&format!("{expression}"))
+                .to_string();
+            assert!(
+                msg.contains("unexpected node in condition context"),
+                "{expression}: {msg}"
+            );
+            assert!(!msg.contains("needs its own array"), "{expression}: {msg}");
+        }
     }
 
     #[test]
