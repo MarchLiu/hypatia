@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod evaluator;
+pub mod filter;
 pub mod operators;
 pub mod parser;
 pub mod postgres;

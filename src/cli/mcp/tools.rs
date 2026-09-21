@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::{INVALID_PARAMS, RpcError};
+use crate::engine::filter::similar_filter;
 use crate::lab::{Lab, uses_similar};
 use crate::model::{Content, QueryResult, SearchOpts, StatementKey, Synonyms};
 use crate::service::KnowledgePatch;
@@ -96,11 +97,14 @@ pub(super) fn definitions() -> Vec<Value> {
         tool(
             "similar",
             "Semantic search",
-            "Find entries with similar meaning using vector embeddings. Fails with a next step when semantic search is off on the shelf. Also returns the embedding debt: pending entries are not found yet.",
+            "Find entries with similar meaning using vector embeddings. tags, exclude_tags and where narrow the entries before they are ranked, so limit entries come back whenever that many qualify. Fails with a next step when semantic search is off on the shelf. Also returns the embedding debt: pending entries are not found yet.",
             json!({
                 "query": { "type": "string" },
                 "target": { "type": "string", "enum": ["knowledge", "statement", "both"], "description": "Default both" },
                 "limit": { "type": "integer", "minimum": 1, "description": "Default 100" },
+                "tags": strings("Only entries carrying at least one of these tags"),
+                "exclude_tags": strings("Leave out entries carrying any of these tags, e.g. [\"message\", \"summary\", \"session\"] for the session-log layer"),
+                "where": { "description": "Only entries satisfying this JSE condition, as JSON or as a JSON string, e.g. [\"$contains\", \"scopes\", \"project-a\"]. It applies to each target searched: a condition on name needs target knowledge" },
                 "shelf": shelf
             }),
             &["query"],
@@ -317,6 +321,10 @@ struct SimilarArgs {
     query: String,
     target: Option<String>,
     limit: Option<i64>,
+    tags: Option<Vec<String>>,
+    exclude_tags: Option<Vec<String>>,
+    #[serde(rename = "where")]
+    condition: Option<Value>,
     shelf: Option<String>,
 }
 
@@ -414,6 +422,16 @@ fn rows(result: QueryResult) -> Value {
     json!({ "rows": result.rows, "total_count": result.total_count })
 }
 
+/// A JSE argument, which hosts send either as JSON or as a JSON string.
+fn jse_arg(value: Value, name: &str) -> Result<Value, String> {
+    match value {
+        Value::String(text) => {
+            serde_json::from_str(&text).map_err(|e| format!("invalid {name} JSON: {e}"))
+        }
+        other => Ok(other),
+    }
+}
+
 /// Trimmed items with blanks dropped.
 fn clean_list(items: Vec<String>) -> Vec<String> {
     items
@@ -505,12 +523,7 @@ fn shelf_status(lab: &mut Lab, args: Value) -> ToolResult {
 fn query(lab: &mut Lab, args: Value) -> ToolResult {
     let args: QueryArgs = parse(args)?;
     let shelf = shelf_name(args.shelf);
-    let jse = match args.jse {
-        Value::String(text) => {
-            serde_json::from_str(&text).map_err(|e| format!("invalid JSE JSON: {e}"))?
-        }
-        other => other,
-    };
+    let jse = jse_arg(args.jse, "JSE")?;
     enter(lab, &shelf);
     let semantic = uses_similar(&jse);
     let mut out = rows(lab.query(&shelf, &jse).map_err(|e| e.to_string())?);
@@ -540,10 +553,16 @@ fn similar(lab: &mut Lab, args: Value) -> ToolResult {
     let args: SimilarArgs = parse(args)?;
     let (limit, _) = paging(args.limit, None)?;
     let shelf = shelf_name(args.shelf);
+    let condition = args.condition.map(|c| jse_arg(c, "where")).transpose()?;
     enter(lab, &shelf);
     let target = args.target.unwrap_or_else(|| "both".to_string());
+    let filter = similar_filter(
+        &clean_list(args.tags.unwrap_or_default()),
+        &clean_list(args.exclude_tags.unwrap_or_default()),
+        condition,
+    );
     let result = lab
-        .similar(&shelf, &args.query, &target, limit)
+        .similar_where(&shelf, &args.query, &target, limit, filter.as_ref())
         .map_err(|e| e.to_string())?;
     let mut out = rows(result);
     out["embedding"] = debt(lab, &shelf);
@@ -765,5 +784,103 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len(), "duplicate tool names");
+    }
+
+    /// Embeds what was said next to the query and everything else further out.
+    struct Said;
+    impl crate::embedding::EmbeddingProvider for Said {
+        fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+            Ok(if text.contains("said") {
+                vec![1., 0., 0.]
+            } else {
+                vec![0.6, 0.8, 0.]
+            })
+        }
+        fn dimensions(&self) -> usize {
+            3
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn similar_filters_before_it_ranks() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("shelf.toml"),
+            "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n",
+        )
+        .unwrap();
+        let mut manager = crate::storage::ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        manager.get_mut("test").unwrap().embedder = Box::new(Said);
+        let mut lab = Lab::from_manager(manager);
+        for i in 1..=3 {
+            let said = Content::new("what the user said").with_tags(vec!["message".into()]);
+            lab.create_knowledge("test", &format!("msg-{i}"), said)
+                .unwrap();
+        }
+        let rule = |scopes: Vec<String>| {
+            Content::new("a rule")
+                .with_tags(vec!["rule".into()])
+                .with_scopes(scopes)
+        };
+        lab.create_knowledge("test", "rule-a", rule(vec!["project-a".into()]))
+            .unwrap();
+        lab.create_knowledge("test", "rule-b", rule(vec![]))
+            .unwrap();
+
+        let mut names = |extra: Value| -> Result<Vec<String>, String> {
+            let mut args = json!({ "query": "what was said", "target": "knowledge", "limit": 2, "shelf": "test" });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let mut names: Vec<String> = similar(&mut lab, args)?["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["name"].as_str().unwrap().to_string())
+                .collect();
+            names.sort();
+            Ok(names)
+        };
+        assert!(
+            names(json!({}))
+                .unwrap()
+                .iter()
+                .all(|n| n.starts_with("msg-"))
+        );
+        assert_eq!(
+            names(json!({ "exclude_tags": ["message", " "] })).unwrap(),
+            ["rule-a", "rule-b"]
+        );
+        assert_eq!(
+            names(
+                json!({ "tags": ["rule"], "where": "[\"$contains\", \"scopes\", \"project-a\"]" })
+            )
+            .unwrap(),
+            ["rule-a"]
+        );
+        assert_eq!(
+            names(json!({ "where": ["$not", ["$contains", "tags", "message"]], "target": "both" }))
+                .unwrap(),
+            ["rule-a", "rule-b"]
+        );
+        let err = names(json!({ "where": "[\"$contains\"" })).unwrap_err();
+        assert!(err.starts_with("invalid where JSON"), "{err}");
+        let err = names(json!({ "where": ["$search", "rule"] })).unwrap_err();
+        assert!(err.contains("not a filter"), "{err}");
+        let err =
+            names(json!({ "where": ["$like", "name", "rule-%"], "target": "both" })).unwrap_err();
+        assert!(
+            err.contains("statement entries do not have") && err.contains("the one it fits"),
+            "{err}"
+        );
+        // And the other way round: statement columns do not fit knowledge.
+        let err =
+            names(json!({ "where": ["$eq", "relation", "knows"], "target": "both" })).unwrap_err();
+        assert!(err.contains("knowledge entries do not have"), "{err}");
     }
 }

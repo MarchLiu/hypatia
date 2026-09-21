@@ -7,6 +7,7 @@ use super::{
     transfer::{EmbeddingMetadata, IdentityMismatch, Snapshot, validate_vector},
 };
 use crate::{
+    engine::filter::SqlFilter,
     error::{HypatiaError, Result},
     model::{Content, Knowledge, QueryTarget, SearchOpts, ShelfConfig, Statement, StatementKey},
 };
@@ -170,6 +171,7 @@ impl LocalBackend {
         target: QueryTarget,
         vector: &[f32],
         limit: i64,
+        filter: Option<&SqlFilter>,
     ) -> Result<Vec<(String, String, f64)>> {
         // RAII rollback releases this read-only snapshot on every return path.
         // A writer cannot change the hydrated rows after our clock observation.
@@ -188,8 +190,24 @@ impl LocalBackend {
         let catalog = target.table_name();
         if self.cache_clock.get() == clock {
             if let Some(idx) = self.vectors.borrow().get(catalog) {
-                if let Ok(hits) = idx.search(vector, limit as usize) {
-                    if !hits.is_empty() {
+                // Fixed before ranking, so the walk passes over the entries it excludes.
+                let allowed = filter
+                    .map(|f| self.store.filtered_doc_ids(target, f))
+                    .transpose()?;
+                let hits = match &allowed {
+                    None => idx.search(vector, limit as usize),
+                    Some(ids) => {
+                        idx.filtered_search(vector, limit as usize, |id| ids.contains(&id))
+                    }
+                };
+                if let Ok(hits) = hits {
+                    // A filtered walk can stop short although enough entries qualify;
+                    // then only the exact search below finds them all.
+                    let enough = match &allowed {
+                        None => !hits.is_empty(),
+                        Some(ids) => hits.len() >= ids.len().min(limit as usize),
+                    };
+                    if enough {
                         let ids: Vec<_> = hits.iter().map(|(id, _)| *id).collect();
                         let mut rows: HashMap<_, _> = self
                             .store
@@ -205,9 +223,10 @@ impl LocalBackend {
                 }
             }
         }
-        match target {
-            QueryTarget::Knowledge => self.store.vector_search_knowledge(vector, limit),
-            QueryTarget::Statement => self.store.vector_search_statements(vector, limit),
+        match (filter, target) {
+            (Some(f), _) => self.store.vector_search_where(target, vector, limit, f),
+            (None, QueryTarget::Knowledge) => self.store.vector_search_knowledge(vector, limit),
+            (None, QueryTarget::Statement) => self.store.vector_search_statements(vector, limit),
         }
     }
 }
@@ -305,6 +324,26 @@ impl ShelfBackend {
         vector: &[f32],
         limit: i64,
     ) -> Result<Vec<(String, String, f64)>> {
+        self.vector_search_where(target, vector, limit, None)
+    }
+    /// Prepares `filter` against `target`'s table without running it.
+    pub fn check_filter(&self, target: QueryTarget, filter: &SqlFilter) -> Result<()> {
+        match &self.inner {
+            Backend::Local(l) => l.store.check_filter(target, filter),
+            #[cfg(feature = "postgres-backend")]
+            Backend::Postgres(pg) => pg.check_filter(target, filter),
+        }
+    }
+    /// [`vector_search`](Self::vector_search) among the entries `filter` accepts. The
+    /// filter applies before ranking: `limit` entries come back whenever that many
+    /// qualify, however many nearer ones it excludes.
+    pub fn vector_search_where(
+        &self,
+        target: QueryTarget,
+        vector: &[f32],
+        limit: i64,
+        filter: Option<&SqlFilter>,
+    ) -> Result<Vec<(String, String, f64)>> {
         if let Some(m) = &self.mismatch {
             return Err(m.to_error());
         }
@@ -316,11 +355,12 @@ impl ShelfBackend {
             return Ok(vec![]);
         }
         match &self.inner {
-            Backend::Local(l) => l.search_vector(target, vector, limit),
+            Backend::Local(l) => l.search_vector(target, vector, limit, filter),
             #[cfg(feature = "postgres-backend")]
-            Backend::Postgres(pg) => match target {
-                QueryTarget::Knowledge => pg.vector_search_knowledge(vector, limit),
-                QueryTarget::Statement => pg.vector_search_statements(vector, limit),
+            Backend::Postgres(pg) => match (filter, target) {
+                (Some(f), _) => pg.vector_search_where(target, vector, limit, f),
+                (None, QueryTarget::Knowledge) => pg.vector_search_knowledge(vector, limit),
+                (None, QueryTarget::Statement) => pg.vector_search_statements(vector, limit),
             },
         }
     }
@@ -707,13 +747,13 @@ mod cache_tests {
             .install_embedding("knowledge", "doc", version, &[1., 0.])
             .unwrap();
         first
-            .search_vector(QueryTarget::Knowledge, &[1., 0.], 1)
+            .search_vector(QueryTarget::Knowledge, &[1., 0.], 1, None)
             .unwrap();
         let file = first.cache_file(first.cache_clock.get(), "knowledge");
         let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
         let second = local(dir.path());
         second
-            .search_vector(QueryTarget::Knowledge, &[1., 0.], 1)
+            .search_vector(QueryTarget::Knowledge, &[1., 0.], 1, None)
             .unwrap();
         assert_eq!(
             std::fs::metadata(&file).unwrap().modified().unwrap(),
@@ -729,12 +769,54 @@ mod cache_tests {
             .install_embedding("knowledge", "doc", version, &[0., 1.])
             .unwrap();
         let hits = second
-            .search_vector(QueryTarget::Knowledge, &[1., 0.], 1)
+            .search_vector(QueryTarget::Knowledge, &[1., 0.], 1, None)
             .unwrap();
         assert_eq!(Content::from_json_str(&hits[0].1).unwrap().data, "new");
         assert!(hits[0].2 > 0.99);
         assert_eq!(second.cache_clock.get(), second.clock().unwrap());
         assert!(!file.exists(), "obsolete generations should be collected");
+    }
+    #[test]
+    fn a_filtered_walk_that_comes_back_short_is_ranked_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = local(dir.path());
+        for (name, vector) in [("near", [1., 0.]), ("a", [1., 0.2]), ("b", [1., 0.4])] {
+            let version = l.store.insert_knowledge(name, &Content::new(name)).unwrap();
+            l.store
+                .install_embedding("knowledge", name, version, &vector)
+                .unwrap();
+        }
+        let names = |hits: Vec<(String, String, f64)>| {
+            hits.into_iter()
+                .map(|(name, _, _)| name)
+                .collect::<Vec<_>>()
+        };
+        let not_near = SqlFilter {
+            fragment: "name != ?".into(),
+            params: vec![Value::from("near")],
+        };
+        let search = || {
+            names(
+                l.search_vector(QueryTarget::Knowledge, &[1., 0.], 2, Some(&not_near))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(search(), ["a", "b"]);
+        // An index missing `b` walks up one hit short of the two that qualify.
+        let doc = |name| l.store.doc_id_by_key("knowledge", name).unwrap().unwrap();
+        let partial = VectorFileIndex::build(
+            &dir.path().join("partial.usearch"),
+            2,
+            &[(doc("near"), vec![1., 0.]), (doc("a"), vec![1., 0.2])],
+        )
+        .unwrap();
+        l.vectors.borrow_mut().insert("knowledge".into(), partial);
+        assert_eq!(search(), ["a", "b"]);
+        assert_eq!(
+            l.cache_clock.get(),
+            l.clock().unwrap(),
+            "the index was current, so the walk ran and was found short"
+        );
     }
     #[test]
     fn unwritable_cache_and_corrupt_manifest_do_not_disable_search() {
@@ -749,7 +831,7 @@ mod cache_tests {
             .unwrap();
         std::fs::write(&l.path, b"file blocks cache directory").unwrap();
         assert_eq!(
-            l.search_vector(QueryTarget::Knowledge, &[1., 0.], 1)
+            l.search_vector(QueryTarget::Knowledge, &[1., 0.], 1, None)
                 .unwrap()
                 .len(),
             1
@@ -759,7 +841,7 @@ mod cache_tests {
         std::fs::write(l.path.join("cache.json"), b"not json").unwrap();
         l.cache_clock.set(-1);
         assert_eq!(
-            l.search_vector(QueryTarget::Knowledge, &[1., 0.], 1)
+            l.search_vector(QueryTarget::Knowledge, &[1., 0.], 1, None)
                 .unwrap()
                 .len(),
             1
@@ -773,7 +855,7 @@ mod cache_tests {
         l.store
             .install_embedding("knowledge", "doc", version, &[1., 0.])
             .unwrap();
-        l.search_vector(QueryTarget::Knowledge, &[1., 0.], 1)
+        l.search_vector(QueryTarget::Knowledge, &[1., 0.], 1, None)
             .unwrap();
         let db = dir.path().join("db.sqlite");
         let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -796,7 +878,7 @@ mod cache_tests {
         ready.wait();
         for _ in 0..80 {
             for (_, content, distance) in l
-                .search_vector(QueryTarget::Knowledge, &[1., 0.], 1)
+                .search_vector(QueryTarget::Knowledge, &[1., 0.], 1, None)
                 .unwrap()
             {
                 let data = Content::from_json_str(&content).unwrap().data;

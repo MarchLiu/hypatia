@@ -255,7 +255,7 @@ See [docs/pgvector-backend.md](docs/pgvector-backend.md) for details on migratio
 | `hypatia statement-create <subj> <pred> <obj> [-d <data>] [--synonyms <json>]` | Create a triple; exits 0 without changes if it already exists |
 | `hypatia statement-delete <subj> <pred> <obj>` | Delete a triple |
 | `hypatia search <query> [-c <catalog>] [--limit N]` | Full-text search |
-| `hypatia similar <query> [--limit N]` | Vector similarity search |
+| `hypatia similar <query> [--limit N] [--tags <csv>] [--exclude-tags <csv>] [--where <jse>]` | Vector similarity search; the filters narrow the entries before they are ranked |
 | `hypatia backfill [--reembed] [-s <shelf>]` | Generate embeddings for entries missing vectors (or regenerate all) |
 | `hypatia backfill --status [-s <shelf>]` | Report pending entries and why embedding may be stuck, as JSON |
 | `hypatia model install <org/name> [-s <shelf>] [--revision <rev>]` | Download an ONNX embedding model from Hugging Face and use it on a shelf |

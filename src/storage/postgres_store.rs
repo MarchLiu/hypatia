@@ -970,6 +970,108 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
         // Bare distance ORDER BY plus LIMIT permits the HNSW access path.
         Ok(self.client.borrow_mut().query(&format!("SELECT {pk},content::text,embedding OPERATOR({ext}.<=>) $1 AS distance FROM {table} WHERE embedding IS NOT NULL ORDER BY embedding OPERATOR({ext}.<=>) $1 LIMIT $2",table=self.table(table),ext=self.extension),&[&vector,&limit]).map_err(pg_error)?.iter().map(|r|(r.get(0),r.get(1),r.get(2))).collect())
     }
+    /// Search among the `target` entries that satisfy `filter`. An HNSW scan applies the
+    /// filter to the candidates it collects: pgvector 0.8 keeps collecting until `limit`
+    /// pass, older versions stop at `hnsw.ef_search`. Whatever still comes back short is
+    /// ranked exactly instead.
+    pub fn vector_search_where(
+        &self,
+        target: crate::model::QueryTarget,
+        vector: &[f32],
+        limit: i64,
+        filter: &crate::engine::filter::SqlFilter,
+    ) -> Result<Vec<(String, String, f64)>> {
+        let (table, pk) = catalog_info(target.table_name())?;
+        validate_vector(vector, self.dimensions)?;
+        if limit < 0 {
+            return Err(invalid("vector search limit must be nonnegative"));
+        }
+        // The filter binds $1…$n; the query vector and the limit follow it.
+        let (v, l) = (filter.params.len() + 1, filter.params.len() + 2);
+        let ext = &self.extension;
+        let rows = format!(
+            "SELECT {pk},content::text,embedding OPERATOR({ext}.<=>) ${v} AS distance FROM {} AS q WHERE embedding IS NOT NULL AND ({})",
+            self.table(table),
+            filter.fragment
+        );
+        let mut client = self.client.borrow_mut();
+        // SET LOCAL lasts until the transaction ends, which dropping it does.
+        let mut tx = client.transaction().map_err(pg_error)?;
+        if self.hnsw {
+            let version: String = tx
+                .query_one(
+                    "SELECT extversion FROM pg_catalog.pg_extension WHERE extname='vector'",
+                    &[],
+                )
+                .map_err(pg_error)?
+                .get(0);
+            let mut settings = format!("SET LOCAL hnsw.ef_search = {}", limit.clamp(40, 1000));
+            if Self::iterative_scans(&version) {
+                settings.push_str("; SET LOCAL hnsw.iterative_scan = strict_order");
+            }
+            tx.batch_execute(&settings).map_err(pg_error)?;
+        }
+        let mut query = |sql: &str| -> Result<Vec<(String, String, f64)>> {
+            let stmt = tx.prepare(sql).map_err(pg_error)?;
+            if stmt.params().len() != l {
+                return Err(invalid("query parameter count mismatch"));
+            }
+            let mut params: Vec<Box<dyn ToSql + Sync>> = filter
+                .params
+                .iter()
+                .zip(stmt.params())
+                .map(|(value, ty)| parameter(value, ty))
+                .collect::<Result<_>>()?;
+            params.push(Box::new(Vector::from(vector.to_vec())));
+            params.push(Box::new(limit));
+            let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
+            Ok(tx
+                .query(&stmt, &refs)
+                .map_err(pg_error)?
+                .iter()
+                .map(|r| (r.get(0), r.get(1), r.get(2)))
+                .collect())
+        };
+        let hits = query(&format!(
+            "{rows} ORDER BY embedding OPERATOR({ext}.<=>) ${v} LIMIT ${l}"
+        ))?;
+        if !self.hnsw || hits.len() as i64 >= limit {
+            return Ok(hits);
+        }
+        // A materialized CTE has no distance order for the index to serve.
+        query(&format!(
+            "WITH hits AS MATERIALIZED ({rows}) SELECT * FROM hits ORDER BY distance LIMIT ${l}"
+        ))
+    }
+    /// Whether pgvector `version` has iterative index scans, added in 0.8.0.
+    fn iterative_scans(version: &str) -> bool {
+        let mut parts = version.split('.').map(str::parse::<u32>);
+        matches!((parts.next(), parts.next()), (Some(Ok(major)), Some(Ok(minor))) if (major, minor) >= (0, 8))
+    }
+    /// Prepares `filter` against `target`'s table, so a field the table lacks fails
+    /// before anything is embedded.
+    pub fn check_filter(
+        &self,
+        target: crate::model::QueryTarget,
+        filter: &crate::engine::filter::SqlFilter,
+    ) -> Result<()> {
+        let (table, _) = catalog_info(target.table_name())?;
+        let sql = format!(
+            "SELECT 1 FROM {} AS q WHERE ({})",
+            self.table(table),
+            filter.fragment
+        );
+        match self.client.borrow_mut().prepare(&sql) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(match e.as_db_error() {
+                // The message names only the column the filter spelled.
+                Some(db) if *db.code() == postgres::error::SqlState::UNDEFINED_COLUMN => {
+                    crate::engine::filter::unknown_field(table, db.message())
+                }
+                _ => pg_error(e),
+            }),
+        }
+    }
     pub fn vector_search_knowledge(
         &self,
         vector: &[f32],

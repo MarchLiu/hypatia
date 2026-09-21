@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::engine::filter::similar_filter;
 use crate::lab::{Lab, uses_similar};
 use crate::model::{Content, QueryResult, SearchOpts, StatementKey, Synonyms};
 use crate::service::KnowledgePatch;
@@ -146,6 +147,16 @@ enum Commands {
         /// Maximum number of results
         #[arg(long, default_value_t = 100)]
         limit: i64,
+        /// Only entries carrying at least one of these tags (comma-separated)
+        #[arg(long, default_value = "")]
+        tags: String,
+        /// Leave out entries carrying any of these tags (comma-separated), e.g. message,summary,session
+        #[arg(long, default_value = "")]
+        exclude_tags: String,
+        /// Only entries satisfying this JSE condition, e.g. '["$contains", "scopes", "project-a"]'.
+        /// It applies to each target searched: a condition on `name` needs `-t knowledge`
+        #[arg(long = "where", value_name = "JSE")]
+        condition: Option<String>,
         /// Shelf to search
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -490,9 +501,20 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<()> {
             query,
             target,
             limit,
+            tags,
+            exclude_tags,
+            condition,
             shelf,
         } => {
-            let result = lab.similar(&shelf, &query, &target, limit)?;
+            let condition = condition
+                .map(|jse| {
+                    serde_json::from_str(&jse).map_err(|e| {
+                        crate::error::HypatiaError::Parse(format!("invalid --where JSON: {e}"))
+                    })
+                })
+                .transpose()?;
+            let filter = similar_filter(&parse_list(&tags), &parse_list(&exclude_tags), condition);
+            let result = lab.similar_where(&shelf, &query, &target, limit, filter.as_ref())?;
             print_result(&result);
             warn_if_incomplete(lab, &shelf, &target);
         }
@@ -805,6 +827,47 @@ mod tests {
                 .unwrap();
         let cmd = cli.command.unwrap();
         assert_eq!(cmd.shelf(), Some("work"));
+    }
+
+    #[test]
+    fn similar_takes_tag_and_jse_filters() {
+        let cli = Cli::try_parse_from([
+            "hypatia",
+            "similar",
+            "q",
+            "--tags",
+            "rule",
+            "--exclude-tags",
+            "message, summary,",
+            "--where",
+            r#"["$contains", "scopes", "p"]"#,
+        ])
+        .unwrap();
+        let Some(Commands::Similar {
+            tags,
+            exclude_tags,
+            condition,
+            ..
+        }) = cli.command
+        else {
+            panic!("not similar");
+        };
+        assert_eq!(parse_list(&tags), ["rule"]);
+        assert_eq!(parse_list(&exclude_tags), ["message", "summary"]);
+        assert_eq!(
+            condition.as_deref(),
+            Some(r#"["$contains", "scopes", "p"]"#)
+        );
+
+        let home = tempfile::tempdir().unwrap();
+        let mut lab =
+            Lab::from_manager(crate::storage::ShelfManager::with_home(home.path().into()).unwrap());
+        let cmd = Cli::try_parse_from(["hypatia", "similar", "q", "--where", r#"["$contains""#])
+            .unwrap()
+            .command
+            .unwrap();
+        let err = execute_command(&mut lab, cmd).unwrap_err().to_string();
+        assert!(err.contains("invalid --where JSON"), "{err}");
     }
 
     /// Check every subcommand for duplicate short flags.
