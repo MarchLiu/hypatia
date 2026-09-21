@@ -181,6 +181,13 @@ impl OpenShelf {
     /// debt, and pays a batch of it once enough has built up; with `embedding.defer = false`
     /// it embeds right away. Never fails the write: vectors are a rebuildable cache.
     pub fn embed_saved(&mut self, catalog: &str, key: &str, content: &Content, version: i64) {
+        // Nothing is owed for content the shelf keeps out of the vector index, so the write
+        // pays no forward pass and no debt is recorded. An earlier vector, from before the
+        // entry or the shelf opted out, was dropped by the write that changed the content;
+        // `backfill` drops the ones a changed `skip_tags` leaves behind.
+        if self.settings.embedding.skips(content) {
+            return;
+        }
         // Skip before embedding: the vector would be refused, and embedding may load a model.
         if let Some(m) = self.backend.identity_mismatch() {
             eprintln!(
@@ -1023,6 +1030,16 @@ impl ShelfManager {
             .sort_by_key(|r| r.statement.key.to_csv_key());
         if restored.knowledge != expected.knowledge || restored.statements != expected.statements {
             return Err(HypatiaError::Validation("data imported but verification differed; preserve source and inspect target before switching".into()));
+        }
+        // Verified against the snapshot first: the import is faithful, and only then does
+        // the target's own rule apply. A source that embedded a layer this shelf skips
+        // would otherwise leave vectors here that no write could have made.
+        let cleared = shelf.backend.clear_skipped_embeddings()?;
+        if cleared > 0 {
+            shelf.backend.rebuild_indexes()?;
+            eprintln!(
+                "note: {cleared} imported vectors dropped: shelf '{name}' does not embed those entries"
+            );
         }
         Ok(())
     }

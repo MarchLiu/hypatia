@@ -39,6 +39,8 @@ pub struct PgStore {
     hnsw: bool,
     identity_trusted: bool,
     stored_mismatch: Option<Box<EmbeddingMetadata>>,
+    /// Tags the shelf keeps out of the vector index; see `EmbeddingConfig::skip_tags`.
+    skip_tags: Vec<String>,
 }
 /// How an opener's configured identity relates to the stored one.
 enum Binding {
@@ -179,6 +181,7 @@ impl PgStore {
             hnsw: vector.index == "hnsw",
             identity_trusted: embedding.model_identity_trusted,
             stored_mismatch: None,
+            skip_tags: embedding.skip_tags.clone(),
         };
         match store.init_schema()? {
             Binding::Current => {}
@@ -196,6 +199,10 @@ impl PgStore {
     }
     pub fn schema(&self) -> &str {
         &self.schema
+    }
+    /// Whether the shelf gives this content a vector, as the `embeddable` column records it.
+    fn embeddable_value(&self, content: &Content) -> bool {
+        content.embeds_under(&self.skip_tags)
     }
     /// Identity of the vectors on disk when it differs from the configured one. The store
     /// still opens; callers must refuse vector reads and writes until `reset_embeddings`.
@@ -308,6 +315,25 @@ impl PgStore {
                 Binding::Current => configured.dimensions,
                 Binding::Adopted(stored) | Binding::Mismatch(stored) => stored.dimensions,
             };
+            // Added in place, as the pending indexes it belongs to are: a shelf created
+            // before `embeddable` says every row is embeddable, which is what a shelf that
+            // configures no `skip_tags` means. `backfill` settles the rest.
+            for table in ["knowledge", "statement"] {
+                tx.batch_execute(&format!(
+                    "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS embeddable boolean NOT NULL DEFAULT true;
+                     DROP INDEX IF EXISTS {missing};
+                     DROP INDEX IF EXISTS {version};
+                     CREATE INDEX IF NOT EXISTS {key_idx} ON {t}({pk}) WHERE embedding IS NULL AND embeddable;
+                     CREATE INDEX IF NOT EXISTS {clock_idx} ON {t}(content_version) WHERE embedding IS NULL AND embeddable;",
+                    t = self.table(table),
+                    pk = ident(catalog_info(table)?.1),
+                    missing = self.table(&format!("{table}_missing_embedding_idx")),
+                    version = self.table(&format!("{table}_pending_version_idx")),
+                    key_idx = ident(&format!("{table}_pending_key_idx")),
+                    clock_idx = ident(&format!("{table}_pending_clock_idx")),
+                ))
+                .map_err(pg_error)?;
+            }
             self.validate_schema_structure(&mut tx, index, dimensions)?;
             tx.commit().map_err(pg_error)?;
             return Ok(binding);
@@ -316,17 +342,17 @@ impl PgStore {
 CREATE SEQUENCE {versions} AS bigint NO CYCLE;
 CREATE TABLE {docs}(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,catalog text NOT NULL CHECK(catalog IN ('knowledge','statement')),key text NOT NULL,search_vector tsvector NOT NULL,UNIQUE(catalog,key));
 CREATE INDEX docs_search_idx ON {docs} USING gin(search_vector);
-CREATE TABLE {knowledge}(name text PRIMARY KEY,content jsonb NOT NULL,payload jsonb,tokens jsonb NOT NULL,created_at timestamp NOT NULL DEFAULT(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),content_version bigint NOT NULL DEFAULT nextval('{versions}'::regclass),embedding {ext}.vector({dims}));
-CREATE TABLE {statement}(triple text PRIMARY KEY,head text NOT NULL,relation text NOT NULL,tail text NOT NULL,content jsonb NOT NULL,payload jsonb,tokens jsonb NOT NULL,created_at timestamp NOT NULL DEFAULT(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),tr_start timestamp,tr_end timestamp,content_version bigint NOT NULL DEFAULT nextval('{versions}'::regclass),embedding {ext}.vector({dims}));
+CREATE TABLE {knowledge}(name text PRIMARY KEY,content jsonb NOT NULL,payload jsonb,tokens jsonb NOT NULL,created_at timestamp NOT NULL DEFAULT(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),content_version bigint NOT NULL DEFAULT nextval('{versions}'::regclass),embedding {ext}.vector({dims}),embeddable boolean NOT NULL DEFAULT true);
+CREATE TABLE {statement}(triple text PRIMARY KEY,head text NOT NULL,relation text NOT NULL,tail text NOT NULL,content jsonb NOT NULL,payload jsonb,tokens jsonb NOT NULL,created_at timestamp NOT NULL DEFAULT(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),tr_start timestamp,tr_end timestamp,content_version bigint NOT NULL DEFAULT nextval('{versions}'::regclass),embedding {ext}.vector({dims}),embeddable boolean NOT NULL DEFAULT true);
 CREATE INDEX knowledge_payload_idx ON {knowledge} USING gin(payload jsonb_path_ops);
 CREATE INDEX statement_payload_idx ON {statement} USING gin(payload jsonb_path_ops);
 CREATE INDEX statement_head_idx ON {statement}(head);
 CREATE INDEX statement_relation_idx ON {statement}(relation);
 CREATE INDEX statement_tail_idx ON {statement}(tail);
-CREATE INDEX knowledge_missing_embedding_idx ON {knowledge}(name) WHERE embedding IS NULL;
-CREATE INDEX statement_missing_embedding_idx ON {statement}(triple) WHERE embedding IS NULL;
-CREATE INDEX knowledge_pending_version_idx ON {knowledge}(content_version) WHERE embedding IS NULL;
-CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE embedding IS NULL;
+CREATE INDEX knowledge_pending_key_idx ON {knowledge}(name) WHERE embedding IS NULL AND embeddable;
+CREATE INDEX statement_pending_key_idx ON {statement}(triple) WHERE embedding IS NULL AND embeddable;
+CREATE INDEX knowledge_pending_clock_idx ON {knowledge}(content_version) WHERE embedding IS NULL AND embeddable;
+CREATE INDEX statement_pending_clock_idx ON {statement}(content_version) WHERE embedding IS NULL AND embeddable;
 "#,versions=self.table("content_versions"),docs=self.table("docs"),knowledge=self.table("knowledge"),statement=self.table("statement"),ext=self.extension,dims=self.dimensions)).map_err(pg_error)?;
         tx.batch_execute(&crate::engine::postgres::schema_functions(&self.schema))
             .map_err(pg_error)?;
@@ -433,6 +459,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
                 ("payload", "jsonb", false),
                 ("tokens", "jsonb", true),
                 ("content_version", "int8", true),
+                ("embeddable", "bool", true),
                 ("embedding", "vector", false),
             ] {
                 let valid = rows.iter().any(|r| {
@@ -497,7 +524,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
         let (raw, payload, tokens) = content_values(content)?;
         let mut client = self.client.borrow_mut();
         let mut tx = client.transaction().map_err(pg_error)?;
-        let token=tx.query_one(&format!("INSERT INTO {}(name,content,payload,tokens) VALUES($1,$2,$3,$4) RETURNING content_version",self.table("knowledge")),&[&name,&raw,&payload,&tokens]).map_err(pg_error)?.get(0);
+        let token=tx.query_one(&format!("INSERT INTO {}(name,content,payload,tokens,embeddable) VALUES($1,$2,$3,$4,$5) RETURNING content_version",self.table("knowledge")),&[&name,&raw,&payload,&tokens,&self.embeddable_value(content)]).map_err(pg_error)?.get(0);
         self.upsert_doc(&mut tx, "knowledge", name, content)?;
         tx.commit().map_err(pg_error)?;
         Ok(token)
@@ -506,7 +533,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
         let (raw, payload, tokens) = content_values(content)?;
         let mut client = self.client.borrow_mut();
         let mut tx = client.transaction().map_err(pg_error)?;
-        let token=tx.query_opt(&format!("UPDATE {} SET content=$2,payload=$3,tokens=$4,embedding=NULL,content_version=nextval('{}'::regclass) WHERE name=$1 RETURNING content_version",self.table("knowledge"),self.table("content_versions")),&[&name,&raw,&payload,&tokens]).map_err(pg_error)?.ok_or_else(||HypatiaError::NotFound{kind:"knowledge".into(),key:name.into()})?.get(0);
+        let token=tx.query_opt(&format!("UPDATE {} SET content=$2,payload=$3,tokens=$4,embedding=NULL,embeddable=$5,content_version=nextval('{}'::regclass) WHERE name=$1 RETURNING content_version",self.table("knowledge"),self.table("content_versions")),&[&name,&raw,&payload,&tokens,&self.embeddable_value(content)]).map_err(pg_error)?.ok_or_else(||HypatiaError::NotFound{kind:"knowledge".into(),key:name.into()})?.get(0);
         self.upsert_doc(&mut tx, "knowledge", name, content)?;
         tx.commit().map_err(pg_error)?;
         Ok(token)
@@ -541,7 +568,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
         let triple = key.to_csv_key();
         let mut client = self.client.borrow_mut();
         let mut tx = client.transaction().map_err(pg_error)?;
-        let Some(row)=tx.query_opt(&format!("INSERT INTO {}(triple,head,relation,tail,content,payload,tr_start,tr_end,tokens) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(triple) DO NOTHING RETURNING content_version",self.table("statement")),&[&triple,&key.head,&key.relation,&key.tail,&raw,&payload,&tr_start,&tr_end,&tokens]).map_err(pg_error)? else {
+        let Some(row)=tx.query_opt(&format!("INSERT INTO {}(triple,head,relation,tail,content,payload,tr_start,tr_end,tokens,embeddable) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(triple) DO NOTHING RETURNING content_version",self.table("statement")),&[&triple,&key.head,&key.relation,&key.tail,&raw,&payload,&tr_start,&tr_end,&tokens,&self.embeddable_value(content)]).map_err(pg_error)? else {
             return Ok(None);
         };
         let token: i64 = row.get(0);
@@ -563,7 +590,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
         let triple = key.to_csv_key();
         let mut client = self.client.borrow_mut();
         let mut tx = client.transaction().map_err(pg_error)?;
-        let token=tx.query_opt(&format!("UPDATE {} SET content=$2,payload=$3,tr_start=$4,tr_end=$5,tokens=$6,embedding=NULL,content_version=nextval('{}'::regclass) WHERE triple=$1 RETURNING content_version",self.table("statement"),self.table("content_versions")),&[&triple,&raw,&payload,&tr_start,&tr_end,&tokens]).map_err(pg_error)?.ok_or_else(||HypatiaError::NotFound{kind:"statement".into(),key:triple.clone()})?.get(0);
+        let token=tx.query_opt(&format!("UPDATE {} SET content=$2,payload=$3,tr_start=$4,tr_end=$5,tokens=$6,embedding=NULL,embeddable=$7,content_version=nextval('{}'::regclass) WHERE triple=$1 RETURNING content_version",self.table("statement"),self.table("content_versions")),&[&triple,&raw,&payload,&tr_start,&tr_end,&tokens,&self.embeddable_value(content)]).map_err(pg_error)?.ok_or_else(||HypatiaError::NotFound{kind:"statement".into(),key:triple.clone()})?.get(0);
         self.upsert_doc(&mut tx, "statement", &triple, content)?;
         tx.commit().map_err(pg_error)?;
         Ok(token)
@@ -691,7 +718,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
                 // Conditional on the stored identity: after a concurrent rebind by another
                 // process this is a no-op and the row stays pending.
                 &format!(
-                    "UPDATE {} SET embedding=$3 WHERE {pk}=$1 AND content_version=$2 AND EXISTS(SELECT 1 FROM {meta} WHERE k='embedding_model' AND v=$4) AND EXISTS(SELECT 1 FROM {meta} WHERE k='embedding_dimensions' AND v=$5)",
+                    "UPDATE {} SET embedding=$3 WHERE {pk}=$1 AND content_version=$2 AND embeddable AND EXISTS(SELECT 1 FROM {meta} WHERE k='embedding_model' AND v=$4) AND EXISTS(SELECT 1 FROM {meta} WHERE k='embedding_dimensions' AND v=$5)",
                     self.table(table),
                     meta = self.table("meta")
                 ),
@@ -777,7 +804,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             .borrow_mut()
             .query_one(
                 &format!(
-                    "SELECT count(*) FROM {} WHERE embedding IS NULL",
+                    "SELECT count(*) FROM {} WHERE embedding IS NULL AND embeddable",
                     self.table(table)
                 ),
                 &[],
@@ -794,7 +821,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             .borrow_mut()
             .query_one(
                 &format!(
-                    "SELECT EXISTS(SELECT 1 FROM {} WHERE {}=$1 AND content_version=$2 AND embedding IS NULL)",
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE {}=$1 AND content_version=$2 AND embedding IS NULL AND embeddable)",
                     self.table(table),
                     ident(key_column)
                 ),
@@ -812,8 +839,8 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             .borrow_mut()
             .query_one(
                 &format!(
-                    "SELECT (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL LIMIT $1) k)
-                          + (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL LIMIT $1) s)",
+                    "SELECT (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL AND embeddable LIMIT $1) k)
+                          + (SELECT count(*) FROM (SELECT 1 FROM {} WHERE embedding IS NULL AND embeddable LIMIT $1) s)",
                     self.table(knowledge),
                     self.table(statement)
                 ),
@@ -833,7 +860,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             .borrow_mut()
             .query(
                 &format!(
-                    "SELECT 'knowledge'::text,name,content,content_version FROM {} WHERE embedding IS NULL UNION ALL SELECT 'statement'::text,triple,content,content_version FROM {} WHERE embedding IS NULL ORDER BY 4 DESC LIMIT $1",
+                    "SELECT 'knowledge'::text,name,content,content_version FROM {} WHERE embedding IS NULL AND embeddable UNION ALL SELECT 'statement'::text,triple,content,content_version FROM {} WHERE embedding IS NULL AND embeddable ORDER BY 4 DESC LIMIT $1",
                     self.table("knowledge"),
                     self.table("statement")
                 ),
@@ -964,7 +991,43 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
         if limit < 0 {
             return Err(invalid("embedding page limit must be nonnegative"));
         }
-        self.client.borrow_mut().query(&format!("SELECT {pk},content,content_version FROM {} WHERE embedding IS NULL AND ($1::text IS NULL OR {pk}>$1) ORDER BY {pk} LIMIT $2",self.table(table)),&[&after_key,&limit]).map_err(pg_error)?.iter().map(|r|Ok((r.get(0),serde_json::from_value(r.get(1))?,r.get(2)))).collect()
+        self.client.borrow_mut().query(&format!("SELECT {pk},content,content_version FROM {} WHERE embedding IS NULL AND embeddable AND ($1::text IS NULL OR {pk}>$1) ORDER BY {pk} LIMIT $2",self.table(table)),&[&after_key,&limit]).map_err(pg_error)?.iter().map(|r|Ok((r.get(0),serde_json::from_value(r.get(1))?,r.get(2)))).collect()
+    }
+    /// Brings the stored `embeddable` answers back in line with the shelf's current
+    /// `skip_tags`, then drops the vectors of entries it now says the shelf does not embed,
+    /// and reports how many. Run when `skip_tags` changes: rows written under the old rule
+    /// carry its answer, and a vector nothing would rebuild is still a semantic search hit.
+    /// `install_embedding` tests the same column, so a writer that read a row before the
+    /// recompute cannot put its vector back.
+    pub fn clear_skipped_embeddings(&self) -> Result<usize> {
+        let skipped = &self.skip_tags;
+        let mut client = self.client.borrow_mut();
+        let mut tx = client.transaction().map_err(pg_error)?;
+        let mut cleared = 0;
+        for table in ["knowledge", "statement"] {
+            // COALESCE, because `jsonb_exists_any` is strict: content with no `tags` key
+            // would otherwise decide to NULL, which is neither embeddable nor clearable.
+            let decided = "(content->'embed' IS DISTINCT FROM 'false'::jsonb AND NOT jsonb_exists_any(COALESCE(content->'tags','[]'::jsonb),$1::text[]))";
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET embeddable={decided} WHERE embeddable IS DISTINCT FROM {decided}",
+                    self.table(table)
+                ),
+                &[skipped],
+            )
+            .map_err(pg_error)?;
+            cleared += tx
+                .execute(
+                    &format!(
+                        "UPDATE {} SET embedding=NULL WHERE embedding IS NOT NULL AND NOT embeddable",
+                        self.table(table)
+                    ),
+                    &[],
+                )
+                .map_err(pg_error)?;
+        }
+        tx.commit().map_err(pg_error)?;
+        Ok(cleared as usize)
     }
     fn entries(&self, catalog: &str, present: bool) -> Result<Vec<(String, String)>> {
         let (table, pk) = catalog_info(catalog)?;
@@ -1327,7 +1390,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             let k = &record.knowledge;
             let (raw, payload, tokens) = content_values(&k.content)?;
             let embedding = record.embedding.clone().map(Vector::from);
-            tx.execute(&format!("INSERT INTO {}(name,content,payload,created_at,embedding,tokens) VALUES($1,$2,$3,$4,$5,$6)",self.table("knowledge")),&[&k.name,&raw,&payload,&k.created_at,&embedding,&tokens]).map_err(pg_error)?;
+            tx.execute(&format!("INSERT INTO {}(name,content,payload,created_at,embedding,tokens,embeddable) VALUES($1,$2,$3,$4,$5,$6,$7)",self.table("knowledge")),&[&k.name,&raw,&payload,&k.created_at,&embedding,&tokens,&self.embeddable_value(&k.content)]).map_err(pg_error)?;
             self.upsert_doc(&mut tx, "knowledge", &k.name, &k.content)?;
         }
         for record in &snapshot.statements {
@@ -1335,7 +1398,7 @@ CREATE INDEX statement_pending_version_idx ON {statement}(content_version) WHERE
             let triple = s.key.to_csv_key();
             let (raw, payload, tokens) = content_values(&s.content)?;
             let embedding = record.embedding.clone().map(Vector::from);
-            tx.execute(&format!("INSERT INTO {}(triple,head,relation,tail,content,payload,created_at,tr_start,tr_end,embedding,tokens) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",self.table("statement")),&[&triple,&s.key.head,&s.key.relation,&s.key.tail,&raw,&payload,&s.created_at,&s.tr_start,&s.tr_end,&embedding,&tokens]).map_err(pg_error)?;
+            tx.execute(&format!("INSERT INTO {}(triple,head,relation,tail,content,payload,created_at,tr_start,tr_end,embedding,tokens,embeddable) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",self.table("statement")),&[&triple,&s.key.head,&s.key.relation,&s.key.tail,&raw,&payload,&s.created_at,&s.tr_start,&s.tr_end,&embedding,&tokens,&self.embeddable_value(&s.content)]).map_err(pg_error)?;
             self.upsert_doc(&mut tx, "statement", &triple, &s.content)?;
         }
         tx.commit().map_err(pg_error)

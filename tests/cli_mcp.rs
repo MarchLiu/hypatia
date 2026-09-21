@@ -246,6 +246,23 @@ fn a_host_can_drive_the_data_plane_over_stdio() {
             json!({ "uri": "hypatia://no-such-shelf/status" }),
         ),
         call(43, "backfill", json!({ "limit": 0 })),
+        call(
+            44,
+            "knowledge_create",
+            json!({ "name": "msg-1", "data": "a turn", "embed": false }),
+        ),
+        call(45, "knowledge_get", json!({ "name": "msg-1" })),
+        call(
+            46,
+            "knowledge_update",
+            json!({ "name": "msg-1", "embed": true }),
+        ),
+        call(47, "knowledge_get", json!({ "name": "msg-1" })),
+        call(
+            48,
+            "statement_create",
+            json!({ "head": "msg-1", "relation": "in", "tail": "session-1", "embed": false }),
+        ),
         "{ not json".to_string(),
         json!([{ "jsonrpc": "2.0", "id": 99, "method": "ping" }]).to_string(),
     ];
@@ -368,6 +385,24 @@ fn a_host_can_drive_the_data_plane_over_stdio() {
     assert_eq!(rpc_error(&replies, 41), -32602);
     assert_eq!(rpc_error(&replies, 42), -32002);
     assert!(tool_error(&replies, 43).contains("between 1 and"));
+
+    // An entry can decline the vector index on the way in, and ask for it back later.
+    assert_eq!(ok(&replies, 44)["created"], true);
+    assert_eq!(ok(&replies, 45)["content"]["embed"], json!(false));
+    assert_eq!(ok(&replies, 46)["changed"], true);
+    assert_eq!(ok(&replies, 47)["content"].get("embed"), None);
+    assert_eq!(ok(&replies, 48)["created"], true);
+    let embed_fields: Vec<&str> = replies[&2]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["inputSchema"]["properties"].get("embed").is_some())
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        embed_fields,
+        ["knowledge_create", "knowledge_update", "statement_create"]
+    );
 
     // The notification got no reply; the parse error and the batch got id-less errors.
     assert!(!replies.contains_key(&99));

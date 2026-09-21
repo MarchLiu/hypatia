@@ -31,8 +31,7 @@ CREATE TABLE IF NOT EXISTS knowledge(
     content    TEXT NOT NULL,
     embedding  BLOB,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
-);
-CREATE INDEX IF NOT EXISTS knowledge_missing_embedding_idx ON knowledge(name) WHERE embedding IS NULL";
+)";
 
 const STATEMENT_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS statement(
@@ -49,7 +48,6 @@ CREATE TABLE IF NOT EXISTS statement(
 CREATE INDEX IF NOT EXISTS idx_stmt_head     ON statement(head);
 CREATE INDEX IF NOT EXISTS idx_stmt_relation ON statement(relation);
 CREATE INDEX IF NOT EXISTS idx_stmt_tail     ON statement(tail);
-CREATE INDEX IF NOT EXISTS statement_missing_embedding_idx ON statement(triple) WHERE embedding IS NULL;
 ";
 
 const DOCS_SCHEMA: &str = "\
@@ -117,6 +115,8 @@ pub struct FtsDoc {
 
 pub struct SqliteStore {
     conn: Connection,
+    /// Tags the shelf keeps out of the vector index; see `EmbeddingConfig::skip_tags`.
+    skip_tags: Vec<String>,
 }
 
 // ── vector/blob helpers ──────────────────────────────────────────────
@@ -247,7 +247,10 @@ fn catalog_table(catalog: &str) -> Result<(&'static str, &'static str)> {
 impl SqliteStore {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).map_err(StorageError::from)?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            skip_tags: Vec::new(),
+        };
         store.init_schema()?;
         store.register_udfs()?;
         store.ensure_json_index_populated()?;
@@ -295,6 +298,32 @@ impl SqliteStore {
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
+
+    /// The shelf's configured `embedding.skip_tags`, which decides the `embeddable` column
+    /// as rows are written. Read once when the shelf opens, as the rest of its configuration
+    /// is; `ShelfBackend::open` sets it. A store opened without it — the migration tool, a
+    /// snapshot reader — records every row as embeddable, and `backfill` settles that.
+    pub(crate) fn set_skip_tags(&mut self, tags: &[String]) {
+        self.skip_tags = tags.to_vec();
+    }
+
+    /// Whether the shelf gives this content a vector, as the `embeddable` column records it.
+    fn embeddable_value(&self, content: &Content) -> bool {
+        content.embeds_under(&self.skip_tags)
+    }
+
+    /// Recomputes `embeddable` from content and the shelf's current `skip_tags`, for the
+    /// rows where the answer has changed. `?1` carries the skipped tags as a JSON array.
+    /// Content that is not valid JSON keeps its vector: `backfill` reports it as the broken
+    /// row it is instead of every command failing on it.
+    const RECOMPUTE_EMBEDDABLE: &'static str = "\
+        WITH decided AS (SELECT {pk} AS k, CASE WHEN NOT json_valid(content) THEN 1 \
+            WHEN json_extract(content,'$.embed') IS 0 THEN 0 \
+            WHEN EXISTS(SELECT 1 FROM json_each(IFNULL(json_extract(content,'$.tags'),'[]')) AS have \
+                WHERE have.value IN (SELECT skip.value FROM json_each(?1) AS skip)) THEN 0 \
+            ELSE 1 END AS v FROM {table}) \
+        UPDATE {table} SET embeddable=(SELECT v FROM decided WHERE k={pk}) \
+        WHERE embeddable<>(SELECT v FROM decided WHERE k={pk})";
 
     fn init_schema(&self) -> Result<()> {
         let has_meta: bool = self.conn.query_row(
@@ -363,8 +392,23 @@ impl SqliteStore {
                     "ALTER TABLE {table} ADD COLUMN content_version INTEGER NOT NULL DEFAULT 0"
                 ))?;
             }
+            // Whether the shelf embeds this row at all, decided when it is written from the
+            // content and the shelf's `skip_tags`. It is in the pending indexes so that a
+            // large skipped layer — a session log, typically most of a working shelf — costs
+            // nothing to pass over: without it every count of the debt would scan the lot.
+            // Rows written before the column default to embeddable, which is what a shelf
+            // that configures nothing means; `backfill` settles the rest.
+            let has_embeddable: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='embeddable')"), [], |r| r.get(0))?;
+            if !has_embeddable {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN embeddable INTEGER NOT NULL DEFAULT 1"
+                ))?;
+            }
             tx.execute_batch(&format!("
-                CREATE INDEX IF NOT EXISTS {table}_pending_version_idx ON {table}(content_version) WHERE embedding IS NULL;
+                DROP INDEX IF EXISTS {table}_missing_embedding_idx;
+                DROP INDEX IF EXISTS {table}_pending_version_idx;
+                CREATE INDEX IF NOT EXISTS {table}_pending_key_idx ON {table}({pk}) WHERE embedding IS NULL AND embeddable=1;
+                CREATE INDEX IF NOT EXISTS {table}_pending_clock_idx ON {table}(content_version) WHERE embedding IS NULL AND embeddable=1;
                 CREATE TRIGGER IF NOT EXISTS {table}_version_insert AFTER INSERT ON {table} BEGIN
                   UPDATE meta SET v=CAST(v AS INTEGER)+1 WHERE k='content_clock';
                   UPDATE {table} SET content_version=(SELECT CAST(v AS INTEGER) FROM meta WHERE k='content_clock') WHERE {pk}=new.{pk};
@@ -453,8 +497,8 @@ impl SqliteStore {
         let json = content.to_json_string();
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO knowledge (name, content) VALUES (?1, ?2)",
-            params![name, json],
+            "INSERT INTO knowledge (name, content, embeddable) VALUES (?1, ?2, ?3)",
+            params![name, json, self.embeddable_value(content)],
         )
         .map_err(StorageError::from)?;
         let doc_id = self.docs_upsert_in(&tx, "knowledge", name, &fts_doc_for(content, name))?;
@@ -485,8 +529,8 @@ impl SqliteStore {
         let tx = self.conn.unchecked_transaction()?;
         let rows = tx
             .execute(
-                "UPDATE knowledge SET content = ?1 WHERE name = ?2",
-                params![json, name],
+                "UPDATE knowledge SET content = ?1, embeddable = ?3 WHERE name = ?2",
+                params![json, name, self.embeddable_value(content)],
             )
             .map_err(StorageError::from)?;
         if rows == 0 {
@@ -579,8 +623,8 @@ impl SqliteStore {
         // leaves the content clock untouched as well.
         let inserted = tx
             .execute(
-                "INSERT INTO statement (triple, head, relation, tail, content, tr_start, tr_end)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO statement (triple, head, relation, tail, content, tr_start, tr_end, embeddable)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(triple) DO NOTHING",
                 params![
                     triple,
@@ -589,7 +633,8 @@ impl SqliteStore {
                     key.tail,
                     json,
                     tr_start_str,
-                    tr_end_str
+                    tr_end_str,
+                    self.embeddable_value(content)
                 ],
             )
             .map_err(StorageError::from)?;
@@ -636,8 +681,14 @@ impl SqliteStore {
         let tx = self.conn.unchecked_transaction()?;
         let rows = tx
             .execute(
-                "UPDATE statement SET content = ?1, tr_start = ?2, tr_end = ?3 WHERE triple = ?4",
-                params![json, tr_start_str, tr_end_str, triple],
+                "UPDATE statement SET content = ?1, tr_start = ?2, tr_end = ?3, embeddable = ?5 WHERE triple = ?4",
+                params![
+                    json,
+                    tr_start_str,
+                    tr_end_str,
+                    triple,
+                    self.embeddable_value(content)
+                ],
             )
             .map_err(StorageError::from)?;
         if rows == 0 {
@@ -866,16 +917,18 @@ impl SqliteStore {
     ) -> Result<bool> {
         let (table, pk) = catalog_table(catalog)?;
         Ok(self.conn.execute(
-            &format!("UPDATE {table} SET embedding=?1 WHERE {pk}=?2 AND content_version=?3 AND (SELECT v FROM meta WHERE k='embedding_metadata')=?4"),
+            &format!("UPDATE {table} SET embedding=?1 WHERE {pk}=?2 AND content_version=?3 AND embeddable=1 AND (SELECT v FROM meta WHERE k='embedding_metadata')=?4"),
             params![vector_to_blob(vector), key, version, serde_json::to_string(identity)?],
         )? == 1)
     }
 
-    /// Entries still waiting for a vector; served by the `*_missing_embedding_idx` indexes.
+    /// Entries still waiting for a vector; served by the `*_pending_key_idx` indexes.
+    /// Entries the shelf does not embed are not waiting for anything, so they never count,
+    /// and the index they are missing from is why counting them costs nothing.
     pub fn pending_count(&self, catalog: &str) -> Result<usize> {
         let (table, _) = catalog_table(catalog)?;
         let n: i64 = self.conn.query_row(
-            &format!("SELECT count(*) FROM {table} WHERE embedding IS NULL"),
+            &format!("SELECT count(*) FROM {table} WHERE embedding IS NULL AND embeddable=1"),
             [],
             |r| r.get(0),
         )?;
@@ -887,7 +940,7 @@ impl SqliteStore {
         let (table, key_column) = catalog_table(catalog)?;
         Ok(self.conn.query_row(
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM {table} WHERE {key_column}=?1 AND content_version=?2 AND embedding IS NULL)"
+                "SELECT EXISTS(SELECT 1 FROM {table} WHERE {key_column}=?1 AND content_version=?2 AND embedding IS NULL AND embeddable=1)"
             ),
             rusqlite::params![key, version],
             |r| r.get(0),
@@ -900,8 +953,8 @@ impl SqliteStore {
         let (statement, _) = catalog_table("statement")?;
         let n: i64 = self.conn.query_row(
             &format!(
-                "SELECT (SELECT count(*) FROM (SELECT 1 FROM {knowledge} WHERE embedding IS NULL LIMIT ?1))
-                      + (SELECT count(*) FROM (SELECT 1 FROM {statement} WHERE embedding IS NULL LIMIT ?1))"
+                "SELECT (SELECT count(*) FROM (SELECT 1 FROM {knowledge} WHERE embedding IS NULL AND embeddable=1 LIMIT ?1))
+                      + (SELECT count(*) FROM (SELECT 1 FROM {statement} WHERE embedding IS NULL AND embeddable=1 LIMIT ?1))"
             ),
             [limit],
             |r| r.get(0),
@@ -916,8 +969,8 @@ impl SqliteStore {
         limit: i64,
     ) -> Result<Vec<(String, String, Content, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT 'knowledge', name, content, content_version FROM knowledge WHERE embedding IS NULL \
-             UNION ALL SELECT 'statement', triple, content, content_version FROM statement WHERE embedding IS NULL \
+            "SELECT 'knowledge', name, content, content_version FROM knowledge WHERE embedding IS NULL AND embeddable=1 \
+             UNION ALL SELECT 'statement', triple, content, content_version FROM statement WHERE embedding IS NULL AND embeddable=1 \
              ORDER BY 4 DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |r| {
@@ -982,7 +1035,7 @@ impl SqliteStore {
         limit: i64,
     ) -> Result<Vec<(String, Content, i64)>> {
         let (table, pk) = catalog_table(catalog)?;
-        let mut stmt = self.conn.prepare(&format!("SELECT {pk},content,content_version FROM {table} WHERE embedding IS NULL AND (?1 IS NULL OR {pk}>?1) ORDER BY {pk} LIMIT ?2"))?;
+        let mut stmt = self.conn.prepare(&format!("SELECT {pk},content,content_version FROM {table} WHERE embedding IS NULL AND embeddable=1 AND (?1 IS NULL OR {pk}>?1) ORDER BY {pk} LIMIT ?2"))?;
         let rows = stmt.query_map(params![after, limit], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -995,6 +1048,32 @@ impl SqliteStore {
             Ok((key, Content::from_json_str(&c)?, v))
         })
         .collect()
+    }
+
+    /// Brings the stored `embeddable` answers back in line with the shelf's current
+    /// `skip_tags`, then drops the vectors of entries it now says the shelf does not embed,
+    /// and reports how many. Run when `skip_tags` changes: rows written under the old rule
+    /// carry its answer, and a vector nothing would rebuild is still a semantic search hit.
+    pub fn clear_skipped_embeddings(&self) -> Result<usize> {
+        let skipped = serde_json::json!(self.skip_tags).to_string();
+        let tx = self.conn.unchecked_transaction()?;
+        let mut cleared = 0;
+        for (table, pk) in [catalog_table("knowledge")?, catalog_table("statement")?] {
+            tx.execute(
+                &Self::RECOMPUTE_EMBEDDABLE
+                    .replace("{table}", table)
+                    .replace("{pk}", pk),
+                params![skipped],
+            )?;
+            cleared += tx.execute(
+                &format!(
+                    "UPDATE {table} SET embedding=NULL WHERE embedding IS NOT NULL AND embeddable=0"
+                ),
+                [],
+            )?;
+        }
+        tx.commit()?;
+        Ok(cleared)
     }
 
     pub fn reset_embeddings(
@@ -1132,12 +1211,13 @@ impl SqliteStore {
             let k = &r.knowledge;
             let json = k.content.to_json_string();
             tx.execute(
-                "INSERT INTO knowledge(name,content,created_at,embedding) VALUES(?1,?2,?3,?4)",
+                "INSERT INTO knowledge(name,content,created_at,embedding,embeddable) VALUES(?1,?2,?3,?4,?5)",
                 params![
                     k.name,
                     json,
                     format_timestamp(&k.created_at),
-                    r.embedding.as_ref().map(|v| vector_to_blob(v))
+                    r.embedding.as_ref().map(|v| vector_to_blob(v)),
+                    self.embeddable_value(&k.content)
                 ],
             )?;
             let id =
@@ -1148,7 +1228,7 @@ impl SqliteStore {
             let s = &r.statement;
             let triple = s.key.to_csv_key();
             let json = s.content.to_json_string();
-            tx.execute("INSERT INTO statement(triple,head,relation,tail,content,created_at,tr_start,tr_end,embedding) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![triple,s.key.head,s.key.relation,s.key.tail,json,format_timestamp(&s.created_at),s.tr_start.as_ref().map(format_timestamp),s.tr_end.as_ref().map(format_timestamp),r.embedding.as_ref().map(|v|vector_to_blob(v))])?;
+            tx.execute("INSERT INTO statement(triple,head,relation,tail,content,created_at,tr_start,tr_end,embedding,embeddable) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![triple,s.key.head,s.key.relation,s.key.tail,json,format_timestamp(&s.created_at),s.tr_start.as_ref().map(format_timestamp),s.tr_end.as_ref().map(format_timestamp),r.embedding.as_ref().map(|v|vector_to_blob(v)),self.embeddable_value(&s.content)])?;
             let id =
                 self.docs_upsert_in(&tx, "statement", &triple, &fts_doc_for(&s.content, &triple))?;
             replace_postings_in(&tx, id, &json)?;

@@ -60,8 +60,8 @@ not duplicate those writes — only perform the summary cascade and
 semantic extraction on top of them.
 
 The hook scripts are thin, deterministic shells: they write message entries
-(`msg-<session_id>-<turn_id>`, tag `message`) and retrieval context, and emit
-trigger signals. The AI-heavy steps in this document (summary synthesis,
+(`msg-<session_id>-<turn_id>`, tag `message`, kept out of the vector index) and
+retrieval context, and emit trigger signals. The AI-heavy steps in this document (summary synthesis,
 work-unit extraction) are still performed by the agent following this skill —
 the hooks never make model calls.
 
@@ -132,7 +132,8 @@ hypatia knowledge-create "msg-<SESSION_ID>-<TURN>" \
 ## Content
 <full message text>" \
   --tags "message" \
-  --scopes "<PROJECT>"
+  --scopes "<PROJECT>" \
+  --no-embed
 ```
 
 Rules:
@@ -142,6 +143,20 @@ Rules:
 - Name is auto-generated: `msg-<SESSION_ID>-<TURN>`.
 - Do not skip trivial messages (greetings, "ok", etc.) — the log layer is complete.
 - Never store secrets (passwords, API keys, tokens) — redact before writing.
+- `--no-embed` keeps the raw turn out of the vector index. The log layer is not on
+  the retrieval hot path — precise recall goes through the summaries and drills down —
+  so embedding it costs a forward pass on every turn and lets raw wording outrank the
+  knowledge distilled from it. The entry is still stored and still found by `search`
+  and `query`. A shelf can set the same rule once instead, in `shelf.toml`:
+
+  ```toml
+  [embedding]
+  skip_tags = ["message", "session"]
+  ```
+
+  With that in place the flag is redundant for knowledge entries. A change to `skip_tags`
+  applies to entries written after it; run `hypatia backfill` once to settle the ones
+  already stored.
 
 #### Content policy for assistant messages (MANDATORY)
 
@@ -181,7 +196,8 @@ If the hook or environment provides a **session-level summary** (e.g. compaction
 hypatia knowledge-create "session-<SESSION_ID>" \
   -d "<session summary text>" \
   --tags "session" \
-  --scopes "<PROJECT>"
+  --scopes "<PROJECT>" \
+  --no-embed
 ```
 
 - Create `session-<SESSION_ID>` the first time a summary arrives; `knowledge-create` fails on an existing name. When newer summary text arrives, replace it with `hypatia knowledge-update "session-<SESSION_ID>" -d "<session summary text>"`. Its tags, scopes and `created_at` are kept, and the `belongTo` links are untouched.
@@ -193,10 +209,17 @@ When both `msg-<SESSION_ID>-<TURN>` and `session-<SESSION_ID>` exist:
 
 ```bash
 hypatia statement-create "msg-<SESSION_ID>-<TURN>" "belongTo" "session-<SESSION_ID>" \
-  --scopes "<PROJECT>"
+  --scopes "<PROJECT>" \
+  --no-embed
 ```
 
 Predicate is exactly `belongTo` (message → session).
+
+`--no-embed` is needed here even on a shelf that sets `embedding.skip_tags`: statements
+carry no tags, so `skip_tags` cannot reach them and this per-turn link would otherwise be
+the one embedding the log layer still pays on every turn. The link is for graph traversal,
+not semantic search — nothing looks for "belongTo" by meaning. Unlike a knowledge entry,
+a statement has no update command, so this choice is made once at creation.
 
 ### Step 4: Hierarchical summary cascade
 
@@ -268,7 +291,8 @@ hypatia knowledge-create "<extracted-summary-name>" \
 
 ```bash
 hypatia statement-create "<summary-name>" "summary" "<item-name>" \
-  --scopes "<PROJECT>"
+  --scopes "<PROJECT>" \
+  --no-embed
 ```
 
 Run one `statement-create` per item in the batch.

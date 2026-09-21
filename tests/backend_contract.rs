@@ -15,7 +15,7 @@ use tempfile::TempDir;
 fn local(dir: &TempDir) -> OpenShelf {
     std::fs::write(
         dir.path().join("shelf.toml"),
-        "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n",
+        "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\nskip_tags=[\"chatter\",\"it's\\\\ok\"]\n",
     )
     .unwrap();
     OpenShelf::open(dir.path(), Some("contract")).unwrap()
@@ -561,7 +561,138 @@ fn concurrent_meta_updates_are_never_lost() {
     assert_eq!(store.meta_value("counter").unwrap().as_deref(), Some("100"));
 }
 
+/// Entries kept out of the vector index owe nothing and can be given nothing. Both ways in
+/// are checked: the entry's own `embed: false`, and the shelf's `skip_tags`.
+fn entries_the_shelf_does_not_embed(shelf: &mut OpenShelf) {
+    let opted_out = Content::new("a message").with_embed(Some(false));
+    let tagged = Content::new("another").with_tags(vec!["chatter".into()]);
+    // A tag whose text would end a naively quoted SQL string, or a naively quoted JSON one.
+    let awkward = Content::new("third").with_tags(vec!["it's\\ok".into()]);
+    let owed = shelf.embedding_debt().unwrap().pending_knowledge;
+    for (name, content) in [
+        ("quiet", &opted_out),
+        ("tagged", &tagged),
+        ("awkward", &awkward),
+    ] {
+        KnowledgeService::new(&mut *shelf)
+            .create(name, content.clone())
+            .unwrap();
+    }
+    assert_eq!(
+        shelf.embedding_debt().unwrap().pending_knowledge,
+        owed,
+        "a skipped write is not debt"
+    );
+    for listed in [
+        shelf
+            .backend
+            .newest_missing_embeddings(100)
+            .unwrap()
+            .into_iter()
+            .map(|(_, key, _, _)| key)
+            .collect::<Vec<_>>(),
+        shelf
+            .backend
+            .missing_embeddings("knowledge", None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _, _)| key)
+            .collect(),
+    ] {
+        for skipped in ["quiet", "tagged", "awkward"] {
+            assert!(
+                !listed.contains(&skipped.to_string()),
+                "backfill would embed a skipped entry: {listed:?}"
+            );
+        }
+    }
+    // Not even by key and version: the only vector a skipped entry can hold is one from
+    // before the rule changed, and `clear_skipped_embeddings` is what takes that one out.
+    for (name, content) in [("loud", &opted_out), ("noisy", &tagged)] {
+        let version = shelf.backend.insert_knowledge(name, content).unwrap();
+        assert!(
+            !shelf
+                .backend
+                .install_embedding("knowledge", name, version, &[1., 0., 0.])
+                .unwrap()
+        );
+    }
+    assert_eq!(shelf.backend.clear_skipped_embeddings().unwrap(), 0);
+
+    // Opting an embedded entry out drops its vector with the write, and owes no new one.
+    let version = shelf
+        .backend
+        .insert_knowledge("was-loud", &Content::new("spoken"))
+        .unwrap();
+    assert!(
+        shelf
+            .backend
+            .install_embedding("knowledge", "was-loud", version, &[1., 0., 0.])
+            .unwrap()
+    );
+    shelf
+        .backend
+        .update_knowledge("was-loud", &opted_out)
+        .unwrap();
+    shelf.backend.rebuild_indexes().unwrap();
+    assert!(
+        shelf
+            .backend
+            .vector_search(QueryTarget::Knowledge, &[1., 0., 0.], 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        shelf.embedding_debt().unwrap().pending_knowledge,
+        owed,
+        "opting out does not leave the entry owing a vector"
+    );
+    // An entry asks for less indexing than its shelf, never more: `embed: true` on a
+    // skipped tag changes nothing.
+    shelf
+        .backend
+        .update_knowledge("tagged", &tagged.clone().with_embed(Some(true)))
+        .unwrap();
+    assert_eq!(
+        shelf.embedding_debt().unwrap().pending_knowledge,
+        owed,
+        "asking to embed does not override the shelf's skip_tags"
+    );
+
+    for name in ["quiet", "tagged", "awkward", "loud", "noisy", "was-loud"] {
+        shelf.backend.delete_knowledge(name).unwrap();
+    }
+
+    // The statement catalog goes through the same reconcile, not just knowledge.
+    let link = StatementKey::new("a", "links", "b");
+    let version = shelf
+        .backend
+        .insert_statement(&link, &Content::new("edge"), None, None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        shelf
+            .backend
+            .install_embedding("statement", &link.to_csv_key(), version, &[1., 0., 0.])
+            .unwrap()
+    );
+    assert_eq!(shelf.backend.embedding_row_count("statement").unwrap(), 1);
+    shelf
+        .backend
+        .update_statement(
+            &link,
+            &Content::new("edge").with_embed(Some(false)),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(shelf.embedding_debt().unwrap().pending_statement, 0);
+    assert_eq!(shelf.backend.embedding_row_count("statement").unwrap(), 0);
+    shelf.backend.delete_statement(&link).unwrap();
+}
+
 fn contract(shelf: &mut OpenShelf) {
+    entries_the_shelf_does_not_embed(shelf);
     let initial = Content::new(r#"{"n":12,"mixed":[1,"rust",null],"nested":{"x":true}}"#)
         .with_tags(vec!["rust".into()]);
     let version = shelf.backend.insert_knowledge("first", &initial).unwrap();
@@ -880,6 +1011,123 @@ fn logical_export_import_preserves_content_time_vectors_and_archives() {
     );
     assert!(mgr.import("target", export.path(), false).is_err());
 }
+
+#[test]
+fn a_shelf_written_before_the_embeddable_column_gains_it_and_its_rows_still_embed() {
+    let dir = TempDir::new().unwrap();
+    let shelf = local(&dir);
+    KnowledgeService::new(&mut { shelf })
+        .create("before", Content::new("written by an older binary"))
+        .unwrap();
+
+    // Put the schema back the way a binary without the column left it.
+    let path = dir.path().join("hypatia.sqlite");
+    {
+        let old = hypatia::storage::SqliteStore::open(&path).unwrap();
+        old.conn()
+            .execute_batch(
+                "DROP INDEX IF EXISTS knowledge_pending_key_idx;
+                 DROP INDEX IF EXISTS knowledge_pending_clock_idx;
+                 DROP INDEX IF EXISTS statement_pending_key_idx;
+                 DROP INDEX IF EXISTS statement_pending_clock_idx;
+                 ALTER TABLE knowledge DROP COLUMN embeddable;
+                 ALTER TABLE statement DROP COLUMN embeddable;
+                 CREATE INDEX knowledge_missing_embedding_idx ON knowledge(name) WHERE embedding IS NULL;
+                 CREATE INDEX statement_missing_embedding_idx ON statement(triple) WHERE embedding IS NULL;",
+            )
+            .unwrap();
+    }
+
+    // Opening it again adds the column and the indexes it belongs to, and the row that
+    // predates it is embeddable — which is what a shelf configuring nothing means.
+    let mut shelf = local(&dir);
+    assert_eq!(shelf.embedding_debt().unwrap().pending_knowledge, 1);
+    assert_eq!(
+        shelf
+            .backend
+            .newest_missing_embeddings(10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, key, _, _)| key)
+            .collect::<Vec<_>>(),
+        ["before"]
+    );
+    let store = hypatia::storage::SqliteStore::open(&path).unwrap();
+    let stale: i64 = store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' \
+             AND (name LIKE '%missing_embedding%' OR name LIKE '%pending_version%')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "indexes that ignore the column are dropped");
+    let current: i64 = store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' \
+             AND name LIKE '%_pending_%' AND sql LIKE '%embeddable%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        current, 4,
+        "two pending indexes per catalog, both on the column"
+    );
+    drop(store);
+    shelf.embedder = Box::new(Unit);
+    assert_eq!(shelf.flush_pending(8).unwrap().installed, 1);
+}
+
+#[test]
+fn an_import_is_faithful_but_the_target_shelf_still_decides_what_it_embeds() {
+    let home = TempDir::new().unwrap();
+    let source = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    let export = TempDir::new().unwrap();
+    let model = "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n";
+    std::fs::write(source.path().join("shelf.toml"), model).unwrap();
+    // The target keeps that layer out of its vector index; the source did not.
+    std::fs::write(
+        target.path().join("shelf.toml"),
+        format!("{model}skip_tags=['message']\n"),
+    )
+    .unwrap();
+    let mut mgr = ShelfManager::with_home(home.path().into()).unwrap();
+    mgr.connect(source.path(), Some("source")).unwrap();
+    mgr.connect(target.path(), Some("target")).unwrap();
+    let src = mgr.get_mut("source").unwrap();
+    for (name, content) in [
+        (
+            "msg",
+            Content::new("a turn").with_tags(vec!["message".into()]),
+        ),
+        ("fact", Content::new("distilled")),
+    ] {
+        let version = src.backend.insert_knowledge(name, &content).unwrap();
+        src.backend
+            .install_embedding("knowledge", name, version, &[1., 0., 0.])
+            .unwrap();
+    }
+    mgr.export("source", export.path()).unwrap();
+    mgr.import("target", export.path(), false).unwrap();
+
+    let target = mgr.get("target").unwrap();
+    // Every entry came across; only the vector the target's rule forbids was dropped.
+    assert_eq!(target.backend.snapshot().unwrap().knowledge.len(), 2);
+    assert_eq!(target.backend.embedding_row_count("knowledge").unwrap(), 1);
+    assert_eq!(target.embedding_debt().unwrap().pending_knowledge, 0);
+    assert_eq!(
+        target
+            .backend
+            .vector_search(QueryTarget::Knowledge, &[1., 0., 0.], 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
 #[cfg(not(feature = "postgres-backend"))]
 #[test]
 fn missing_feature_is_explicit() {
@@ -1036,7 +1284,7 @@ fn postgres_shared_contract_and_mixed_shelf_isolation() {
         } else {
             toml::to_string(&std::collections::BTreeMap::from([("url", &direct_url)])).unwrap()
         };
-        std::fs::write(dir.path().join("shelf.toml"),format!("[storage]\nbackend='pgvector'\n[storage.postgres]\n{connection}schema='{schema}'\n[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n")).unwrap();
+        std::fs::write(dir.path().join("shelf.toml"),format!("[storage]\nbackend='pgvector'\n[storage.postgres]\n{connection}schema='{schema}'\n[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\nskip_tags=[\"chatter\",\"it's\\\\ok\"]\n")).unwrap();
     }
     let mut mgr = ShelfManager::with_home(home.path().into()).unwrap();
     mgr.connect(one.path(), Some("pg-a")).unwrap();
@@ -1107,7 +1355,7 @@ fn postgres_automatic_flush_transitions() {
             .unwrap()
             .as_nanos()
     );
-    std::fs::write(dir.path().join("shelf.toml"), format!("[storage]\nbackend='pgvector'\n[storage.postgres]\nurl_env='HYPATIA_TEST_POSTGRES_URL'\nschema='{schema}'\n[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\n")).unwrap();
+    std::fs::write(dir.path().join("shelf.toml"), format!("[storage]\nbackend='pgvector'\n[storage.postgres]\nurl_env='HYPATIA_TEST_POSTGRES_URL'\nschema='{schema}'\n[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\nskip_tags=[\"chatter\",\"it's\\\\ok\"]\n")).unwrap();
     let mut shelf = OpenShelf::open(dir.path(), Some("pg-flush")).unwrap();
     flush_transitions(&mut shelf);
     drop(shelf);

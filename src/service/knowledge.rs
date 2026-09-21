@@ -13,6 +13,8 @@ pub struct KnowledgePatch {
     pub synonyms: Option<Option<Synonyms>>,
     pub figures: Option<Vec<String>>,
     pub scopes: Option<Vec<String>>,
+    /// `Some(false)` takes the entry out of the vector index, `Some(true)` puts it back.
+    pub embed: Option<bool>,
 }
 
 impl KnowledgePatch {
@@ -39,6 +41,9 @@ impl KnowledgePatch {
         }
         if let Some(scopes) = &self.scopes {
             next = next.with_scopes(scopes.clone());
+        }
+        if let Some(embed) = self.embed {
+            next = next.with_embed(Some(embed));
         }
         next
     }
@@ -144,6 +149,10 @@ fn normalized(content: &Content) -> Content {
     };
     if empty_synonyms {
         c.synonyms = None;
+    }
+    // Embedding is the default, so asking for it again is not a change.
+    if c.embed == Some(true) {
+        c.embed = None;
     }
     c
 }

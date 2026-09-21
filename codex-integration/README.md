@@ -46,3 +46,11 @@ P1–P4 — real hooks implemented and verified end-to-end:
 
 Remaining for production use: trust the hooks in the desktop app
 (Settings → Hooks) or CLI (`/hooks`).
+
+The hooks write one entry per turn, which is bulk the vector index does not want.
+Keep that layer out of it once, in the shelf's `shelf.toml`, rather than per call:
+
+```toml
+[embedding]
+skip_tags = ["message", "session"]
+```

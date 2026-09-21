@@ -15,6 +15,8 @@ pub struct BackfillStats {
     pub created: usize,
     pub skipped: usize,
     pub errors: usize,
+    /// Vectors dropped because the shelf no longer embeds those entries.
+    pub cleared: usize,
 }
 
 /// What pointing a shelf at a local model did.
@@ -570,6 +572,12 @@ impl Lab {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
 
+        // Before the model guards, because taking entries out of the vector index needs no
+        // model: a shelf whose `skip_tags` grew after its model went away would otherwise
+        // have no way to drop the vectors the old rule left behind. What it settles stands
+        // even when a guard below then refuses the embedding half of the job.
+        let cleared = shelf_ref.backend.clear_skipped_embeddings()?;
+
         // Without a usable model nothing below can run, re-embedding included: say how to
         // set one up first.
         if let Some(off) = shelf_ref.semantic_search_off_error() {
@@ -614,6 +622,7 @@ impl Lab {
             created: 0,
             skipped: 0,
             errors: 0,
+            cleared,
         };
 
         for catalog in ["knowledge", "statement"] {
@@ -943,6 +952,235 @@ mod backfill_tests {
         assert!(err.contains("model unavailable"), "{err}");
         lab.release_embedders();
         assert_eq!(releases.get(), 1);
+    }
+
+    /// Counts every text the shelf asks it to embed, so a write that costs a forward pass
+    /// cannot go unnoticed.
+    struct Counting(std::rc::Rc<std::cell::Cell<usize>>);
+    impl EmbeddingProvider for Counting {
+        fn embed(&self, _: &str) -> Result<Vec<f32>> {
+            self.0.set(self.0.get() + 1);
+            Ok(vec![1., 0., 0.])
+        }
+        fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>>> {
+            texts.iter().map(|t| self.embed(t)).collect()
+        }
+        fn dimensions(&self) -> usize {
+            3
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn an_entry_that_declines_embedding_costs_no_forward_pass_and_no_backfill() {
+        let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(
+            dir.path().join("shelf.toml"),
+            "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\ndefer=false\n",
+        )
+        .unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        let embeds = std::rc::Rc::new(std::cell::Cell::new(0));
+        lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Counting(embeds.clone()));
+        // What one step cost, so a query's own embedding never counts as a write's.
+        let cost = |lab: &mut Lab, step: &mut dyn FnMut(&mut Lab)| {
+            let before = embeds.get();
+            step(lab);
+            embeds.get() - before
+        };
+
+        assert_eq!(
+            cost(&mut lab, &mut |lab| {
+                lab.create_knowledge(
+                    "test",
+                    "msg-1",
+                    Content::new("a turn of dialogue").with_embed(Some(false)),
+                )
+                .unwrap();
+                lab.create_statement(
+                    "test",
+                    &StatementKey::new("msg-1", "in", "session-1"),
+                    Content::new("").with_embed(Some(false)),
+                    None,
+                    None,
+                )
+                .unwrap();
+            }),
+            0,
+            "a declined write is never embedded"
+        );
+        let debt = lab.embedding_debt("test").unwrap();
+        assert_eq!((debt.pending_knowledge, debt.pending_statement), (0, 0));
+        assert_eq!(debt.pending_since, None);
+
+        // An entry that does want one still gets it, on the same write.
+        assert_eq!(
+            cost(&mut lab, &mut |lab| {
+                lab.create_knowledge("test", "fact", Content::new("distilled"))
+                    .unwrap();
+            }),
+            1
+        );
+        let stats = lab.backfill_vectors("test").unwrap();
+        assert_eq!((stats.created, stats.errors, stats.cleared), (0, 0, 0));
+        assert_eq!(
+            lab.similar("test", "dialogue", "both", 10)
+                .unwrap()
+                .rows
+                .len(),
+            1,
+            "the declined entries are not semantic search targets"
+        );
+
+        // Asking for it back is a content change, so the entry is embedded like any other.
+        let patch = KnowledgePatch {
+            embed: Some(true),
+            ..Default::default()
+        };
+        let mut changed = false;
+        assert_eq!(
+            cost(&mut lab, &mut |lab| {
+                changed = lab
+                    .patch_knowledge("test", "msg-1", &patch)
+                    .unwrap()
+                    .changed;
+            }),
+            1
+        );
+        assert!(changed);
+        assert_eq!(
+            cost(&mut lab, &mut |lab| {
+                changed = lab
+                    .patch_knowledge("test", "msg-1", &patch)
+                    .unwrap()
+                    .changed;
+            }),
+            0,
+            "asking again changes nothing"
+        );
+        assert!(!changed);
+    }
+
+    #[test]
+    fn skip_tags_keeps_a_whole_layer_out_and_backfill_takes_back_what_it_gave() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("shelf.toml");
+        let base = "[embedding]\nmodel='hypatia-contract-test'\ndimensions=3\ndefer=false\n";
+        std::fs::write(&config, base).unwrap();
+        // A fresh registry each time: the same shelf directory, opened again as the shelf.
+        let open = |dir: &tempfile::TempDir| {
+            let home = tempfile::tempdir().unwrap();
+            let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+            manager.connect(dir.path(), Some("test")).unwrap();
+            let mut lab = Lab {
+                shelf_manager: manager,
+            };
+            lab.shelf_manager.get_mut("test").unwrap().embedder = Box::new(Fixed { fail: false });
+            (lab, home)
+        };
+        let vectors = |lab: &Lab| {
+            lab.shelf_manager
+                .get("test")
+                .unwrap()
+                .backend
+                .embedding_row_count("knowledge")
+                .unwrap()
+        };
+
+        // Written while the shelf still embedded messages.
+        let (mut lab, home) = open(&dir);
+        for (name, tag) in [("msg-1", "message"), ("msg-2", "message"), ("fact", "note")] {
+            lab.create_knowledge("test", name, Content::new(name).with_tags(vec![tag.into()]))
+                .unwrap();
+        }
+        assert_eq!(vectors(&lab), 3);
+        drop((lab, home));
+
+        // The shelf now skips them. New writes cost nothing, and backfill takes the vectors
+        // the old rule left behind out of the index.
+        std::fs::write(&config, format!("{base}skip_tags=['message']\n")).unwrap();
+        let (mut lab, _home) = open(&dir);
+        lab.create_knowledge(
+            "test",
+            "msg-3",
+            Content::new("msg-3").with_tags(vec!["message".into()]),
+        )
+        .unwrap();
+        assert_eq!(lab.embedding_debt("test").unwrap().pending_knowledge, 0);
+        // Until backfill runs, the vectors written under the old rule are still there and
+        // still found. That window is what `hypatia backfill` closes, and the README says so.
+        assert_eq!(
+            lab.similar("test", "anything", "knowledge", 10)
+                .unwrap()
+                .rows
+                .len(),
+            3,
+            "a changed skip_tags does not retract vectors on its own"
+        );
+        let stats = lab.backfill_vectors("test").unwrap();
+        assert_eq!((stats.created, stats.cleared, stats.errors), (0, 2, 0));
+        assert_eq!(vectors(&lab), 1);
+        assert_eq!(
+            lab.similar("test", "anything", "knowledge", 10)
+                .unwrap()
+                .rows
+                .len(),
+            1,
+            "only the distilled entry is a semantic search target"
+        );
+        // Full-text search still finds every message: only the vector index excludes them.
+        assert_eq!(
+            lab.search("test", "msg", SearchOpts::default())
+                .unwrap()
+                .rows
+                .len(),
+            3
+        );
+        // Nothing left to take back, and the rule holds across a second pass.
+        assert_eq!(lab.backfill_vectors("test").unwrap().cleared, 0);
+
+        // Settling what is stored needs no model, so a shelf that lost one can still take
+        // its old vectors out: the error is about the embedding half of the job only.
+        drop(lab);
+        std::fs::write(&config, format!("{base}skip_tags=['note']\n")).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut manager = ShelfManager::with_home(home.path().into()).unwrap();
+        manager.connect(dir.path(), Some("test")).unwrap();
+        let mut lab = Lab {
+            shelf_manager: manager,
+        };
+        assert!(
+            lab.backfill_vectors("test")
+                .unwrap_err()
+                .to_string()
+                .contains("semantic search is off"),
+            "a shelf with no model cannot embed"
+        );
+        assert_eq!(
+            vectors(&lab),
+            0,
+            "but it can still drop what it must not keep"
+        );
+        drop((lab, home));
+        std::fs::write(&config, format!("{base}skip_tags=['message']\n")).unwrap();
+        let (mut lab, _home) = open(&dir);
+        assert_eq!(lab.backfill_vectors("test").unwrap().created, 1);
+
+        // Taking the rule away again is the same story in reverse: each row carries the
+        // answer it was written with, so nothing is owed until a backfill settles them.
+        drop(lab);
+        std::fs::write(&config, base).unwrap();
+        let (mut lab, _home) = open(&dir);
+        assert_eq!(lab.embedding_debt("test").unwrap().pending_knowledge, 0);
+        let stats = lab.backfill_vectors("test").unwrap();
+        assert_eq!((stats.created, stats.cleared), (3, 0));
+        assert_eq!(vectors(&lab), 4);
     }
 
     #[test]

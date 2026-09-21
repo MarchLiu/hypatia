@@ -63,6 +63,9 @@ enum Commands {
         /// Scopes (comma-separated, e.g. "project-a," for global)
         #[arg(long, default_value = "")]
         scopes: String,
+        /// Keep this entry out of the vector index; it stays searchable by text and JSE
+        #[arg(long)]
+        no_embed: bool,
         /// Shelf name
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -85,6 +88,12 @@ enum Commands {
         /// New scopes (comma-separated, trailing comma adds global); "" clears them
         #[arg(long)]
         scopes: Option<String>,
+        /// Take this entry out of the vector index; its stored vector is discarded
+        #[arg(long, conflicts_with = "embed")]
+        no_embed: bool,
+        /// Put this entry back in the vector index, unless the shelf skips one of its tags
+        #[arg(long)]
+        embed: bool,
         /// Shelf name
         #[arg(short, long, default_value = "default")]
         shelf: String,
@@ -123,6 +132,9 @@ enum Commands {
         /// Scopes (comma-separated, e.g. "project-a," for global)
         #[arg(long, default_value = "")]
         scopes: String,
+        /// Keep this statement out of the vector index
+        #[arg(long)]
+        no_embed: bool,
         #[arg(short, long, default_value = "default")]
         shelf: String,
     },
@@ -367,12 +379,14 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
         synonyms: None,
         figures: None,
         scopes: None,
+        no_embed: false,
+        embed: false,
         ..
     } = &cmd
     {
         return Err(crate::error::HypatiaError::Validation(
             "nothing to update: pass at least one of --data, --tags, --synonyms, --figures, \
-             --scopes"
+             --scopes, --no-embed, --embed"
                 .into(),
         ));
     }
@@ -430,13 +444,15 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
             synonyms,
             figures,
             scopes,
+            no_embed,
             shelf,
         } => {
             let content = Content::new(&data)
                 .with_tags(parse_tags(&tags))
                 .with_synonyms(parse_flat_synonyms(&synonyms))
                 .with_figures(parse_list(&figures))
-                .with_scopes(parse_scopes(&scopes));
+                .with_scopes(parse_scopes(&scopes))
+                .with_embed(no_embed.then_some(false));
             let k = lab.create_knowledge(&shelf, &name, content)?;
             println!("Created knowledge: {}", k.name);
         }
@@ -447,6 +463,8 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
             synonyms,
             figures,
             scopes,
+            no_embed,
+            embed,
             shelf,
         } => {
             let patch = KnowledgePatch {
@@ -455,6 +473,8 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
                 synonyms: synonyms.as_deref().map(parse_flat_synonyms),
                 figures: figures.as_deref().map(parse_list),
                 scopes: scopes.as_deref().map(parse_scopes),
+                // Clap rules the two flags out together, so at most one is set.
+                embed: (no_embed || embed).then_some(embed),
             };
             let updated = lab.patch_knowledge(&shelf, &name, &patch)?;
             if updated.changed {
@@ -495,6 +515,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
             data,
             synonyms,
             scopes,
+            no_embed,
             shelf,
         } => {
             let key = StatementKey::new(&head, &relation, &tail);
@@ -511,7 +532,8 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
             let scopes_vec = parse_scopes(&scopes);
             let content = Content::new(&data)
                 .with_synonyms(syn)
-                .with_scopes(scopes_vec);
+                .with_scopes(scopes_vec)
+                .with_embed(no_embed.then_some(false));
             let outcome = lab.create_statement(&shelf, &key, content, None, None)?;
             // Exit 0 either way: an existing triple means the relationship is
             // already recorded, and its stored content is left unchanged.
@@ -592,6 +614,12 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
                 "Backfill complete: {} vectors created, {} skipped, {} errors",
                 stats.created, stats.skipped, stats.errors
             );
+            if stats.cleared > 0 {
+                println!(
+                    "{} vectors dropped: the shelf no longer embeds those entries",
+                    stats.cleared
+                );
+            }
             // Embedding is this command's only job: failed entries are a failure.
             if stats.errors > 0 {
                 return Err(crate::error::HypatiaError::Embedding(format!(
