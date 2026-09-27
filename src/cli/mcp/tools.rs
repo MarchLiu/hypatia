@@ -113,6 +113,25 @@ pub(super) fn definitions() -> Vec<Value> {
             read.clone(),
         ),
         tool(
+            "model_list",
+            "List models",
+            "List embedding models installed in ~/.hypatia/models/ and which shelves reference each one.",
+            json!({}),
+            &[],
+            read.clone(),
+        ),
+        tool(
+            "model_attach",
+            "Attach a model",
+            "Point a shelf at an already-installed embedding model, without downloading anything. Refuses when the shelf holds vectors of another model; the `backfill` field says what to do next about vectors (`pending`: run `backfill`; `reembed`: switching means `backfill --reembed`; `none`).",
+            json!({
+                "name": { "type": "string", "description": "Model name in Org/Name format, as model_list shows" },
+                "shelf": shelf
+            }),
+            &["name"],
+            write(true),
+        ),
+        tool(
             "session_current",
             "Unsummarized messages",
             "List message entries in a scope that no summary covers yet, oldest first.",
@@ -285,6 +304,8 @@ pub(super) fn call(lab: &mut Lab, params: &Value) -> Result<Value, RpcError> {
     };
     let outcome = match name {
         "list_shelves" => list_shelves(lab, args),
+        "model_list" => model_list(lab, args),
+        "model_attach" => model_attach(lab, args),
         "shelf_status" => shelf_status(lab, args),
         "query" => query(lab, args),
         "search" => search(lab, args),
@@ -334,6 +355,13 @@ struct NoArgs {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShelfArgs {
+    shelf: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelAttachArgs {
+    name: String,
     shelf: Option<String>,
 }
 
@@ -562,8 +590,57 @@ fn list_shelves(lab: &mut Lab, args: Value) -> ToolResult {
     Ok(json!({ "shelves": shelves }))
 }
 
-fn shelf_status(lab: &mut Lab, args: Value) -> ToolResult {
-    let args: ShelfArgs = parse(args)?;
+/// Read-only: what is installed, and who uses it.
+fn model_list(lab: &mut Lab, args: Value) -> ToolResult {
+    parse::<NoArgs>(args)?;
+    let models: Vec<Value> = crate::embedding::config::list_local_models()
+        .into_iter()
+        .map(|(name, path)| {
+            let used_by = crate::cli::model_admin::referencing_shelves(
+                lab,
+                &name,
+                &crate::embedding::config::models_dir(),
+            )
+            .unwrap_or_default();
+            json!({ "name": name, "path": path, "used_by": used_by })
+        })
+        .collect();
+    Ok(json!({ "models": models }))
+}
+
+/// Attaches without hub access; a multi-GB `model install` stays CLI-only, this is instant.
+fn model_attach(lab: &mut Lab, args: Value) -> ToolResult {
+    let args: ModelAttachArgs = parse(args)?;
+    let shelf = shelf_name(args.shelf);
+    let outcome = crate::cli::model_admin::attach(lab, &shelf, &args.name)
+        .map_err(|e| e.to_string())?;
+    let mut out = json!({
+        "shelf": shelf,
+        "model": args.name,
+        "result": outcome.result(),
+        "backfill": outcome.backfill(),
+    });
+    if let Some(config) = outcome.config() {
+        out["config"] = json!(config);
+    }
+    match &outcome {
+        crate::cli::model_admin::AttachOutcome::Configured { kept, .. } if !kept.is_empty() => {
+            out["hint"] = json!(format!(
+                "shelf.toml already sets {} under [embedding]; check that these settings suit this model",
+                kept.join(", ")
+            ));
+        }
+        crate::cli::model_admin::AttachOutcome::HasVectors { .. } => {
+            out["hint"] = json!(format!(
+                "the shelf holds vectors of another model; run `backfill --reembed -s {shelf}` after switching explicitly"
+            ));
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+fn shelf_status(lab: &mut Lab, args: Value) -> ToolResult {    let args: ShelfArgs = parse(args)?;
     // Reports the debt as it stands, so no overdue flush runs first.
     super::resources::status_json(lab, &shelf_name(args.shelf)).map_err(|e| e.to_string())
 }

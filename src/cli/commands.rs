@@ -304,6 +304,22 @@ enum ModelCommands {
         #[arg(long, default_value = "main")]
         revision: String,
     },
+    /// Point a shelf at an already-installed model, without touching the model hub
+    Attach {
+        /// Model name in Org/Name format, as `hypatia model list` shows
+        name: String,
+        /// Shelf to use the model on; left unchanged if it holds vectors of another model
+        #[arg(short, long, default_value = "default")]
+        shelf: String,
+    },
+    /// Remove an unused model from ~/.hypatia/models/
+    Remove {
+        /// Model name in Org/Name format, as `hypatia model list` shows
+        name: String,
+        /// Remove it even while shelves still reference it: their existing vectors stay searchable, but nothing new can be embedded until they are reconfigured
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 impl Commands {
@@ -763,6 +779,24 @@ fn execute_model_command(lab: &mut Lab, cmd: ModelCommands) -> crate::error::Res
             shelf,
             revision,
         } => super::model_install::run(lab, &name, &shelf, &revision)?,
+        ModelCommands::Attach { name, shelf } => {
+            let outcome = super::model_admin::attach(lab, &shelf, &name)?;
+            super::model_admin::print_attach(&shelf, &name, &outcome);
+        }
+        ModelCommands::Remove { name, force } => {
+            let dir = super::model_admin::remove(
+                lab,
+                &name,
+                force,
+                &crate::embedding::config::models_dir(),
+            )?;
+            println!("Removed {name} ({}).", dir.display());
+            if force {
+                println!(
+                    "Shelves that still named {name} keep their existing vectors, but embed nothing new until they are pointed at another model; `hypatia backfill --reembed -s <shelf>` regenerates them."
+                );
+            }
+        }
         ModelCommands::List => {
             let models = crate::embedding::config::list_local_models();
             if models.is_empty() {
