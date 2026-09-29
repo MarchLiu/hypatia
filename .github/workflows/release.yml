@@ -56,16 +56,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config gcc-12
       - name: Build
-        # numkong's C kernels need AVX512FP16 and NEON bf16 support that GCC 11 (the
-        # ubuntu-22.04 default) rejects, so Linux builds use GCC 12; the produced
-        # binaries still run on the glibc 2.35 baseline.
+        # x86 keeps GCC 12: numkong's AVX512FP16 kernels need it. aarch64 uses the
+        # image default (GCC 13): GCC 12 rejects the NEON sdot intrinsics under
+        # -march=armv8-a.
         env:
           CC_x86_64_unknown_linux_gnu: gcc-12
-          CC_aarch64_unknown_linux_gnu: gcc-12
           # Link with the same GCC that compiled numkong's objects, so libstdc++
           # symbols match at link time.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: gcc-12
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: gcc-12
         run: cargo build --release --locked --features postgres-backend --target ${{ matrix.target }} -p hypatia
       - name: Package
         shell: bash
