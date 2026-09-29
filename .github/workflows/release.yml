@@ -32,11 +32,12 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runner: macos-14
-          # Built on the oldest supported Ubuntu: the binary needs glibc 2.35 and OpenSSL 3.
+          # Built on Ubuntu 24.04: ort's prebuilt ONNX Runtime needs glibc 2.38+, so
+          # the release baseline moves to it (22.04 users need the previous release).
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
