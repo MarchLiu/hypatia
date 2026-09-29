@@ -61,6 +61,10 @@ jobs:
         env:
           CC_x86_64_unknown_linux_gnu: gcc-12
           CC_aarch64_unknown_linux_gnu: gcc-12
+          # Link with the same GCC that compiled numkong's objects, so libstdc++
+          # symbols match at link time.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: gcc-12
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: gcc-12
         run: cargo build --release --locked --features postgres-backend --target ${{ matrix.target }} -p hypatia
       - name: Package
         shell: bash
