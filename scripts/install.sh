@@ -33,6 +33,14 @@ detect_target() {
     if [ "$os" = Linux ] && ldd --version 2>&1 | grep -qi musl; then
         fail "the prebuilt Linux binaries need glibc, and this system uses musl; $FROM_SOURCE"
     fi
+    if [ "$os" = Linux ]; then
+        # Since v4.1.0 the prebuilt ONNX Runtime needs glibc 2.39 (Ubuntu 24.04 era).
+        # Older releases (<= v4.0.0) still run on glibc 2.35.
+        glibc=$(ldd --version 2>/dev/null | sed -n 's/.*ldd (GNU libc) \([0-9]*\.[0-9]*\).*/\1/p')
+        if [ -n "$glibc" ] && [ "$(printf '%s\n' 2.39 "$glibc" | sort -V | head -1)" != 2.39 ]; then
+            fail "the latest prebuilt Linux binaries need glibc 2.39 and this system has $glibc; install an older release instead, e.g. HYPATIA_VERSION=v4.0.0, or $FROM_SOURCE"
+        fi
+    fi
     case "$os/$arch" in
     Darwin/arm64)
         target=aarch64-apple-darwin
