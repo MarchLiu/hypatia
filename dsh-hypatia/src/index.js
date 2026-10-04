@@ -70,7 +70,16 @@ export function invokesTrustedBinary(command, binaries) {
   }
   const word = /^([^\s"']+)/.exec(rest)?.[1]
   if (!word) return false
-  return binaries.some((bin) => word === bin || word.endsWith(`/${bin}`))
+  // Accept Windows shapes too: an optional `.exe` suffix and backslash path
+  // separators (C:\Users\me\bin\hypatia.exe), as produced by the pwsh shell
+  // tool on Windows hosts.
+  return binaries.some((bin) =>
+    word === bin ||
+    word === `${bin}.exe` ||
+    word.endsWith(`/${bin}`) ||
+    word.endsWith(`/${bin}.exe`) ||
+    word.endsWith(`\\${bin}`) ||
+    word.endsWith(`\\${bin}.exe`))
 }
 
 /** True when the command contains shell composition outside single quotes
@@ -112,8 +121,11 @@ export function hasShellComposition(command) {
   return false
 }
 
-function isPureTrustedCall(exec, binaries) {
-  if (exec.name !== 'bash') return false
+export function isPureTrustedCall(exec, binaries) {
+  // Windows hosts run their shell tool as `pwsh` (or `powershell`) instead of
+  // `bash`. The command string gets the same conservative composition scan;
+  // only the tool name gate widens.
+  if (exec.name !== 'bash' && exec.name !== 'pwsh' && exec.name !== 'powershell') return false
   const command = exec.arguments?.command
   if (typeof command !== 'string') return false
   return invokesTrustedBinary(command, binaries) && !hasShellComposition(command)

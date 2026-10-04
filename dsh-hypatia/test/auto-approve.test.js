@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { hasShellComposition, invokesTrustedBinary } from '../src/index.js'
+import { hasShellComposition, invokesTrustedBinary, isPureTrustedCall } from '../src/index.js'
 
 const BINARIES = ['hypatia']
 
@@ -41,4 +41,30 @@ test('trusted binary matching is unchanged', () => {
   assert.equal(invokesTrustedBinary('HOME=/work hypatia query x', BINARIES), true)
   assert.equal(invokesTrustedBinary('evil query x', BINARIES), false)
   assert.equal(invokesTrustedBinary('evihypatia query x', BINARIES), false)
+})
+
+// Windows hosts: the DSH shell tool is `pwsh`; invocations there may carry an
+// optional `.exe` suffix and backslash-separated paths.
+test('Windows executable shapes match the trusted binary', () => {
+  assert.equal(invokesTrustedBinary('hypatia.exe query x', BINARIES), true)
+  assert.equal(invokesTrustedBinary(String.raw`C:\Users\me\bin\hypatia.exe query x`, BINARIES), true)
+  assert.equal(invokesTrustedBinary('C:/Users/me/bin/hypatia.exe query x', BINARIES), true)
+  assert.equal(invokesTrustedBinary('evilhypatia.exe query x', BINARIES), false)
+  assert.equal(invokesTrustedBinary('evil.exe query x', BINARIES), false)
+})
+
+test('pwsh and powershell tool calls qualify, other tools never do', () => {
+  const pwshCall = { name: 'pwsh', arguments: { command: 'hypatia knowledge-create x -d "y"' } }
+  const powershellCall = { name: 'powershell', arguments: { command: 'hypatia.exe knowledge-create x' } }
+  const bashCall = { name: 'bash', arguments: { command: 'hypatia query x' } }
+  const pythonCall = { name: 'python', arguments: { command: 'hypatia query x' } }
+  assert.equal(isPureTrustedCall(pwshCall, BINARIES), true)
+  assert.equal(isPureTrustedCall(powershellCall, BINARIES), true)
+  assert.equal(isPureTrustedCall(bashCall, BINARIES), true)
+  assert.equal(isPureTrustedCall(pythonCall, BINARIES), false)
+})
+
+test('pwsh composition still prompts (conservative gate unchanged)', () => {
+  const call = { name: 'pwsh', arguments: { command: 'hypatia query x; rm -rf /' } }
+  assert.equal(isPureTrustedCall(call, BINARIES), false)
 })
