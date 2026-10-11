@@ -223,7 +223,7 @@ impl EmbeddingProvider for OnnxProvider {
             .collect();
         let lens: Vec<usize> = encoded
             .iter()
-            .map(|e| e.as_ref().map_or(0, |(ids, _)| ids.len()))
+            .map(|e| e.as_ref().map_or(0, |(ids, _, _)| ids.len()))
             .collect();
         // Sorted by length, each forward pass pads as little as possible.
         let mut order: Vec<usize> = (0..texts.len()).filter(|&i| encoded[i].is_ok()).collect();
@@ -231,10 +231,12 @@ impl EmbeddingProvider for OnnxProvider {
         let mut vectors: Vec<Option<Result<Vec<f32>, HypatiaError>>> =
             (0..texts.len()).map(|_| None).collect();
         for chunk in token_budget_chunks(&order, &lens) {
-            let rows: Vec<(&[i64], &[i64])> = chunk
+            let rows: Vec<(&[i64], &[i64], &[i64])> = chunk
                 .iter()
                 .map(|&i| match &encoded[i] {
-                    Ok((ids, mask)) => (ids.as_slice(), mask.as_slice()),
+                    Ok((ids, mask, token_type_ids)) => {
+                        (ids.as_slice(), mask.as_slice(), token_type_ids.as_slice())
+                    }
                     Err(_) => unreachable!("only encoded texts are batched"),
                 })
                 .collect();
@@ -308,7 +310,7 @@ fn encode(
     tokenizer: &tokenizers::Tokenizer,
     text: &str,
     max_seq_length: usize,
-) -> Result<(Vec<i64>, Vec<i64>), HypatiaError> {
+) -> Result<(Vec<i64>, Vec<i64>, Vec<i64>), HypatiaError> {
     let encoding = tokenizer
         .encode(text, true)
         .map_err(|e| HypatiaError::Embedding(format!("tokenization failed: {e}")))?;
@@ -326,6 +328,10 @@ fn encode(
             .iter()
             .map(|&m| m as i64)
             .collect(),
+        encoding.get_type_ids()[..len]
+            .iter()
+            .map(|&m| m as i64)
+            .collect(),
     ))
 }
 
@@ -337,26 +343,34 @@ fn run_onnx_inference(
     max_seq_length: usize,
     pooling: PoolingStrategy,
 ) -> Result<Vec<f32>, HypatiaError> {
-    let (ids, mask) = encode(tokenizer, text, max_seq_length)?;
+    let (ids, mask, type_ids) = encode(tokenizer, text, max_seq_length)?;
     // A batch of one has no padding, so the pad id is never used.
-    Ok(run_onnx_batch(session, &[(&ids, &mask)], 0, pooling)?.remove(0))
+    Ok(run_onnx_batch(session, &[(&ids, &mask, &type_ids)], 0, pooling)?.remove(0))
 }
 
 /// One forward pass over right-padded rows. Padding is masked out of attention and pooling,
 /// so each row gets the vector it would get alone.
 fn run_onnx_batch(
     session: &mut Session,
-    rows: &[(&[i64], &[i64])],
+    rows: &[(&[i64], &[i64], &[i64])],
     pad_id: i64,
     pooling: PoolingStrategy,
 ) -> Result<Vec<Vec<f32>>, HypatiaError> {
-    let width = rows.iter().map(|(ids, _)| ids.len()).max().unwrap_or(0);
+    let width = rows.iter().map(|(ids, _, _)| ids.len()).max().unwrap_or(0);
     let mut input_ids_array = Array2::from_elem((rows.len(), width), pad_id);
     let mut attention_mask_array = Array2::<i64>::zeros((rows.len(), width));
-    for (r, (ids, mask)) in rows.iter().enumerate() {
-        for (c, (&id, &m)) in ids.iter().zip(mask.iter()).enumerate() {
+    let mut token_type_ids_array = Array2::<i64>::zeros((rows.len(), width));
+    for (r, (ids, mask, token_type_ids)) in rows.iter().enumerate() {
+        for (c, (&id, &m, &token_type_id)) in ids
+            .iter()
+            .zip(mask.iter())
+            .zip(token_type_ids.iter())
+            .map(|((id, mask), token_type_id)| (id, mask, token_type_id))
+            .enumerate()
+        {
             input_ids_array[[r, c]] = id;
             attention_mask_array[[r, c]] = m;
+            token_type_ids_array[[r, c]] = token_type_id;
         }
     }
 
@@ -367,11 +381,28 @@ fn run_onnx_batch(
         TensorRef::from_array_view(attention_mask_array.view()).map_err(|e| {
             HypatiaError::Embedding(format!("failed to create attention_mask tensor: {e}"))
         })?;
+    // BERT-family models such as BGE-small expect token_type_ids.
+    // For single-sequence embedding, every token belongs to segment 0.
+    let has_token_type_ids = session
+        .inputs()
+        .iter()
+        .any(|input| input.name() == "token_type_ids");
 
-    let outputs = session
-        .run(ort::inputs![input_ids_tensor, attention_mask_tensor])
-        .map_err(|e| HypatiaError::Embedding(format!("inference failed: {e}")))?;
+    let outputs = if has_token_type_ids {
+        let token_type_ids_tensor = TensorRef::from_array_view(token_type_ids_array.view())
+            .map_err(|e| {
+                HypatiaError::Embedding(format!("failed to create token_type_ids tensor: {e}"))
+            })?;
 
+        session.run(ort::inputs![
+            input_ids_tensor,
+            attention_mask_tensor,
+            token_type_ids_tensor
+        ])
+    } else {
+        session.run(ort::inputs![input_ids_tensor, attention_mask_tensor])
+    }
+    .map_err(|e| HypatiaError::Embedding(format!("inference failed: {e}")))?;
     // Prefer sentence_embedding (index 1) if available, else token_embeddings (index 0)
     let idx = if outputs.len() > 1 { 1 } else { 0 };
     let output = outputs[idx]
