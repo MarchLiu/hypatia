@@ -18,6 +18,7 @@ pub(super) const OPERATORS: &[&str] = &[
     "$similar",
     "$k-hop",
     "$not-summaried",
+    "$not-summarised",
     "$gte",
     "$lte",
     "$gt",

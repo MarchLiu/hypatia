@@ -69,7 +69,7 @@ fn refuse_non_filters(node: &AstNode) -> Result<()> {
     };
     if matches!(
         operator.as_str(),
-        "$knowledge" | "$statement" | "$not-summaried"
+        "$knowledge" | "$statement" | "$not-summarised"
     ) {
         return Err(HypatiaError::Eval(format!(
             "a filter is a condition, not a query: remove the {operator}"

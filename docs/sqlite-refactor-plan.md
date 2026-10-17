@@ -52,7 +52,7 @@ CREATE INDEX idx_stmt_tail     ON statement(tail);
 | `model/statement.rs` | `StatementKey` 三字段、`Statement` |
 | `storage/*` | `statement` 列名 + 索引名 + 全部 SQL（含 k-hop CTE） |
 | `engine/operators.rs` | `resolve_field` 的列名表；`$triple` 的 columns 数组 |
-| `engine/evaluator.rs` | `$k-hop`（`h.object=s.subject`→`h.tail=s.head`、`s.predicate`→`s.relation`）；`$not-summaried`（`predicate='summary'`→`relation='summary'`、`statement.object`→`statement.tail`） |
+| `engine/evaluator.rs` | `$k-hop`（`h.object=s.subject`→`h.tail=s.head`、`s.predicate`→`s.relation`）；`$not-summarised`（`predicate='summary'`→`relation='summary'`、`statement.object`→`statement.tail`） |
 | `service/statement.rs` | 字段引用 |
 | `cli/commands.rs` | `StatementCreate/Delete` 参数与输出 |
 | `model/content.rs` | `Synonyms::Positional` 的 key：`"head"/"relation"/"tail"` |
@@ -155,7 +155,7 @@ ORDER BY rank LIMIT ?3 OFFSET ?4;
 | `$k-hop` | 递归 CTE（HRT） | ✅ 列索引 |
 | `$search` | FTS5 | ✅ |
 | `$similar` | usearch | ✅ |
-| `$not-summaried` | anti-join + json_index tag 过滤 | ✅ |
+| `$not-summarised` | anti-join + json_index tag 过滤 | ✅ |
 | **`@>` 结构包含（本方案内实现）** | 倒排召回 + `json_contains(content,?)` UDF recheck | ✅ 召回+recheck |
 
 ### 3.3 `json_contains` UDF（因定稿 #4 而进入本方案范围）

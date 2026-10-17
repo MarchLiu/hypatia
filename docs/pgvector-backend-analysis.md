@@ -154,7 +154,7 @@ LIMIT $3 OFFSET $4;
 - `$contains`、`$has`：现有 membership 使用字符串 token，会模糊部分 JSON 类型；PG 的 JSONB 运算符有自身类型规则，不能直接假设相同。LIKE 的大小写、通配符和转义也要逐项测试。
 - `$json-contains`：优先利用 JSONB 包含查询，但当前 Rust `json_contains` 与 PG `@>` 并非所有边界都相同，例如数组包含标量。首期用对照用例决定兼容 SQL 或显式限制，不能依据代码注释宣称完全等价。
 - `Content.data` 是字符串，即使 `format=json` 也不是内嵌对象。PG JSONB 保存整个 Content 后，`data.foo` 仍需受控解析内部字符串，不能直接写成普通嵌套对象访问。可维护经验证的派生 JSONB payload，保持原始 data 字符串不变。
-- `$not-summaried` 的关联查询目前写在 evaluator，需一并纳入方言层或后端实现，不能只改通用 SqlBuilder。
+- `$not-summarised` 的关联查询目前写在 evaluator，需一并纳入方言层或后端实现，不能只改通用 SqlBuilder。
 - `$k-hop` 使用递归 CTE；SQLite 允许的 `GROUP BY triple` 加裸列选择不能直接用于 PG。用最小深度聚合后关联原表或窗口函数返回结果，保留关系过滤、去重和深度边界；对环路及高分支图设置上限或执行超时。
 
 此外，当前 JSE 的 `$similar` / `$search` 是先取候选 key，再做普通查询并按 `created_at DESC` 排序。这与“过滤后取相似度 top-k”并不相同，也不会天然保留距离排序。首期按既有 JSE 行为做兼容验收；若需要过滤下推、混合检索或距离排序，作为明确的查询语义升级单独设计，避免 PG 后端悄悄改变同一个表达式的含义。
@@ -253,7 +253,7 @@ PostgreSQL 导出可采用一致性事务下的版本化逻辑包：manifest、k
 
 - 不配置 storage 时，全套现有本地功能继续通过；未启用 PG feature 时不要求数据库服务。
 - 同一进程连接一个本地 shelf 和两个 PG schema，相同业务键不串数据。
-- CRUD、三元组及时间、JSON 类型边界、`$not-summaried`、含环 k-hop 使用共享用例验证。
+- CRUD、三元组及时间、JSON 类型边界、`$not-summarised`、含环 k-hop 使用共享用例验证。
 - 使用固定测试向量验证距离、维度和模型不匹配、空库、更新与删除；ANN 用召回指标及距离误差，不能要求近似结果集合始终完全相同。
 - 中文/英文全文检索对照召回与排序方向，排名差异明确记录。
 - 测试错误配置、缺环境变量、缺扩展、权限不足、连接超时、事务失败及并发更新时旧向量不得重新生效。
