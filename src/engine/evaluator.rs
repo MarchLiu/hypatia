@@ -24,7 +24,8 @@ impl Evaluator {
                 match operator.as_str() {
                     "$knowledge" => Self::eval_query(QueryTarget::Knowledge, operands, metadata, store),
                     "$statement" => Self::eval_query(QueryTarget::Statement, operands, metadata, store),
-                    "$not-summarised" => Self::eval_not_summarised(operands, metadata, store),
+                    // keep $not-summaried for backward compatibility
+                    "$not-summaried" | "$not-summarised" => Self::eval_not_summarised(operands, metadata, store),
                         _ => Err(HypatiaError::Eval(format!(
                             "top-level operator must be $knowledge, $statement, or $not-summarised, got {operator}"
                         ))),

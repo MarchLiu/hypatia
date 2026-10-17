@@ -453,7 +453,8 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
     };
     let mut c = compiler(target, store)?;
     let mut conditions = Vec::new();
-    let not_summarised = operator == "$not-summarised";
+    // keep $not-summaried for backward compatibility
+    let not_summarised = operator == "$not-summarised" || operator == "$not-summaried";
     let rest = if not_summarised {
         let tag = operands
             .first()
