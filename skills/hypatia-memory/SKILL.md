@@ -249,10 +249,10 @@ After writing each new message, run the cascade from level 1 upward.
 
 #### 4a. Check unsummarized items at level L
 
-Use `$not-summaried` (native JSE operator with LEFT JOIN):
+Use `$not-summarised` (native JSE operator with LEFT JOIN):
 
 ```bash
-hypatia query '["$not-summaried", "<TAG>", ["$contains", "scopes", "<PROJECT>"]]'
+hypatia query '["$not-summarised", "<TAG>", ["$contains", "scopes", "<PROJECT>"]]'
 ```
 
 Or use the shorthand:
@@ -316,14 +316,14 @@ When submitting a conversation to the AI API, construct the messages list as:
 **Uncompressed messages:** The current set of messages that have not been summarized. Query with:
 
 ```bash
-hypatia query '["$not-summaried", "message", ["$contains", "scopes", "<PROJECT>"]]'
+hypatia query '["$not-summarised", "message", ["$contains", "scopes", "<PROJECT>"]]'
 ```
 
 **Reference info:** Analyze the user's latest input — do NOT use it verbatim as a search query. Instead:
 
 1. Identify key entities, concepts, and topics from the user's input.
 2. Construct 1-3 JSE queries targeting these topics. Example strategies:
-   - Search for related past messages: `["$not-summaried", "message", ["$contains", "scopes", "<PROJECT>"]]` + filter in reasoning
+   - Search for related past messages: `["$not-summarised", "message", ["$contains", "scopes", "<PROJECT>"]]` + filter in reasoning
    - Full-text search: `["$knowledge", ["$search", "<derived keywords>"]]`
    - Vector similarity: `["$knowledge", ["$similar", "<conceptual query>"]]`
    - Distilled knowledge by meaning, without the session log (`message`, `summary`, `session`) crowding it out: `hypatia similar "<conceptual query>" -t knowledge --exclude-tags message,summary,session --limit 5`

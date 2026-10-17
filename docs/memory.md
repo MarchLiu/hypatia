@@ -7,11 +7,11 @@ Agent memory in Hypatia has two layers (see `skills/hypatia-memory/SKILL.md`):
 1. Every user and assistant message is stored as one `knowledge` entry, tag `message`. Name is auto-generated: `msg-<session>-<turn>`.
 2. When a session summary is available (compaction, end-of-session digest), store it as `knowledge` with tag `session`.
 3. Messages in a session link to the session: `message belongTo session`.
-4. After each new message, check unsummarized messages using `$not-summaried` or `session-current`. Summary trigger conditions:
+4. After each new message, check unsummarised messages using `$not-summarised` or `session-current`. Summary trigger conditions:
    - **Level 1:** When accumulated token count reaches `max_tokens × 0.9` (estimated as `chars/4`; depon model: GLM-5.1=200k, DeepSeek V4 Pro=1M).
    - **Level 2+:** When 16 unlinked items accumulate at the previous level.
    - **Emergency:** When context tokens reach `settings.max_token × 0.9` → force compression + new session.
-5. Summaries use relation `summary` (not `summarizes`). Tags: `["summary", "summary 1"]`, `["summary", "summary 2"]`, etc.
+5. Summaries use relation `summary` (not `summarises`). Tags: `["summary", "summary 1"]`, `["summary", "summary 2"]`, etc.
 6. Summaries have meaningful names extracted from their content.
 7. Batch order is **FIFO** (oldest unlinked items first).
 
@@ -48,4 +48,4 @@ Agent memory in Hypatia has two layers (see `skills/hypatia-memory/SKILL.md`):
 | Command | Purpose |
 |---------|---------|
 | `hypatia session-current --scope <project>` | Get unsummarized messages for a scope |
-| `hypatia query '["$not-summaried", "<tag>", ["$contains", "scopes", "<p>"]]'` | Find unlinked items at any summary level |
+| `hypatia query '["$not-summarised", "<tag>", ["$contains", "scopes", "<p>"]]'` | Find unlinked items at any summary level |

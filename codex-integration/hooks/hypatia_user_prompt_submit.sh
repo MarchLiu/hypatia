@@ -57,8 +57,8 @@ if [ $((turns % 5)) -eq 0 ]; then
   triggers="$triggers, TRIGGER:extract"
 fi
 
-unsummarized="$(hyp query "[\"\$not-summaried\", \"message\", [\"\$contains\", \"scopes\", \"$project\"]]" 2>/dev/null | jq -r 'length' 2>/dev/null)"
-if [ "${unsummarized:-0}" -ge 16 ] 2>/dev/null; then
+unsummarised="$(hyp query "[\"\$not-summarised\", \"message\", [\"\$contains\", \"scopes\", \"$project\"]]" 2>/dev/null | jq -r 'length' 2>/dev/null)"
+if [ "${unsummarised:-0}" -ge 16 ] 2>/dev/null; then
   triggers="$triggers, TRIGGER:summary"
 fi
 
@@ -75,7 +75,7 @@ Signals: $triggers
 If TRIGGER:log — a message entry was already stored; no action needed.
 If TRIGGER:immediate — the user explicitly asked to remember/forget: use the hypatia skill to complete the memory operation.
 If TRIGGER:extract — every 5 turns: follow the hypatia-memory skill's Semantic Extraction Protocol for the last completed work unit.
-If TRIGGER:summary — too many unsummarized messages: follow the summary cascade (level 2+) for scope \"$project\"."
+If TRIGGER:summary — too many unsummarised messages: follow the summary cascade (level 2+) for scope \"$project\"."
 
 if [ -n "$recall" ]; then
   context="$context

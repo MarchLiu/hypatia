@@ -24,9 +24,9 @@ impl Evaluator {
                 match operator.as_str() {
                     "$knowledge" => Self::eval_query(QueryTarget::Knowledge, operands, metadata, store),
                     "$statement" => Self::eval_query(QueryTarget::Statement, operands, metadata, store),
-                    "$not-summaried" => Self::eval_not_summaried(operands, metadata, store),
+                    "$not-summarised" => Self::eval_not_summarised(operands, metadata, store),
                         _ => Err(HypatiaError::Eval(format!(
-                            "top-level operator must be $knowledge, $statement, or $not-summaried, got {operator}"
+                            "top-level operator must be $knowledge, $statement, or $not-summarised, got {operator}"
                         ))),
                     }
                 }
@@ -34,7 +34,7 @@ impl Evaluator {
                     Err(HypatiaError::Eval("quoted expression is not a valid query".to_string()))
                 }
                 _ => Err(HypatiaError::Eval(
-                    "top-level expression must be an operator ($knowledge, $statement, or $not-summaried)".to_string(),
+                    "top-level expression must be an operator ($knowledge, $statement, or $not-summarised)".to_string(),
                 )),
         }
     }
@@ -131,7 +131,7 @@ impl Evaluator {
         store.execute_query(target, &sql, params)
     }
 
-    fn eval_not_summaried(
+    fn eval_not_summarised(
         operands: &[AstNode],
         metadata: &serde_json::Map<String, serde_json::Value>,
         store: &dyn Storage,
@@ -140,7 +140,7 @@ impl Evaluator {
 
         if operands.is_empty() {
             return Err(HypatiaError::Eval(
-                "$not-summaried expects at least a tag argument (e.g. \"message\", \"summary-l1\")"
+                "$not-summarised expects at least a tag argument (e.g. \"message\", \"summary-l1\")"
                     .to_string(),
             ));
         }
@@ -150,7 +150,7 @@ impl Evaluator {
             AstNode::Symbol(s) => s.clone(),
             _ => {
                 return Err(HypatiaError::Eval(
-                    "$not-summaried first argument must be a tag string".to_string(),
+                    "$not-summarised first argument must be a tag string".to_string(),
                 ));
             }
         };
@@ -209,7 +209,7 @@ impl Evaluator {
                 }
                 OperatorResult::KHop { .. } => {
                     return Err(HypatiaError::Eval(
-                        "$k-hop is not valid inside $not-summaried".to_string(),
+                        "$k-hop is not valid inside $not-summarised".to_string(),
                     ));
                 }
                 OperatorResult::Value(_) => return Err(not_a_condition(operand)),
@@ -349,7 +349,7 @@ pub(super) fn dropped_filter_cases() -> Vec<(serde_json::Value, &'static str)> {
         (json!(["$knowledge", ["$quote", "stray"]]), NOT_A_CONDITION),
         (json!(["$statement", 42]), NOT_A_CONDITION),
         (
-            json!(["$not-summaried", "message", "stray"]),
+            json!(["$not-summarised", "message", "stray"]),
             NOT_A_CONDITION,
         ),
         // A nested query operator answered 1=1/TRUE and dropped every
@@ -395,7 +395,7 @@ pub(super) fn dropped_filter_cases() -> Vec<(serde_json::Value, &'static str)> {
             ONE_QUERY,
         ),
         (
-            json!(["$not-summaried", "message", ["$search", "rust", "async"]]),
+            json!(["$not-summarised", "message", ["$search", "rust", "async"]]),
             ONE_QUERY,
         ),
     ]
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_not_summaried_basic() {
+    fn eval_not_summarised_basic() {
         let mut row = serde_json::Map::new();
         row.insert("name".to_string(), json!("msg-s1-001"));
         row.insert(
@@ -679,13 +679,13 @@ mod tests {
         row.insert("created_at".to_string(), json!("2026-01-01 00:00:00"));
 
         let mock = MockStorage::new(vec![row]);
-        let result = Evaluator::execute(&json!(["$not-summaried", "message"]), &mock).unwrap();
+        let result = Evaluator::execute(&json!(["$not-summarised", "message"]), &mock).unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["name"], json!("msg-s1-001"));
     }
 
     #[test]
-    fn eval_not_summaried_with_condition() {
+    fn eval_not_summarised_with_condition() {
         let mut row = serde_json::Map::new();
         row.insert("name".to_string(), json!("msg-s1-001"));
         row.insert(
@@ -697,7 +697,7 @@ mod tests {
         let mock = MockStorage::new(vec![row]);
         let result = Evaluator::execute(
             &json!([
-                "$not-summaried",
+                "$not-summarised",
                 "message",
                 ["$contains", "scopes", "my-project"]
             ]),
@@ -708,9 +708,9 @@ mod tests {
     }
 
     #[test]
-    fn eval_not_summaried_empty_operands() {
+    fn eval_not_summarised_empty_operands() {
         let mock = MockStorage::new(vec![]);
-        let result = Evaluator::execute(&json!(["$not-summaried"]), &mock);
+        let result = Evaluator::execute(&json!(["$not-summarised"]), &mock);
         assert!(result.is_err());
         assert!(
             result
@@ -721,9 +721,9 @@ mod tests {
     }
 
     #[test]
-    fn eval_not_summaried_bad_tag() {
+    fn eval_not_summarised_bad_tag() {
         let mock = MockStorage::new(vec![]);
-        let result = Evaluator::execute(&json!(["$not-summaried", 123]), &mock);
+        let result = Evaluator::execute(&json!(["$not-summarised", 123]), &mock);
         assert!(result.is_err());
         assert!(
             result
@@ -734,7 +734,7 @@ mod tests {
     }
 
     /// Build the SQL fragment an operator emits under a qualifying context,
-    /// the way `$not-summaried` splices it into its join.
+    /// the way `$not-summarised` splices it into its join.
     fn qualified_fragment(jse: serde_json::Value) -> (String, Vec<serde_json::Value>) {
         let ast = crate::engine::parser::Parser::parse(&jse).expect("parse");
         let ctx = OpContext::for_target(QueryTarget::Knowledge).qualified();
@@ -813,7 +813,7 @@ mod tests {
     /// Regression: the old textual rewrite only knew the string
     /// `"json_extract(content,"`, so `$json-contains` — which builds
     /// `json_contains(content, ?)` — kept a bare `content` and failed with
-    /// "ambiguous column name" inside the `$not-summaried` join.
+    /// "ambiguous column name" inside the `$not-summarised` join.
     #[test]
     fn qualified_context_qualifies_json_contains_recheck() {
         let (fragment, _) = qualified_fragment(json!(["$json-contains", {"tags": ["rust"]}]));
@@ -897,10 +897,10 @@ mod tests {
     }
 
     #[test]
-    fn not_summaried_rejects_injected_field_name() {
+    fn not_summarised_rejects_injected_field_name() {
         let mock = MockStorage::new(vec![]);
         let result = Evaluator::execute(
-            &json!(["$not-summaried", "message", ["$eq", "$a') OR 1=1 --", "x"]]),
+            &json!(["$not-summarised", "message", ["$eq", "$a') OR 1=1 --", "x"]]),
             &mock,
         );
         let err = result.expect_err("injected field name must be rejected");

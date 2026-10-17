@@ -348,7 +348,7 @@ impl Compiler<'_> {
         &mut self,
         node: &AstNode,
         metadata: &Map<String, Value>,
-        not_summaried: bool,
+        not_summarised: bool,
     ) -> Result<String> {
         let AstNode::Operator {
             operator, operands, ..
@@ -381,7 +381,7 @@ impl Compiler<'_> {
                 }
             }
             "$k-hop" => {
-                if not_summaried || self.target != QueryTarget::Statement {
+                if not_summarised || self.target != QueryTarget::Statement {
                     return Err(HypatiaError::Eval(
                         "$k-hop is only valid inside $statement".into(),
                     ));
@@ -443,7 +443,7 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
         ));
     };
     let target = match operator.as_str() {
-        "$knowledge" | "$not-summaried" => QueryTarget::Knowledge,
+        "$knowledge" | "$not-summarised" => QueryTarget::Knowledge,
         "$statement" => QueryTarget::Statement,
         _ => {
             return Err(HypatiaError::Eval(format!(
@@ -453,11 +453,11 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
     };
     let mut c = compiler(target, store)?;
     let mut conditions = Vec::new();
-    let not_summaried = operator == "$not-summaried";
-    let rest = if not_summaried {
+    let not_summarised = operator == "$not-summarised";
+    let rest = if not_summarised {
         let tag = operands
             .first()
-            .ok_or_else(|| HypatiaError::Eval("$not-summaried expects a tag argument".into()))?;
+            .ok_or_else(|| HypatiaError::Eval("$not-summarised expects a tag argument".into()))?;
         conditions.push(c.membership("tags", &symbol(tag)?));
         conditions.push(format!(
             "NOT EXISTS (SELECT 1 FROM {} AS s WHERE s.tail = q.name AND s.relation = 'summary')",
@@ -468,7 +468,7 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
         operands.as_slice()
     };
     for n in rest {
-        conditions.push(c.operand(n, metadata, not_summaried)?);
+        conditions.push(c.operand(n, metadata, not_summarised)?);
     }
     let select = match target {
         QueryTarget::Knowledge => "q.name, q.content, q.created_at",
@@ -480,7 +480,7 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
     if !conditions.is_empty() {
         sql.push_str(&format!(" WHERE {}", conditions.join(" AND ")));
     }
-    sql.push_str(if not_summaried {
+    sql.push_str(if not_summarised {
         " ORDER BY q.created_at ASC"
     } else {
         " ORDER BY q.created_at DESC"
@@ -787,11 +787,11 @@ mod tests {
     }
 
     #[test]
-    fn not_summaried_qualifies_both_tables_and_keeps_binding_order() {
+    fn not_summarised_qualifies_both_tables_and_keeps_binding_order() {
         let store = RecordingStore::default();
         Evaluator::execute(
             &json!([
-                "$not-summaried",
+                "$not-summarised",
                 "message",
                 ["$eq", "format", "text"],
                 ["$has", "tags", "rust"]
@@ -1093,7 +1093,7 @@ mod tests {
                 vec![],
             ),
             (
-                json!(["$not-summaried", "message", ["$has", "tags", null]]),
+                json!(["$not-summarised", "message", ["$has", "tags", null]]),
                 vec!["invalid", "null", "numeric_text"],
             ),
         ] {
