@@ -116,10 +116,13 @@ fn default_shelf_dir() -> std::path::PathBuf {
 
 fn setup_model_files(shelf_path: &std::path::Path) -> bool {
     let src_dir = default_shelf_dir();
-    let model_src = src_dir.join("embedding_model.onnx");
-    let tokenizer_src = src_dir.join("tokenizer.json");
+    let shelf_manager = ShelfManager::with_home(src_dir).expect("create shelf manager");
+    let default_shelf: &hypatia::storage::OpenShelf = shelf_manager.get("default").expect("get default shelf");
+    let model_src = default_shelf.settings.embedding.local.model_path.clone();
+    let model_src_parent = model_src.parent().unwrap_or_default().to_path_buf();
+    let tokenizer_src = default_shelf.settings.embedding.local.tokenizer_path.clone();
 
-    if !model_src.exists() || !tokenizer_src.exists() {
+    if !default_shelf.settings.embedding.local_files_exist() {
         return false;
     }
 
@@ -143,10 +146,10 @@ fn setup_model_files(shelf_path: &std::path::Path) -> bool {
 
     // Handle external data files
     for candidate in [
-        src_dir.join("model.onnx_data"),
-        src_dir.join("model_quantized.onnx_data"),
-        src_dir.join("embedding_model.onnx_data"),
-        src_dir.join("embedding_model.onnx.data"),
+        model_src_parent.join("model.onnx_data"),
+        model_src_parent.join("model_quantized.onnx_data"),
+        model_src_parent.join("embedding_model.onnx_data"),
+        model_src_parent.join("embedding_model.onnx.data"),
     ] {
         if candidate.exists() {
             let dest_name = candidate.file_name().unwrap().to_string_lossy().to_string();
