@@ -114,17 +114,37 @@ fn default_shelf_dir() -> std::path::PathBuf {
         .join("default")
 }
 
+fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        
+        let src_path = entry.path();
+        let dst_path = dst.as_ref().join(entry.file_name());
+
+        if file_type.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 fn setup_model_files(shelf_path: &std::path::Path) -> bool {
     let src_dir = default_shelf_dir();
-    let shelf_manager = ShelfManager::with_home(src_dir).expect("create shelf manager");
+    let hypatia_home_dir = src_dir.parent().unwrap_or(&std::path::Path::new("")).to_path_buf();
+    let home_dir = hypatia_home_dir.parent().unwrap_or(&std::path::Path::new("")).to_path_buf();
+    let shelf_manager = ShelfManager::with_home(home_dir).expect("create shelf manager");
     let default_shelf: &hypatia::storage::OpenShelf = shelf_manager.get("default").expect("get default shelf");
-    let model_src = default_shelf.settings.embedding.local.model_path.clone();
-    let model_src_parent = model_src.parent().unwrap_or_default().to_path_buf();
-    let tokenizer_src = default_shelf.settings.embedding.local.tokenizer_path.clone();
-
-    if !default_shelf.settings.embedding.local_files_exist() {
+    if ! default_shelf.settings.embedding.local_files_exist() {
         return false;
     }
+    let model_src = default_shelf.settings.embedding.local.model_path.clone();
+    let model_src_parent = model_src.parent().unwrap_or(&std::path::Path::new("")).to_path_buf();
+    let model_inventory_dir = hypatia_home_dir.join("models");
+    let tokenizer_src = default_shelf.settings.embedding.local.tokenizer_path.clone();
 
     if std::fs::create_dir_all(shelf_path).is_err() {
         return false;
@@ -132,6 +152,7 @@ fn setup_model_files(shelf_path: &std::path::Path) -> bool {
 
     let model_dest = shelf_path.join("embedding_model.onnx");
     let tokenizer_dest = shelf_path.join("tokenizer.json");
+    let model_inventory_dest = shelf_path.parent().unwrap().join("models");
 
     if std::os::unix::fs::symlink(&model_src, &model_dest).is_err() {
         if std::fs::copy(&model_src, &model_dest).is_err() {
@@ -140,6 +161,12 @@ fn setup_model_files(shelf_path: &std::path::Path) -> bool {
     }
     if std::os::unix::fs::symlink(&tokenizer_src, &tokenizer_dest).is_err() {
         if std::fs::copy(&tokenizer_src, &tokenizer_dest).is_err() {
+            return false;
+        }
+    }
+
+    if std::os::unix::fs::symlink(&model_inventory_dir, &model_inventory_dest).is_err() {
+        if copy_dir_all(&model_inventory_dir, &model_inventory_dest).is_err() {
             return false;
         }
     }
@@ -173,7 +200,7 @@ fn setup_model_files(shelf_path: &std::path::Path) -> bool {
         }
     }
 
-    shelf_path.join("embedding_model.onnx").exists() && shelf_path.join("tokenizer.json").exists()
+    model_dest.exists() && tokenizer_dest.exists()
 }
 
 // ── Result record ───────────────────────────────────────────────────
