@@ -62,7 +62,7 @@ impl OpContext {
     }
 
     /// Same target, but emitting `table.`-qualified column references for
-    /// splicing into a join (see `$not-summaried`). Qualifying here, at
+    /// splicing into a join (see `$not-summarised`). Qualifying here, at
     /// construction time, is what keeps the caller from having to rewrite
     /// finished SQL by textual substitution.
     pub fn qualified(self) -> Self {

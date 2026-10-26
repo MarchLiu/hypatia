@@ -905,7 +905,7 @@ fn print_result(result: &QueryResult) {
 /// that no summary covers yet.
 pub(super) fn session_current_query(scope: Option<&str>) -> serde_json::Value {
     serde_json::json!([
-        "$not-summaried",
+        "$not-summarised",
         "message",
         ["$contains", "scopes", scope.unwrap_or("")]
     ])

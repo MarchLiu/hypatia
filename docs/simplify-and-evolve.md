@@ -20,7 +20,7 @@ DuckDB 对此几乎没有答案：单写者模型，且跨进程共享一个库�
 
 ## 指令集稳定之后，迁移成为可能
 
-经过若干版本的迭代，hypatia 的知识图谱结构初步稳定：knowledge 与 statement（现已更名为 head/relation/tail 三元组）构成了图，content 承载格式化数据，JSE 指令集固定在二十个算子上——$knowledge、$statement、$triple、$k-hop、$search、$similar、$contains、$content、$gt/$lt 系、$like、$not-summaried……这套指令集就是 hypatia 与存储层之间的契约。
+经过若干版本的迭代，hypatia 的知识图谱结构初步稳定：knowledge 与 statement（现已更名为 head/relation/tail 三元组）构成了图，content 承载格式化数据，JSE 指令集固定在二十个算子上——$knowledge、$statement、$triple、$k-hop、$search、$similar、$contains、$content、$gt/$lt 系、$like、$not-summarised……这套指令集就是 hypatia 与存储层之间的契约。
 
 第一个版本的指令实现，是我基于对 PostgreSQL 和 DuckDB 的知识积累手工执行的。我知道 PG 的 jsonb `@>` 应该是什么语义，于是用 `json_extract_string(content, '$.tags') LIKE '%value%'` 在 duckdb 里近似它——语义上是子串误匹配，性能上是无索引全表扫。这些妥协在当年是合理的起步，但它们也让实现与语义长期纠缠在一起。
 
@@ -43,7 +43,7 @@ CREATE TABLE json_index (
 
 写入时遍历 content：顶层字段各自成路径，数组的每个元素携带下标入表（`tags` 下的 `"rust"` 就是一行），`format` 这类标量即路径即值，标量统一以规范字符串入表——查询侧用同一转换，精确命中才有依据。三处刻意的设计：其一，`data` 自由文本不入倒排，它属于 FTS 与 JSON1 的子串世界；其二，`format` 为 json 时把 data 字符串再解析一层，子键以 `data.mime_type` 这样的路径入表——这是当初设计 jsonb 式访问能力时许下的承诺，归档条目的元数据从此可以精确命中；其三，嵌套超过一层的容器整块存为不透明叶子（kind 加原始 JSON），不递归展开，避免路径爆炸。维护是写入事务的一部分：替换文档时先清旧 posting 再插新行；对迁移而来的旧库，打开时发现倒排为空而数据非空，会自动重建一遍。
 
-查询侧按算子分派。`$has` 与 `$content` 翻译成 `(path, value)` 的相关 EXISTS，纯索引命中；`$eq` 同理，`$ne` 保留 JSON1；`$gt`/`$lt` 这类范围比较走 `CAST(json_extract(...) AS REAL)` 的数值化路径——顺手修复了旧实现里 `"9" > "18"` 的字符串比较错误；`$not-summaried` 的标签过滤也从 LIKE 子串升级为精确成员。真正的新能力是 `$json-contains`——结构包含分两段走：先从右侧 JSON 提取叶子路径做倒排召回，再由一个 Rust 实现的 `json_contains` UDF 对候选做精确校验。这便是 GIN 的"召回 + recheck"两段式，语义基准取自 jq 的 `contains()`，仅在字符串语义上向 PG 对齐（要求全等而非子串）。
+查询侧按算子分派。`$has` 与 `$content` 翻译成 `(path, value)` 的相关 EXISTS，纯索引命中；`$eq` 同理，`$ne` 保留 JSON1；`$gt`/`$lt` 这类范围比较走 `CAST(json_extract(...) AS REAL)` 的数值化路径——顺手修复了旧实现里 `"9" > "18"` 的字符串比较错误；`$not-summarised` 的标签过滤也从 LIKE 子串升级为精确成员。真正的新能力是 `$json-contains`——结构包含分两段走：先从右侧 JSON 提取叶子路径做倒排召回，再由一个 Rust 实现的 `json_contains` UDF 对候选做精确校验。这便是 GIN 的"召回 + recheck"两段式，语义基准取自 jq 的 `contains()`，仅在字符串语义上向 PG 对齐（要求全等而非子串）。
 
 调试中还收获了一个 SQLite 查询规划器的怪癖：召回与 recheck 同为 WHERE 的合取时，若 UDF 子句在前，相关 EXISTS 会被错误求值返回空集——把召回放在前面就恢复正常。这一插曲连同两段式本身，都写进了回归测试。
 
