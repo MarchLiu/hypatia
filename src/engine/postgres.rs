@@ -443,7 +443,7 @@ pub(super) fn execute(ast: &AstNode, store: &dyn Storage) -> Result<QueryResult>
         ));
     };
     let target = match operator.as_str() {
-        "$knowledge" | "$not-summarised" => QueryTarget::Knowledge,
+        "$knowledge" | "$not-summarised" | "$not-summaried" => QueryTarget::Knowledge,
         "$statement" => QueryTarget::Statement,
         _ => {
             return Err(HypatiaError::Eval(format!(
@@ -817,6 +817,35 @@ mod tests {
                 json!(0)
             ]
         );
+    }
+
+    /// Regression for the rename in `72516dd`: `02254b8` restored the
+    /// `$not-summaried` alias in the SQLite dispatch, in the parser whitelist,
+    /// and in the flag this compiler reads — but not in the top-level `target`
+    /// match, so on the Postgres path the legacy spelling was rejected by the
+    /// `_ =>` arm before the flag could ever run. Both spellings are one query.
+    #[test]
+    fn the_legacy_not_summaried_spelling_still_compiles_on_the_postgres_path() {
+        let legacy = RecordingStore::default();
+        Evaluator::execute(&json!(["$not-summaried", "message"]), &legacy)
+            .expect("the alias kept for backward compatibility must stay accepted");
+        let current = RecordingStore::default();
+        Evaluator::execute(&json!(["$not-summarised", "message"]), &current).unwrap();
+
+        let legacy_query = legacy.query.borrow();
+        let current_query = current.query.borrow();
+        assert!(
+            legacy_query
+                .0
+                .contains("NOT EXISTS (SELECT 1 FROM \"shelf\"\"quoted\".\"statement\" AS s"),
+            "{}",
+            legacy_query.0
+        );
+        assert_eq!(
+            legacy_query.0, current_query.0,
+            "the two spellings must compile to the same SELECT"
+        );
+        assert_eq!(legacy_query.1, current_query.1);
     }
 
     #[test]
