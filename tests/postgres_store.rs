@@ -910,3 +910,81 @@ fn missing_extension_and_permission_errors() {
         &test_connection(None, Some(&resources.role), None),
     );
 }
+
+/// Regression for issue #44: the rename in `72516dd` was aliased back in three
+/// places but not in the Postgres compiler's top-level `target` match, so on a
+/// pgvector shelf the legacy `$not-summaried` spelling was rejected before the
+/// compatibility flag could run. This opens a real pg-backed shelf and drives
+/// both spellings through `Evaluator::execute` — the same dispatch the CLI and
+/// the MCP `query` tool share — and pins the two result sets together.
+#[test]
+#[ignore = "requires a disposable PostgreSQL database with pgvector"]
+fn legacy_not_summaried_alias_executes_on_the_postgres_path() {
+    std::env::var("HYPATIA_TEST_POSTGRES_URL").expect("HYPATIA_TEST_POSTGRES_URL required");
+    let dir = tempfile::TempDir::new().unwrap();
+    let schema = format!(
+        "alias_{}_{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    std::fs::write(
+        dir.path().join("shelf.toml"),
+        format!(
+            "[storage]\nbackend='pgvector'\n[storage.postgres]\nurl_env='HYPATIA_TEST_POSTGRES_URL'\nschema='{schema}'\n[embedding]\nprovider='remote'\napi_model='pg-store-test'\ndimensions=3\n"
+        ),
+    )
+    .unwrap();
+    let shelf = hypatia::storage::OpenShelf::open(dir.path(), None).unwrap();
+    shelf
+        .backend
+        .insert_knowledge(
+            "already-summaried",
+            &Content::new("has a summary statement").with_tags(vec!["message".into()]),
+        )
+        .unwrap();
+    shelf
+        .backend
+        .insert_knowledge(
+            "pending-summary",
+            &Content::new("tagged but never summaried").with_tags(vec!["message".into()]),
+        )
+        .unwrap();
+    shelf
+        .backend
+        .insert_statement(
+            &StatementKey::new("agent", "summary", "already-summaried"),
+            &Content::new("summary of already-summaried"),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let keys = |result: &hypatia::model::QueryResult| -> Vec<String> {
+        let mut keys: Vec<String> = result
+            .rows
+            .iter()
+            .filter_map(|row| row.get("name").and_then(|v| v.as_str()))
+            .map(str::to_owned)
+            .collect();
+        keys.sort();
+        keys
+    };
+
+    let legacy = hypatia::engine::Evaluator::execute(
+        &json!(["$not-summaried", "message"]),
+        &shelf,
+    )
+    .expect("the alias kept for backward compatibility must stay accepted on the postgres path");
+    let current =
+        hypatia::engine::Evaluator::execute(&json!(["$not-summarised", "message"]), &shelf)
+            .unwrap();
+
+    assert_eq!(keys(&legacy), vec!["pending-summary".to_owned()]);
+    assert_eq!(keys(&legacy), keys(&current));
+
+    if let Ok(url) = std::env::var("HYPATIA_TEST_POSTGRES_URL") {
+        if let Ok(mut c) = Client::connect(&url, NoTls) {
+            let _ = c.batch_execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"));
+        }
+    }
+}
