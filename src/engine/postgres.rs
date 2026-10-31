@@ -229,14 +229,24 @@ impl Compiler<'_> {
                         Value::Bool(b) => Value::String(if b { "1" } else { "0" }.into()),
                         other => Value::String(other.to_string()),
                     };
-                    let p = self.bind(value, "text");
-                    if matches!(
-                        field.trim_start_matches('$'),
-                        "created_at" | "tr_start" | "tr_end"
-                    ) {
-                        format!("{p}::timestamp")
+                    let field_name = field.trim_start_matches('$');
+                    if matches!(field_name, "created_at" | "tr_start" | "tr_end") {
+                        // Time columns share the validation and normalization
+                        // with the SQLite path (issue #48): the same literals
+                        // are accepted on both backends, date words like
+                        // 'today' are a validation error instead of a silent
+                        // pg-only feature, and the bound value is canonical.
+                        if let Some(normalized) =
+                            super::timecmp::normalize_time_value(field_name, &value)?
+                        {
+                            let p = self.bind(Value::String(normalized), "text");
+                            format!("{p}::timestamp")
+                        } else {
+                            let p = self.bind(value, "text");
+                            format!("{p}::timestamp")
+                        }
                     } else {
-                        p
+                        self.bind(value, "text")
                     }
                 };
                 Ok(format!("{lhs} {op} {rhs}"))
@@ -851,13 +861,13 @@ mod tests {
     #[test]
     fn exact_integer_equality_and_candidate_pagination() {
         let store = RecordingStore::default();
-        Evaluator::execute(&json!({"$statement":[["$triple","a,b","r","c"],["$gte","tr_start","2025-01-01"],["$eq","data.id",9007199254740993u64],["$search","none"]],"limit":-1,"offset":-2}),&store).unwrap();
+        Evaluator::execute(&json!({"$statement":[["$triple","a,b","r","c"],["$gte","tr_start","2025-01-01 00:00:00"],["$eq","data.id",9007199254740993u64],["$search","none"]],"limit":-1,"offset":-2}),&store).unwrap();
         let q = store.query.borrow();
         assert_eq!(
             q.1,
             vec![
                 json!("\"a,b\",r,c"),
-                json!("2025-01-01"),
+                json!("2025-01-01 00:00:00.000"),
                 json!("id"),
                 json!("9007199254740993"),
                 json!(-1),

@@ -564,6 +564,23 @@ fn comparison_op(
         let field = expect_symbol(&operands[0])?;
         let value = expect_literal(&operands[1])?;
         let mut resolved = resolve_field(ctx, &field)?;
+        // Time columns compare on the timeline, not as text (issue #48): both
+        // sides are normalized to the canonical UTC millisecond format, so an
+        // ISO `T`-separated bound value matches the space-separated stored
+        // shape. Malformed literals are rejected before they reach SQL.
+        if crate::engine::timecmp::is_time_column(&field) {
+            if let Some(normalized) =
+                crate::engine::timecmp::normalize_time_value(&field, &value)?
+            {
+                return Ok(OperatorResult::SqlCondition {
+                    fragment: format!(
+                        "strftime('%Y-%m-%d %H:%M:%f', {}) {op} ?",
+                        resolved.fragment
+                    ),
+                    params: resolved.with_values([serde_json::Value::String(normalized)]),
+                });
+            }
+        }
         // Ordering on JSON scalars compares numerically (plan decision #3):
         // json_extract returns JSON numbers already, but CAST makes intent
         // explicit; a numeric bound param keeps the comparison typed.

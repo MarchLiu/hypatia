@@ -5,6 +5,7 @@ pub mod operators;
 pub mod parser;
 pub mod postgres;
 pub mod sql_builder;
+pub mod timecmp;
 pub use sql_builder::SqlDialect;
 
 pub use evaluator::Evaluator;
