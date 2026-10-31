@@ -1616,6 +1616,52 @@ mod backfill_tests {
             remote_text
         );
     }
+
+    #[test]
+    fn search_rejects_a_catalog_that_is_not_knowledge_or_statement() {
+        let home = tempfile::tempdir().unwrap();
+        let manager = ShelfManager::with_home(home.path().into()).unwrap();
+        let lab = Lab {
+            shelf_manager: manager,
+        };
+
+        // Caught before the shelf itself is even looked up.
+        let opts = SearchOpts {
+            catalog: Some("bogus".to_string()),
+            ..SearchOpts::default()
+        };
+        let err = lab
+            .search("no-such-shelf", "query", opts)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invalid catalog 'bogus'")
+                && err.contains("'knowledge'")
+                && err.contains("'statement'"),
+            "{err}"
+        );
+
+        // "knowledge", "statement" and omitting it (both catalogs) all pass validation and
+        // reach the shelf lookup instead.
+        for catalog in [
+            Some("knowledge".to_string()),
+            Some("statement".to_string()),
+            None,
+        ] {
+            let opts = SearchOpts {
+                catalog,
+                ..SearchOpts::default()
+            };
+            let err = lab
+                .search("no-such-shelf", "query", opts)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("is not connected"),
+                "a valid catalog should fail on the shelf lookup, not on validation: {err}"
+            );
+        }
+    }
 }
 
 fn list_archives_recursive(base: &Path, dir: &Path, results: &mut Vec<String>) -> Result<()> {
