@@ -712,6 +712,14 @@ impl ShelfBackend {
         }
     }
     pub fn search(&self, query: &str, opts: &SearchOpts) -> Result<Vec<super::FtsResult>> {
+        // Shared entry validation so both backends reject the same inputs. The
+        // pgvector backend repeats this internally; the local one relied on
+        // SQLite's `LIMIT -1` dialect, which silently returns everything.
+        if opts.limit < 0 || opts.offset < 0 {
+            return Err(HypatiaError::Validation(
+                "search limit and offset must be nonnegative".into(),
+            ));
+        }
         match &self.inner {
             Backend::Local(l) => l.store.search(query, opts),
             #[cfg(feature = "postgres-backend")]

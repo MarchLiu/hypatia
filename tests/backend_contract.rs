@@ -813,6 +813,33 @@ fn contract(shelf: &mut OpenShelf) {
             .len(),
         1
     );
+    // Both backends reject negative limit/offset at the shared search entry
+    // instead of letting SQLite's `LIMIT -1` dialect return everything.
+    let neg_limit = SearchOpts {
+        limit: -1,
+        ..SearchOpts::default()
+    };
+    assert!(shelf.execute_search("storage", &neg_limit).is_err());
+    let neg_offset = SearchOpts {
+        offset: -1,
+        ..SearchOpts::default()
+    };
+    assert!(shelf.execute_search("storage", &neg_offset).is_err());
+    // A query that sanitizes to nothing yields zero rows, not an FTS5 syntax error.
+    assert!(
+        shelf
+            .execute_search("***", &SearchOpts::default())
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(
+        shelf
+            .execute_search("", &SearchOpts::default())
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     let a = StatementKey::new("first", "links", "second");
     let b = StatementKey::new("second", "links", "first");
     let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
