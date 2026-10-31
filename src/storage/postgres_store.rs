@@ -1216,9 +1216,6 @@ CREATE INDEX statement_pending_clock_idx ON {statement}(content_version) WHERE e
         if opts.limit < 0 || opts.offset < 0 {
             return Err(invalid("search limit and offset must be nonnegative"));
         }
-        if let Some(c) = opts.catalog.as_deref() {
-            catalog_info(c)?;
-        }
         let segmented = crate::text::segment_for_fts(query);
         let mut quoted = false;
         let query = segmented

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::engine::filter::similar_filter;
 use crate::lab::{Lab, uses_similar};
@@ -13,6 +13,26 @@ use crate::service::KnowledgePatch;
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// Catalog searched by `Search`: knowledge entries, statements (triples), or
+/// both. `All` maps to `None` for `SearchOpts.catalog`, meaning "no filter".
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Catalog {
+    Knowledge,
+    Statement,
+    All,
+}
+
+impl Catalog {
+    /// The `SearchOpts.catalog` value for this choice: `None` searches both catalogs.
+    fn as_opt(self) -> Option<String> {
+        match self {
+            Catalog::Knowledge => Some("knowledge".to_string()),
+            Catalog::Statement => Some("statement".to_string()),
+            Catalog::All => None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -141,8 +161,9 @@ enum Commands {
     /// Search knowledge and statements
     Search {
         query: String,
-        #[arg(short, long)]
-        catalog: Option<String>,
+        /// Catalog to search
+        #[arg(short, long, value_enum, default_value = "all")]
+        catalog: Catalog,
         #[arg(long, default_value_t = 100)]
         limit: i64,
         #[arg(long, default_value_t = 0)]
@@ -572,7 +593,7 @@ fn execute_command(lab: &mut Lab, cmd: Commands) -> crate::error::Result<ExitCod
             shelf,
         } => {
             let opts = SearchOpts {
-                catalog,
+                catalog: catalog.as_opt(),
                 limit,
                 offset,
             };
