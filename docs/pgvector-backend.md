@@ -86,6 +86,7 @@ PG 连接必须能识别向量模型：本地配置显式 model，或可读取�
 - `$json-contains` 使用原生 JSONB 包含预筛选加严格递归复核，避免把 PG 数组包含标量的额外规则带入原契约。数值比较对非法文本受控转换，不因一条无效内容让整批查询失败。
 - PG k-hop 去重有环图的边/深度状态，最大深度 100，并受 statement_timeout 限制。
 - CRUD/JSE Content 保持对象；全文检索 content 保持 JSON 字符串；语义检索 content 现在统一为 JSON 对象，消除本地 ANN 与旧暴力 fallback 的不一致。时间仍为 UTC 约定下的 timestamp without time zone / NaiveDateTime。PG 仅接受微秒精度及普通时间，拒绝会丢失纳秒或闰秒编码的写入/导入，而不静默截断；total_count 仍是返回行数。
+- `created_at` / `tr_start` / `tr_end` 上的比较操作（`$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`）在两个后端按时间轴比较（issue #48）：绑定值必须是可以解析的时间戳（`YYYY-MM-DD HH:MM:SS[.fff]`，或带 `T` 分隔与可选 `Z`/时区偏移的 ISO-8601 形式），两侧统一归一到 UTC 毫秒精度后再比较。裸日期（`2026-01-01`）与日期词（`today`）在两个后端都是 validation 错误；系统内部一律使用绝对时间戳，相对日期表达应在写入/查询前转换为绝对时间。
 
 ## 正文提交与 backfill
 

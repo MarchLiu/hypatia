@@ -865,6 +865,50 @@ fn contract(shelf: &mut OpenShelf) {
     );
     let kept = shelf.backend.get_statement(&a).unwrap().unwrap();
     assert_eq!(kept.content.data, "edge");
+    // Time columns compare on the timeline on every backend (issue #48): an
+    // ISO T-separated or millis-less literal matches the space-separated
+    // stored shape, and a bare date or date word is a validation error
+    // instead of a backend-specific silent miss or SQL error.
+    // Only statement `a` carries tr_start = 2026-01-01 01:02:03.
+    for (expression, rows) in [
+        // The literal that originally missed every row on SQLite (' ' < 'T').
+        (
+            json!(["$statement", ["$gt", "tr_start", "2026-01-01T00:00:00Z"]]),
+            1,
+        ),
+        (
+            json!(["$statement", ["$gt", "tr_start", "2026-01-01 00:00:00"]]),
+            1,
+        ),
+        // Equality ignores the stored millisecond tail on both sides.
+        (
+            json!(["$statement", ["$eq", "tr_start", "2026-01-01 01:02:03"]]),
+            1,
+        ),
+        (
+            json!(["$statement", ["$eq", "tr_start", "2026-01-01T01:02:03.000Z"]]),
+            1,
+        ),
+        (
+            json!(["$statement", ["$gt", "tr_start", "2026-01-01T01:02:04Z"]]),
+            0,
+        ),
+    ] {
+        assert_eq!(
+            Evaluator::execute(&expression, shelf).unwrap().rows.len(),
+            rows,
+            "{expression}"
+        );
+    }
+    for expression in [
+        json!(["$statement", ["$gt", "tr_start", "2026-01-01"]]),
+        json!(["$statement", ["$gt", "tr_start", "today"]]),
+        json!(["$statement", ["$eq", "tr_start", "not-a-date"]]),
+    ] {
+        let err = Evaluator::execute(&expression, shelf)
+            .expect_err("a malformed time literal must be rejected: {expression}");
+        assert!(err.to_string().contains("invalid timestamp"), "{err}");
+    }
     // The FTS doc was not rewritten with the duplicate's content.
     let statements = SearchOpts {
         catalog: Some("statement".into()),

@@ -754,16 +754,25 @@ mod tests {
 
     #[test]
     fn qualified_context_qualifies_created_at() {
-        let (fragment, _) = qualified_fragment(json!(["$gt", "created_at", "2025-01-01"]));
-        assert_eq!(fragment, "knowledge.created_at > ?");
+        let (fragment, _) = qualified_fragment(json!(["$gt", "created_at", "2025-01-01 00:00:00"]));
+        assert_eq!(
+            fragment,
+            "strftime('%Y-%m-%d %H:%M:%f', knowledge.created_at) > ?"
+        );
     }
 
     #[test]
     fn qualified_context_qualifies_temporal_columns() {
-        let (fragment, _) = qualified_fragment(json!(["$eq", "tr_start", "2025-01-01"]));
-        assert_eq!(fragment, "knowledge.tr_start = ?");
-        let (fragment, _) = qualified_fragment(json!(["$eq", "tr_end", "2025-01-01"]));
-        assert_eq!(fragment, "knowledge.tr_end = ?");
+        let (fragment, _) = qualified_fragment(json!(["$eq", "tr_start", "2025-01-01 00:00:00"]));
+        assert_eq!(
+            fragment,
+            "strftime('%Y-%m-%d %H:%M:%f', knowledge.tr_start) = ?"
+        );
+        let (fragment, _) = qualified_fragment(json!(["$eq", "tr_end", "2025-01-01 00:00:00"]));
+        assert_eq!(
+            fragment,
+            "strftime('%Y-%m-%d %H:%M:%f', knowledge.tr_end) = ?"
+        );
     }
 
     #[test]
