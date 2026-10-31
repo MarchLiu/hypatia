@@ -198,6 +198,13 @@ impl Lab {
     // --- Search ---
 
     pub fn search(&self, shelf: &str, query: &str, opts: SearchOpts) -> Result<QueryResult> {
+        if let Some(catalog) = opts.catalog.as_deref() {
+            if catalog != "knowledge" && catalog != "statement" {
+                return Err(crate::error::HypatiaError::Validation(format!(
+                    "invalid catalog '{catalog}': must be 'knowledge', 'statement', or omitted for both"
+                )));
+            }
+        }
         let shelf_ref = self.shelf_manager.get(shelf).ok_or_else(|| {
             crate::error::HypatiaError::Shelf(format!("shelf '{shelf}' is not connected"))
         })?;
