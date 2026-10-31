@@ -1541,6 +1541,12 @@ impl SqliteStore {
     pub fn search(&self, query: &str, opts: &SearchOpts) -> Result<Vec<FtsResult>> {
         let query = crate::text::segment_for_fts(query);
         let query = sanitize_fts_query(&query);
+        // Sanitizing can strip a pure-punctuation query down to nothing; an empty
+        // MATCH string is an FTS5 syntax error, but "no query" means no results
+        // (mirroring pg's websearch_to_tsquery, which matches nothing).
+        if query.trim().is_empty() {
+            return Ok(vec![]);
+        }
         let catalog_filter = opts.catalog.as_deref();
         // docs no longer stores a content copy: JOIN the source tables.
         let sql = format!(
