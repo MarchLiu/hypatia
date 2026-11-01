@@ -1,0 +1,7 @@
+{
+  "name": "hypatia",
+  "private": true,
+  "devDependencies": {
+    "@grainulation/wheat": "*"
+  }
+}

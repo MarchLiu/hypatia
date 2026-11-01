@@ -7,3 +7,4 @@ longmemeval_*.json
 output/*
 dist/*
 .vscode/*
+node_modules/
