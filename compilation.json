@@ -1,10 +1,17 @@
 {
-  "compiled_at": "2026-04-22T06:53:48.952Z",
-  "claims_hash": "0295ad4",
+  "compiled_at": "2026-11-01T04:53:05.098Z",
+  "claims_hash": "51041ce",
   "compiler_version": "0.2.0",
   "status": "ready",
   "errors": [],
   "warnings": [
+    {
+      "code": "W_TYPE_MONOCULTURE",
+      "message": "Topic \"catalog-validation\" has only 1 claim type(s): factual. Missing: constraint, estimate, risk, recommendation, feedback",
+      "claims": [
+        "r003"
+      ]
+    },
     {
       "code": "W_CONSTRAINT_ONLY",
       "message": "Topic \"done-criteria\" is constraint-dominated (1/1 claims are constraints/feedback) — stated-level evidence is expected",
@@ -21,6 +28,28 @@
     },
     {
       "code": "W_CONSTRAINT_ONLY",
+      "message": "Topic \"issue-46-shelf-ui\" is constraint-dominated (1/1 claims are constraints/feedback) — stated-level evidence is expected",
+      "claims": [
+        "r007"
+      ]
+    },
+    {
+      "code": "W_TYPE_MONOCULTURE",
+      "message": "Topic \"issue-46-shelf-ui\" has only 1 claim type(s): feedback. Missing: constraint, factual, estimate, risk, recommendation",
+      "claims": [
+        "r007"
+      ]
+    },
+    {
+      "code": "W_TYPE_MONOCULTURE",
+      "message": "Topic \"search-input-validation\" has only 1 claim type(s): factual. Missing: constraint, estimate, risk, recommendation, feedback",
+      "claims": [
+        "r001",
+        "r002"
+      ]
+    },
+    {
+      "code": "W_CONSTRAINT_ONLY",
       "message": "Topic \"sprint-scope\" is constraint-dominated (2/2 claims are constraints/feedback) — stated-level evidence is expected",
       "claims": [
         "d001",
@@ -33,6 +62,21 @@
       "claims": [
         "d001",
         "d002"
+      ]
+    },
+    {
+      "code": "W_TYPE_MONOCULTURE",
+      "message": "Topic \"testing\" has only 1 claim type(s): recommendation. Missing: constraint, factual, estimate, risk, feedback",
+      "claims": [
+        "r006"
+      ]
+    },
+    {
+      "code": "W_TYPE_MONOCULTURE",
+      "message": "Topic \"time-comparison-semantics\" has only 1 claim type(s): factual. Missing: constraint, estimate, risk, recommendation, feedback",
+      "claims": [
+        "r004",
+        "r005"
       ]
     }
   ],
@@ -89,6 +133,139 @@
       "tags": [
         "done-criteria"
       ]
+    },
+    {
+      "id": "r001",
+      "type": "factual",
+      "topic": "search-input-validation",
+      "content": "FTS 检索入口（Backend::search，CLI 与 JSE 共用）缺少参数校验：本地后端把 limit=-1 按 SQLite 方言当作无限制返回全量，空查询漏出 fts5 语法错误；pgvector 有内部校验故行为相反。",
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#49/#51",
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#49/#51"
+      ]
+    },
+    {
+      "id": "r002",
+      "type": "factual",
+      "topic": "search-input-validation",
+      "content": "修复后两后端统一：负 limit/offset 在共享入口报 validation 错误（文案与 pg/similar 对齐），sanitize 后为空的查询返回 0 行 exit 0。backend_contract 25/25 通过。",
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#49/#51",
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#49/#51"
+      ]
+    },
+    {
+      "id": "r003",
+      "type": "factual",
+      "topic": "catalog-validation",
+      "content": "search -c/--catalog 在本地后端不校验取值（静默空结果），pg 报错，--help 未说明。PR #50 以枚举 Catalog（knowledge|statement|all，默认 all）在 CLI 与 Lab::search 共享层双重收口。",
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#47/#50",
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#47/#50"
+      ]
+    },
+    {
+      "id": "r004",
+      "type": "factual",
+      "topic": "time-comparison-semantics",
+      "content": "created_at/tr_start/tr_end 比较两后端分叉：SQLite 纯文本比较（' ' < 'T' 使 ISO 查询同天全灭、毫秒尾巴使 eq 永不相等），pg 强转 ::timestamp（接受 today 等日期词、非法值 22007 硬错误）。",
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#48",
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#48"
+      ]
+    },
+    {
+      "id": "r005",
+      "type": "factual",
+      "topic": "time-comparison-semantics",
+      "content": "修复采用'共享归一'：engine::timecmp 校验并把绑定值归一到 UTC 毫秒格式，SQLite 侧 strftime 包列、pg 绑归一值再 ::timestamp；裸日期与日期词在两后端统一为 validation 错误。原则：系统内部一律绝对时间戳，相对日期表达在进系统前转换。",
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#48/#52",
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#48/#52"
+      ]
+    },
+    {
+      "id": "r006",
+      "type": "recommendation",
+      "topic": "testing",
+      "content": "tests/backend_contract.rs 是防双后端行为分叉的正确位置：#47/#48/#49 能长期存在都因 tests/ 下没有对应双后端断言。新语义修复必须同时补 contract 断言。",
+      "evidence": "documented",
+      "status": "active",
+      "phase_added": "research",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#48/#49 备注",
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#48/#49 备注"
+      ]
+    },
+    {
+      "id": "r007",
+      "type": "feedback",
+      "topic": "issue-46-shelf-ui",
+      "content": "#46（本地 Web 书架查看/清理页）暂不做内置 UI：已选择第三方 hypatia-archive 方案并写入文档，内置版本等更好的设计出现再启动。",
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "research",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#46 维护者决策",
+        "connector": null
+      },
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#46 维护者决策"
+      ]
     }
   ],
   "conflict_graph": {
@@ -96,6 +273,30 @@
     "unresolved": []
   },
   "coverage": {
+    "catalog-validation": {
+      "claims": 1,
+      "max_evidence": "tested",
+      "status": "strong",
+      "types": [
+        "factual"
+      ],
+      "claim_ids": [
+        "r003"
+      ],
+      "constraint_count": 0,
+      "source_origins": [
+        "sprint-agent"
+      ],
+      "source_count": 1,
+      "type_diversity": 1,
+      "missing_types": [
+        "constraint",
+        "estimate",
+        "risk",
+        "recommendation",
+        "feedback"
+      ]
+    },
     "done-criteria": {
       "claims": 1,
       "max_evidence": "stated",
@@ -114,6 +315,55 @@
       "type_diversity": 1,
       "missing_types": [
         "factual",
+        "estimate",
+        "risk",
+        "recommendation",
+        "feedback"
+      ]
+    },
+    "issue-46-shelf-ui": {
+      "claims": 1,
+      "max_evidence": "stated",
+      "status": "weak",
+      "types": [
+        "feedback"
+      ],
+      "claim_ids": [
+        "r007"
+      ],
+      "constraint_count": 1,
+      "source_origins": [
+        "sprint-agent"
+      ],
+      "source_count": 1,
+      "type_diversity": 1,
+      "missing_types": [
+        "constraint",
+        "factual",
+        "estimate",
+        "risk",
+        "recommendation"
+      ]
+    },
+    "search-input-validation": {
+      "claims": 2,
+      "max_evidence": "tested",
+      "status": "strong",
+      "types": [
+        "factual"
+      ],
+      "claim_ids": [
+        "r001",
+        "r002"
+      ],
+      "constraint_count": 0,
+      "source_origins": [
+        "sprint-agent"
+      ],
+      "source_count": 1,
+      "type_diversity": 1,
+      "missing_types": [
+        "constraint",
         "estimate",
         "risk",
         "recommendation",
@@ -144,12 +394,68 @@
         "recommendation",
         "feedback"
       ]
+    },
+    "testing": {
+      "claims": 1,
+      "max_evidence": "documented",
+      "status": "moderate",
+      "types": [
+        "recommendation"
+      ],
+      "claim_ids": [
+        "r006"
+      ],
+      "constraint_count": 0,
+      "source_origins": [
+        "sprint-agent"
+      ],
+      "source_count": 1,
+      "type_diversity": 1,
+      "missing_types": [
+        "constraint",
+        "factual",
+        "estimate",
+        "risk",
+        "feedback"
+      ]
+    },
+    "time-comparison-semantics": {
+      "claims": 2,
+      "max_evidence": "tested",
+      "status": "strong",
+      "types": [
+        "factual"
+      ],
+      "claim_ids": [
+        "r004",
+        "r005"
+      ],
+      "constraint_count": 0,
+      "source_origins": [
+        "sprint-agent"
+      ],
+      "source_count": 1,
+      "type_diversity": 1,
+      "missing_types": [
+        "constraint",
+        "estimate",
+        "risk",
+        "recommendation",
+        "feedback"
+      ]
     }
   },
   "corroboration": {
     "d001": 0,
     "d002": 0,
-    "d003": 0
+    "d003": 0,
+    "r001": 0,
+    "r002": 0,
+    "r003": 0,
+    "r004": 0,
+    "r005": 0,
+    "r006": 0,
+    "r007": 0
   },
   "phase_summary": {
     "define": {
@@ -157,8 +463,8 @@
       "complete": true
     },
     "research": {
-      "claims": 0,
-      "complete": false
+      "claims": 7,
+      "complete": true
     },
     "prototype": {
       "claims": 0,
@@ -180,10 +486,10 @@
       "status": "active",
       "phase": "define",
       "question": "What is the architecture and design of Hypatia? Analyze its module structure, data flow, CLI design, storage patterns, and key design decisions.",
-      "claims_count": 3,
-      "active_claims": 3,
-      "last_git_activity": null,
-      "git_commit_count": 0
+      "claims_count": 10,
+      "active_claims": 10,
+      "last_git_activity": "2026-04-22T14:53:47+08:00",
+      "git_commit_count": 1
     }
   ],
   "sprint_meta": {
@@ -193,15 +499,15 @@
     ],
     "initiated": "2026-04-21",
     "phase": "define",
-    "total_claims": 3,
-    "active_claims": 3,
+    "total_claims": 10,
+    "active_claims": 10,
     "conflicted_claims": 0,
     "superseded_claims": 0,
     "refuted_claims": 0,
     "connectors": []
   },
   "compilation_certificate": {
-    "input_hash": "sha256:0295ad4d528f43f554a365f22272fe6d63af73d7c662cec7b0fded74275d9b32",
+    "input_hash": "sha256:51041cef456eb58fd9aada068e8af7cd71899ca04914f4a671167c8d747c2561",
     "compiler_version": "0.2.0",
     "deterministic": true
   }

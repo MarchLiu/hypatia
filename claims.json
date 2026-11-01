@@ -65,6 +65,146 @@
       "tags": [
         "done-criteria"
       ]
+    },
+    {
+      "id": "r001",
+      "type": "factual",
+      "topic": "search-input-validation",
+      "content": "FTS 检索入口（Backend::search，CLI 与 JSE 共用）缺少参数校验：本地后端把 limit=-1 按 SQLite 方言当作无限制返回全量，空查询漏出 fts5 语法错误；pgvector 有内部校验故行为相反。",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#49/#51",
+        "connector": null
+      },
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "timestamp": "2026-11-01T04:50:01.287Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#49/#51"
+      ]
+    },
+    {
+      "id": "r002",
+      "type": "factual",
+      "topic": "search-input-validation",
+      "content": "修复后两后端统一：负 limit/offset 在共享入口报 validation 错误（文案与 pg/similar 对齐），sanitize 后为空的查询返回 0 行 exit 0。backend_contract 25/25 通过。",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#49/#51",
+        "connector": null
+      },
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "timestamp": "2026-11-01T04:50:01.287Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#49/#51"
+      ]
+    },
+    {
+      "id": "r003",
+      "type": "factual",
+      "topic": "catalog-validation",
+      "content": "search -c/--catalog 在本地后端不校验取值（静默空结果），pg 报错，--help 未说明。PR #50 以枚举 Catalog（knowledge|statement|all，默认 all）在 CLI 与 Lab::search 共享层双重收口。",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#47/#50",
+        "connector": null
+      },
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "timestamp": "2026-11-01T04:50:01.287Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#47/#50"
+      ]
+    },
+    {
+      "id": "r004",
+      "type": "factual",
+      "topic": "time-comparison-semantics",
+      "content": "created_at/tr_start/tr_end 比较两后端分叉：SQLite 纯文本比较（' ' < 'T' 使 ISO 查询同天全灭、毫秒尾巴使 eq 永不相等），pg 强转 ::timestamp（接受 today 等日期词、非法值 22007 硬错误）。",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#48",
+        "connector": null
+      },
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "timestamp": "2026-11-01T04:50:01.287Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#48"
+      ]
+    },
+    {
+      "id": "r005",
+      "type": "factual",
+      "topic": "time-comparison-semantics",
+      "content": "修复采用'共享归一'：engine::timecmp 校验并把绑定值归一到 UTC 毫秒格式，SQLite 侧 strftime 包列、pg 绑归一值再 ::timestamp；裸日期与日期词在两后端统一为 validation 错误。原则：系统内部一律绝对时间戳，相对日期表达在进系统前转换。",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#48/#52",
+        "connector": null
+      },
+      "evidence": "tested",
+      "status": "active",
+      "phase_added": "research",
+      "timestamp": "2026-11-01T04:50:01.287Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#48/#52"
+      ]
+    },
+    {
+      "id": "r006",
+      "type": "recommendation",
+      "topic": "testing",
+      "content": "tests/backend_contract.rs 是防双后端行为分叉的正确位置：#47/#48/#49 能长期存在都因 tests/ 下没有对应双后端断言。新语义修复必须同时补 contract 断言。",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#48/#49 备注",
+        "connector": null
+      },
+      "evidence": "documented",
+      "status": "active",
+      "phase_added": "research",
+      "timestamp": "2026-11-01T04:50:01.287Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#48/#49 备注"
+      ]
+    },
+    {
+      "id": "r007",
+      "type": "feedback",
+      "topic": "issue-46-shelf-ui",
+      "content": "#46（本地 Web 书架查看/清理页）暂不做内置 UI：已选择第三方 hypatia-archive 方案并写入文档，内置版本等更好的设计出现再启动。",
+      "source": {
+        "origin": "sprint-agent",
+        "artifact": "#46 维护者决策",
+        "connector": null
+      },
+      "evidence": "stated",
+      "status": "active",
+      "phase_added": "research",
+      "timestamp": "2026-11-01T04:50:01.287Z",
+      "conflicts_with": [],
+      "resolved_by": null,
+      "tags": [
+        "#46 维护者决策"
+      ]
     }
   ]
 }

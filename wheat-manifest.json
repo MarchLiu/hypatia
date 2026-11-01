@@ -1,7 +1,7 @@
 {
-  "generated": "2026-04-22T06:53:48.954Z",
+  "generated": "2026-11-01T04:53:05.100Z",
   "generator": "generate-manifest.js",
-  "claims_hash": "0295ad4",
+  "claims_hash": "51041ce",
   "topics": {
     "sprint-scope": {
       "claims": [
@@ -19,19 +19,68 @@
       "files": [],
       "sprint": "current",
       "evidence_level": "stated"
+    },
+    "search-input-validation": {
+      "claims": [
+        "r001",
+        "r002"
+      ],
+      "files": [],
+      "sprint": "current",
+      "evidence_level": "tested"
+    },
+    "catalog-validation": {
+      "claims": [
+        "r003"
+      ],
+      "files": [],
+      "sprint": "current",
+      "evidence_level": "tested"
+    },
+    "time-comparison-semantics": {
+      "claims": [
+        "r004",
+        "r005"
+      ],
+      "files": [],
+      "sprint": "current",
+      "evidence_level": "tested"
+    },
+    "testing": {
+      "claims": [
+        "r006"
+      ],
+      "files": [],
+      "sprint": "current",
+      "evidence_level": "documented"
+    },
+    "issue-46-shelf-ui": {
+      "claims": [
+        "r007"
+      ],
+      "files": [],
+      "sprint": "current",
+      "evidence_level": "stated"
     }
   },
   "sprints": {
     "what-is-the-architecture": {
       "question": "What is the architecture and design of Hypatia? Analyze its module structure, data flow, CLI design, storage patterns, and key design decisions.",
       "phase": "define",
-      "claims_count": 3,
-      "active_claims": 3,
+      "claims_count": 10,
+      "active_claims": 10,
       "path": ".",
       "status": "active",
-      "last_git_activity": null,
-      "git_commit_count": 0
+      "last_git_activity": "2026-04-22T14:53:47+08:00",
+      "git_commit_count": 1
     }
   },
-  "files": {}
+  "files": {
+    "wheat-manifest.json": {
+      "topics": [
+        "cartography"
+      ],
+      "type": "config"
+    }
+  }
 }
