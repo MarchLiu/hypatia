@@ -440,6 +440,28 @@ args = ["mcp"]
 - The local model is loaded only for the request that needs it and released afterwards. The server reads shelf configuration once at start: restart it after `model install`, `connect` or `init`.
 - The skills still decide when to remember and how to link; install them with `hypatia skill install`.
 
+## Related Projects
+
+Community tools built around Hypatia. They are maintained independently and track Hypatia's CLI surface at their own pace.
+
+### hypatia-archive — local web console
+
+A local web UI for reviewing and cleaning what agents wrote into your shelves: browse entries, search by keyword or semantics, inspect each entry's incoming and outgoing statements on a graph, and delete mistakes with explicit confirmation (single, batch, or statements only).
+
+```bash
+npx --yes hypatia-archive     # binds 127.0.0.1:4174 only; hypatia must be on PATH
+```
+
+- Source: [tkliuxing/hypatia-ui](https://github.com/tkliuxing/hypatia-ui) (MIT)
+- Human review layer over the same JSON the agent sees through MCP — no extra query semantics, no second store.
+
+### dsh-hypatia-auto-memory — automatic memory pipeline
+
+An event-driven [DSH](https://github.com/deepseek-ai/deepseek-harness) plugin that gives agents hands-free memory: conversations are logged automatically, then consolidated in the background — span summaries, a log₁₆(n) archive cascade, and adjudicated work-unit extraction — on a dedicated model route, driven by `hypatia mcp` instead of hoping the agent remembers to write.
+
+- Source: [tkliuxing/dsh-hypatia-auto-memory](https://github.com/tkliuxing/dsh-hypatia-auto-memory)
+- Requires the `hypatia` CLI; uses `--no-embed` and `similar --exclude-tags` (hypatia ≥ 4.1.0 recommended) to keep the raw log layer out of the vector index while the distilled entries stay searchable.
+
 ## Architecture
 
 ```
