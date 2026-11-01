@@ -1,0 +1,49 @@
+name: test
+
+# Runs the unit tests and the shared backend contract on every push/PR, with a
+# disposable pgvector service so the postgres-path tests (the #[ignore]d ones
+# that need HYPATIA_TEST_POSTGRES_URL) run in CI too — scripts/test-pgvector.sh
+# is the local equivalent. Issue #48/#49/#47 could drift for months because the
+# pg path only ran on machines with a live pgvector container; this closes that.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Kept in sync with scripts/test-pgvector.sh (test-only credentials).
+      HYPATIA_TEST_POSTGRES_URL: postgres://postgres:hypatia-test-only@127.0.0.1:5432/hypatia_test?sslmode=disable
+    services:
+      pgvector:
+        image: pgvector/pgvector:pg17-trixie
+        env:
+          POSTGRES_PASSWORD: hypatia-test-only
+          POSTGRES_DB: hypatia_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hypatia_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Enable the vector extension
+        run: psql "$HYPATIA_TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector; SELECT extversion FROM pg_extension WHERE extname = 'vector';"
+      # Backend-agnostic behavior first: both test binaries must pass with no
+      # pg backend compiled in.
+      - name: Test (local backend)
+        run: cargo test --locked --lib --test backend_contract
+      # Then the same suite plus the pg-only tests, with the postgres feature
+      # and the ignored (pgvector-backed) cases included.
+      - name: Test (pgvector backend)
+        run: cargo test --locked --features postgres-backend --lib --test backend_contract --test postgres_store -- --include-ignored
