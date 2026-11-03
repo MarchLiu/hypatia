@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hypatia 测试报告</title>
+<style>
+:root{--bg:#f5f7fa;--paper:#fff;--ink:#17212d;--muted:#5d6977;--line:#dce2e9;--red:#b22d3a;--red-bg:#fff0f1;--green:#24784d;--green-bg:#e8f6ed;--accent:#245c92}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,select{font:inherit}button{cursor:pointer}a{color:var(--accent)}
+main{max-width:1480px;margin:auto;padding:22px 24px 40px}.head{display:flex;align-items:end;justify-content:space-between;gap:16px}.eyebrow{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:#5b728b}h1{font-size:28px;line-height:1.15;margin:4px 0}p{margin:0}.sub{color:var(--muted);font-size:12px}.counts{display:flex;gap:8px;flex-wrap:wrap}.count{display:flex;gap:7px;align-items:baseline;padding:6px 11px;border:1px solid var(--line);border-radius:8px;background:var(--paper);white-space:nowrap}.count b{font-size:19px;line-height:1}.count span{font-size:12px;color:var(--muted)}.count.fail b{color:var(--red)}.count.pass b{color:var(--green)}
+.notice{margin:16px 0 12px;padding:8px 11px;background:#eaf1f8;border-left:3px solid var(--accent);border-radius:3px;color:#364d63;font-size:12px}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.toolbar input,.toolbar select{height:34px;border:1px solid #cbd4de;border-radius:6px;background:#fff;padding:0 10px}.toolbar input{min-width:250px;flex:1}.toolbar label{font-size:12px;color:var(--muted)}.toolbar select{min-width:94px}.match-count{margin-left:auto;color:var(--muted);font-size:12px}
+.table-wrap{border:1px solid var(--line);border-radius:9px;background:var(--paper);overflow:auto;max-height:calc(100vh - 235px);min-height:300px}table{border-collapse:collapse;width:100%;table-layout:fixed}thead{position:sticky;top:0;z-index:1;background:#edf1f5}th{text-align:left;font-size:11px;letter-spacing:.04em;color:#576474;font-weight:700;padding:9px 12px;border-bottom:1px solid var(--line)}th:nth-child(1){width:80px}th:nth-child(2){width:36%}th:nth-child(3){width:28%}td{padding:8px 12px;border-bottom:1px solid #edf0f3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:39px}tr:last-child td{border-bottom:0}tbody tr{cursor:pointer}tbody tr:hover,tbody tr:focus{background:#eef5fc;outline:none}tbody tr:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}.case-title{font-weight:600}.case-id{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);margin-left:8px}.status{display:inline-block;border-radius:5px;padding:2px 7px;font-size:11px;font-weight:700}.status.fail{background:var(--red-bg);color:var(--red)}.status.pass{background:var(--green-bg);color:var(--green)}.empty{color:var(--muted);text-align:center;padding:35px}
+.pager{display:flex;justify-content:flex-end;gap:8px;align-items:center;padding-top:10px;color:var(--muted);font-size:12px}.pager button,.close{border:1px solid #cbd4de;background:#fff;border-radius:6px;padding:5px 11px}.pager button:disabled{opacity:.45;cursor:default}.footer{color:var(--muted);font-size:11px;margin-top:14px}code{background:#e8edf2;border-radius:3px;padding:1px 4px}
+th:nth-child(2){width:31%}th:nth-child(3){width:25%}th:nth-child(5){width:118px}.copy{border:1px solid #cbd4de;border-radius:5px;background:#fff;color:var(--accent);padding:4px 8px;font-size:11px;white-space:nowrap}.copy:hover,.copy:focus-visible{background:#eaf1f8}
+dialog{border:1px solid var(--line);border-radius:12px;box-shadow:0 18px 65px #10203033;max-width:min(800px,calc(100vw - 28px));width:800px;padding:0}dialog::backdrop{background:#13223388}.detail-head{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:start}.detail-head h2{font-size:20px;margin:5px 0}.detail-body{padding:18px 22px;max-height:70vh;overflow:auto}.detail-section{margin:0 0 16px}.detail-section h3{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 5px}.detail-section p,.detail-section li{overflow-wrap:anywhere}.detail-section ul{margin:0;padding-left:20px}.detail-section.problem{color:var(--red)}.detail-source{padding-top:10px;border-top:1px solid var(--line)}
+@media(max-width:760px){main{padding:15px 10px}.head{display:block}.counts{margin-top:12px}.toolbar input{min-width:100%;flex:none}.match-count{margin-left:0}.table-wrap{max-height:calc(100vh - 310px)}table{min-width:900px}}
+</style>
+</head>
+<body>
+<main>
+  <div class="head"><div><div class="eyebrow">Hypatia / behavioral cases</div><h1>测试报告</h1><p class="sub">__GENERATED_AT__ · 实际 hook + 隔离的 SQLite FTS5 CLI 替身 · 双击文件即可查看</p></div>
+    <div class="counts"><div class="count fail"><b>__FAILED__</b><span>失败</span></div><div class="count pass"><b>__PASSED__</b><span>通过</span></div><div class="count"><b>__TOTAL__</b><span>总用例</span></div></div></div>
+  <p class="notice">先看失败；点击用例查看详情，或复制元数据交给 AI 排查。此报告验证 hook 行为，不代表 Agent 最终答案准确率。</p>
+  <div class="toolbar"><input id="search" type="search" placeholder="搜索编号、场景、结果或原因" aria-label="搜索用例"><label for="status-filter">状态</label><select id="status-filter"><option value="all">全部</option><option value="fail">失败</option><option value="pass">通过</option></select><label for="page-size">每页</label><select id="page-size"><option>25</option><option selected>50</option><option>100</option></select><span id="match-count" class="match-count"></span></div>
+  <div class="table-wrap"><table><thead><tr><th>结果</th><th>测试场景</th><th>实际观察</th><th>原因摘要</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div class="pager"><span id="page-info"></span><button id="prev" type="button">上一页</button><button id="next" type="button">下一页</button></div>
+  <p class="footer">一键运行：<code>python3 tests/cases/run.py</code>。使用 <code>--strict</code> 可让未满足的断言返回非零退出码。</p>
+</main>
+<dialog id="detail"><div class="detail-head"><div><span id="detail-status" class="status"></span><span id="detail-id" class="case-id"></span><h2 id="detail-title"></h2></div><button class="close" id="close" type="button" aria-label="关闭详情">关闭</button></div><div class="detail-body"><div class="detail-section"><h3>输入</h3><p id="detail-prompt"></p></div><div class="detail-section"><h3>期望</h3><ul id="detail-expected"></ul></div><div class="detail-section"><h3>实际</h3><ul id="detail-actual"></ul></div><div class="detail-section problem"><h3>未满足的断言</h3><ul id="detail-failures"></ul></div><div class="detail-section detail-source"><h3>原因</h3><p id="detail-diagnosis"></p><a id="detail-link" href="#">查看对应源码 ↗</a></div></div></dialog>
+<script type="application/json" id="case-data">__CASE_DATA__</script>
+<script>
+(() => {
+  'use strict';
+  const cases = JSON.parse(document.getElementById('case-data').textContent);
+  const byId = id => document.getElementById(id);
+  const rows = byId('rows');
+  const state = {query: '', status: 'all', page: 1, size: 50};
+  for (const item of cases) item.searchText = [item.id,item.suite,item.title,item.prompt,...item.expected,...item.actual,...item.failures,item.diagnosis].join(' ').toLocaleLowerCase();
+  cases.sort((a,b) => (a.status === 'fail' ? 0 : 1) - (b.status === 'fail' ? 0 : 1));
+  let visible = [];
+  function cell(row, value, className = '') { const td = document.createElement('td'); td.textContent = value; td.className = className; td.title = value; row.appendChild(td); return td; }
+  function legacyCopy(value) {
+    const field = document.createElement('textarea'); field.value = value; field.style.position = 'fixed'; field.style.opacity = '0';
+    document.body.appendChild(field); field.focus(); field.select();
+    let copied;
+    try { copied = document.execCommand('copy'); } finally { field.remove(); }
+    if (!copied) throw new Error('copy failed');
+  }
+  async function copyMetadata(item, button) {
+    const value = JSON.stringify(item.metadata, null, 2);
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        try { await navigator.clipboard.writeText(value); } catch (error) { legacyCopy(value); }
+      } else legacyCopy(value);
+      button.textContent = '已复制';
+    } catch (error) { button.textContent = '复制失败'; }
+    window.setTimeout(() => { button.textContent = '复制元数据'; }, 1800);
+  }
+  function render() {
+    visible = cases.filter(item => (state.status === 'all' || item.status === state.status) && (!state.query || item.searchText.includes(state.query)));
+    const pages = Math.max(1, Math.ceil(visible.length / state.size));
+    state.page = Math.min(state.page, pages);
+    const start = (state.page - 1) * state.size;
+    const page = visible.slice(start, start + state.size);
+    const fragment = document.createDocumentFragment();
+    for (const item of page) {
+      const tr = document.createElement('tr'); tr.tabIndex = 0; tr.setAttribute('role','button'); tr.setAttribute('aria-label', item.title + '，查看详情');
+      const status = cell(tr, item.status === 'fail' ? '失败' : '通过'); status.className = 'status-cell';
+      const badge = document.createElement('span'); badge.className = 'status ' + item.status; badge.textContent = item.status === 'fail' ? '失败' : '通过'; status.textContent = ''; status.appendChild(badge);
+      const title = cell(tr, item.title, 'case-title'); const id = document.createElement('span'); id.className = 'case-id'; id.textContent = item.id; title.appendChild(id);
+      cell(tr, item.failures[0] || item.actual[0] || '—'); cell(tr, item.diagnosis);
+      const action = cell(tr, ''); const button = document.createElement('button'); button.type = 'button'; button.className = 'copy'; button.textContent = '复制元数据'; button.setAttribute('aria-label', '复制 ' + item.id + ' 的元数据');
+      button.addEventListener('click', event => { event.stopPropagation(); copyMetadata(item, button); }); action.appendChild(button);
+      tr.addEventListener('click', () => openDetail(item)); tr.addEventListener('keydown', event => { if (event.target === tr && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openDetail(item); } });
+      fragment.appendChild(tr);
+    }
+    rows.replaceChildren(fragment);
+    if (!page.length) { const tr = document.createElement('tr'); const td = cell(tr,'没有匹配的用例','empty'); td.colSpan = 5; rows.appendChild(tr); }
+    byId('match-count').textContent = visible.length + ' 条匹配';
+    byId('page-info').textContent = visible.length ? `${start + 1}–${start + page.length} / ${visible.length}` : '0 / 0';
+    byId('prev').disabled = state.page <= 1; byId('next').disabled = state.page >= pages;
+  }
+  function list(id, values) { const ul = byId(id); ul.replaceChildren(...(values.length ? values : ['无']).map(value => { const li = document.createElement('li'); li.textContent = value; return li; })); }
+  function openDetail(item) {
+    byId('detail-status').className = 'status ' + item.status; byId('detail-status').textContent = item.status === 'fail' ? '失败' : '通过';
+    byId('detail-id').textContent = item.id; byId('detail-title').textContent = item.title; byId('detail-prompt').textContent = item.prompt;
+    list('detail-expected', item.expected); list('detail-actual', item.actual); list('detail-failures', item.failures);
+    byId('detail-diagnosis').textContent = item.diagnosis; byId('detail-link').hidden = !item.source; if (item.source) byId('detail-link').href = item.source;
+    byId('detail').showModal();
+  }
+  let debounce;
+  byId('search').addEventListener('input', event => { clearTimeout(debounce); debounce = setTimeout(() => { state.query = event.target.value.trim().toLocaleLowerCase(); state.page = 1; render(); }, 120); });
+  byId('status-filter').addEventListener('change', event => { state.status = event.target.value; state.page = 1; render(); });
+  byId('page-size').addEventListener('change', event => { state.size = Number(event.target.value); state.page = 1; render(); });
+  byId('prev').addEventListener('click', () => { state.page--; render(); }); byId('next').addEventListener('click', () => { state.page++; render(); });
+  byId('close').addEventListener('click', () => byId('detail').close());
+  byId('detail').addEventListener('click', event => { if (event.target === byId('detail')) byId('detail').close(); });
+  render();
+})();
+</script>
+</body>
+</html>
