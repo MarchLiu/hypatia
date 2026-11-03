@@ -1,0 +1,1 @@
+{"id":"control_exact_match","intent":"An exact keyword can recall an older matching memory","project":"alpha","seed":[{"name":"rust-keyword","data":"Rust","scopes":["alpha"],"tags":["memory"]}],"prompt":"Rust","expect":{"recall_contains":["rust-keyword"]},"suite":"memory_recall","runner":"prompt_hook","role":"control"}
