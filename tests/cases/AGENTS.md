@@ -14,6 +14,14 @@ tests/cases/
     memory_recall/
       control.jsonl              # 证明测试装置能识别正常行为
       negative.jsonl             # 已知失败场景
+      paraphrase.jsonl           # 同义改写
+      scope.jsonl                # 跨项目串扰
+      stale.jsonl                # 过期事实
+      echo.jsonl                 # 当前输入回显
+      raw_log_embedding.jsonl    # 原始日志向量污染
+      credential_logging.jsonl   # 测试凭据入库
+      ranking_scope.jsonl        # 有限结果窗口混入外项目记录
+      query_truncation.jsonl     # 长输入尾部关键字丢失
 ```
 
 执行 `python3 tests/cases/run.py` 会自动发现 `datasets/**/*.jsonl`，逐条运行并刷新 `report.html`。`--strict` 在存在未满足断言时返回 1；数据无效或正向对照失败时返回 2。用 `--output <path>` 可以另存报告。报告支持搜索、筛选、分页、详情和复制供 AI 排查的脱敏元数据。
@@ -36,13 +44,13 @@ tests/cases/
 | `diagnosis` | 可选的原因假设；失败时在报告中展示，不能代替源码验证 |
 | `source` | 可选的仓库相对源码位置，例如 `codex-integration/hooks/hypatia_user_prompt_submit.sh#L65` |
 
-`prompt_hook` 当前支持 `expect.recall_contains`、`expect.recall_excludes`、`expect.logged_embed` 和 `expect.logged_excludes`。前两项是记忆名称数组，`logged_embed` 是布尔值，`logged_excludes` 是不允许原样保存的字符串数组。不要写入未被执行器检查的断言；`run.py` 会拒绝未知断言和重复 `id`。
+`prompt_hook` 当前支持 `expect.recall_contains`、`expect.recall_excludes`、`expect.logged_embed`、`expect.logged_excludes` 和 `expect.search_query_contains`。前两项是记忆名称数组，`logged_embed` 是布尔值，`logged_excludes` 是不允许原样保存的字符串数组，`search_query_contains` 是检索查询必须保留的关键字符串数组。不要写入未被执行器检查的断言；`run.py` 会拒绝未知断言和重复 `id`。
 
 ```json
 {"id":"paraphrase_miss","intent":"换一种说法仍能召回旧决定","suite":"memory_recall","runner":"prompt_hook","role":"negative","project":"alpha","seed":[{"name":"decision-rust","data":"Use Rust for the backend service.","scopes":["alpha"],"tags":["memory"]}],"prompt":"Which language did we choose for the backend?","expect":{"recall_contains":["decision-rust"]}}
 ```
 
-同一行为领域可以按问题类型拆成多个 `.jsonl` 文件；不要为每组数据另建 Python 脚本。需要新增执行路径或断言类型时，只修改根目录的 `run.py`，并补充本约定。每个执行路径至少保留一个可以通过的 `control`，防止测试装置失效时把所有用例误报为产品缺陷。
+同一行为领域可以按问题类型拆成多个 `.jsonl` 文件；不要为每组数据另建 Python 脚本。需要新增执行路径或断言类型时，只修改根目录的 `run.py`，并补充本约定。每个执行路径至少保留一个可以通过的 `control`，防止测试装置失效时把所有用例误报为产品缺陷。`negative` 表示针对已知薄弱点的回归用例；修复后通过是预期结果。
 
 ## 负样本设计
 

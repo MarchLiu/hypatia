@@ -142,6 +142,9 @@ def check_case(case):
             if text in logged["content"]["data"]:
                 failures.append("测试凭据原文被写入存储")
                 observed["credential_persisted"] = True
+        for text in expected.get("search_query_contains", []):
+            if text not in observed["search_query"]:
+                failures.append(f"检索查询丢失必要信息：{text}")
         return {"failures": failures, "observed": observed}
 
 
@@ -172,11 +175,15 @@ def display_case(result):
         expectations.append("原始消息可嵌入：" + ("是" if expected["logged_embed"] else "否"))
     if expected.get("logged_excludes"):
         expectations.append("保存内容应脱敏")
+    if expected.get("search_query_contains"):
+        expectations.append("检索查询应包含：" + ", ".join(expected["search_query_contains"]))
     actual = ["实际召回：" + (", ".join(observed.get("recalled", [])) or "无")]
     if "logged_embed" in expected:
         actual.append("原始消息可嵌入：" + ("是" if observed.get("logged_embed") else "否"))
     if observed.get("credential_persisted"):
         actual.append("测试凭据原文进入存储：是")
+    if expected.get("search_query_contains"):
+        actual.append("实际检索查询：" + observed.get("search_query", "无"))
     diagnosis, source = case.get("diagnosis", "需要进一步定位。"), case.get("source", "")
     return {
         "id": case["id"],
@@ -268,10 +275,10 @@ def load_cases(data_dir=DATASETS):
                             raise ValueError(f"seed {key} must be an array of strings")
                     if "embed" in seed and not isinstance(seed["embed"], bool):
                         raise ValueError("seed embed must be boolean")
-                assertions = {"recall_contains", "recall_excludes", "logged_embed", "logged_excludes"}
+                assertions = {"recall_contains", "recall_excludes", "logged_embed", "logged_excludes", "search_query_contains"}
                 if not isinstance(case["expect"], dict) or not case["expect"] or set(case["expect"]) - assertions:
                     raise ValueError("expect must contain supported assertions")
-                for key in ("recall_contains", "recall_excludes", "logged_excludes"):
+                for key in ("recall_contains", "recall_excludes", "logged_excludes", "search_query_contains"):
                     if key in case["expect"] and (not isinstance(case["expect"][key], list) or not all(isinstance(item, str) for item in case["expect"][key])):
                         raise ValueError(f"expect.{key} must be an array of strings")
                 if "logged_embed" in case["expect"] and not isinstance(case["expect"]["logged_embed"], bool):
