@@ -462,6 +462,13 @@ An event-driven [DSH](https://github.com/deepseek-ai/deepseek-harness) plugin th
 - Source: [tkliuxing/dsh-hypatia-auto-memory](https://github.com/tkliuxing/dsh-hypatia-auto-memory)
 - Requires the `hypatia` CLI; uses `--no-embed` and `similar --exclude-tags` (hypatia ≥ 4.1.0 recommended) to keep the raw log layer out of the vector index while the distilled entries stay searchable.
 
+### hypatia-mcp-server — HTTP-based MCP server
+
+An MCP server built on top of Hypatia that speaks MCP over HTTP instead of stdio, so non-CLI hosts and remote agents can reach the same knowledge graph. Proposed in [issue #46](https://github.com/MarchLiu/hypatia/issues/46#issuecomment-6648249690) as a community side project.
+
+- Source: [maxshine/hypatia-mcp-server](https://github.com/maxshine/hypatia-mcp-server)
+- Built independently of the built-in `hypatia mcp` (stdio) server; see the discussion in issue #46 about combining an HTTP MCP server and a review UI in a single binary.
+
 ## Architecture
 
 ```
