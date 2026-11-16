@@ -1,0 +1,123 @@
+{
+  "name": "dsh-hypatia-auto-memory",
+  "version": "2.4.4",
+  "description": "Event-driven Hypatia memory for DSH: automatic conversation logging via session events, queued background consolidation (span summaries + work-unit extraction) with a dedicated model route, and recall injection — zero per-call model work in the main session.",
+  "icon": "./icon.svg",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "icon.svg",
+    "src",
+    "lib",
+    "skills",
+    "locale/*.json",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run bundle",
+    "bundle": "tsdown",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.mjs",
+    "watch": "tsdown --watch"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-alpha.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2 || ~3.18.5-alpha.1",
+    "js-yaml": "^4.1.0",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2 || ~4.0.5-alpha.1",
+    "@deepseek-ai/dsh": ">=0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-llm": "^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-alpha.1",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-storage-domain": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2 || ~4.0.5-alpha.1",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.5 || ~1.0.6-alpha.1",
+    "@deepseek-ai/dsh-agent": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings-plugins": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-session": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-user-approval": "^0.1.7-rc.1",
+    "@types/react": "^18.2.0",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.7.0"
+  },
+  "author": "Ronald White",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tkliuxing/dsh-hypatia-auto-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tkliuxing/dsh-hypatia-auto-memory/issues"
+  },
+  "homepage": "https://github.com/tkliuxing/dsh-hypatia-auto-memory#readme",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "hypatia",
+    "memory",
+    "knowledge-graph"
+  ],
+  "license": "MIT"
+}

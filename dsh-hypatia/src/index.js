@@ -42,6 +42,10 @@
  *   autoApprove: boolean  — default true
  *   skills:      boolean  — default true
  *   skillsDir:   string   — override the packaged skills/ directory
+ *   sandboxWhitelistPrompt: boolean — default true. On first activation, ask
+ *      once (a REAL approval prompt) to add `~/.hypatia` to the deployment's
+ *      sandbox-policy `additionalWritableRoots`; see sandbox-whitelist.js.
+ *      Set false to never ask.
  *
  * @module dsh-hypatia
  */
@@ -49,6 +53,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { armSandboxWhitelistPrompt } from './sandbox-whitelist.js'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const DEFAULT_BINARIES = ['hypatia']
@@ -227,6 +232,34 @@ function applySkills(ctx, config) {
 }
 
 /* ------------------------------------------------------------------------ */
+/* Sandbox whitelist                                                         */
+/* ------------------------------------------------------------------------ */
+
+function applySandboxWhitelist(ctx, config) {
+  // Same shape as auto-memory's `status` { log, warn }, built from the host
+  // logger; logging must never take the plugin down.
+  let status = {}
+  try {
+    const logger = ctx.logger('dsh-hypatia')
+    status = {
+      log: (message) => { try { logger.info?.(message) } catch {} },
+      warn: (message) => { try { logger.warn(message) } catch {} },
+    }
+  } catch {
+    // No logger service on this fiber: run silently.
+  }
+  try {
+    armSandboxWhitelistPrompt({
+      ctx,
+      requestApproval: (req) => ctx.approval.request(req),
+      options: { status },
+    })
+  } catch (error) {
+    status.warn(`sandbox whitelist setup failed: ${String(error)}`)
+  }
+}
+
+/* ------------------------------------------------------------------------ */
 /* Composition                                                               */
 /* ------------------------------------------------------------------------ */
 
@@ -240,5 +273,19 @@ export function apply(ctx, config = {}) {
   }
   if (config.skills !== false) {
     ctx.plugin({ name: 'dsh-hypatia/skills', inject: ['skills'], apply: applySkills }, config)
+  }
+  // First-activation sandbox whitelist for `~/.hypatia` (see
+  // sandbox-whitelist.js). Idempotent: silently skips when any patch layer
+  // already whitelists the root, on win32, or when the user turned the prompt
+  // off with `sandboxWhitelistPrompt: false`. When it does arm, the ask is a
+  // REAL approval prompt on the first tool call of a session — never
+  // auto-answered; approving splices the root into the patch layer that
+  // already carries the sandbox-policy entry.
+  if (config.sandboxWhitelistPrompt !== false) {
+    ctx.plugin({
+      name: 'dsh-hypatia/sandbox-whitelist',
+      inject: ['approval'],
+      apply: applySandboxWhitelist,
+    }, config)
   }
 }

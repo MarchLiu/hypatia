@@ -6,6 +6,7 @@ Hypatia AI memory integration for [DSH](https://github.com/deepseek-ai/deepseek-
 
 - **内置 skills** —— 自动向每个会话注册 `hypatia` 与 `hypatia-memory` 技能（知识/三元组 CRUD、JSE 查询、语义搜索、自动记忆抽取协议），无需单独安装 skill
 - **免授权弹窗** —— 纯 `hypatia` CLI 命令的沙箱提权自动获批；hypatia 把数据写在 `~/.hypatia/`（会话工作区之外），没有本插件时每次写入都会弹一次授权
+- **首次激活一键白名单** —— 部署尚未把 `~/.hypatia` 写入沙箱白名单时，激活后首次工具调用会弹出**一次真实授权**：批准即把该目录写入 `sandbox-policy → additionalWritableRoots`（部署级持久生效），拒绝则本会话不再打扰（下次激活会再问）；已在白名单则完全静默
 - **权限边界不扩散** —— 只有 hypatia 被放行，其它任何操作维持原有的交互式授权与 `workspace-write` 沙箱不变
 
 ## 安装
@@ -43,6 +44,17 @@ approval/request   ──同一 call 内触发───►  callId 命中？回�
 
 所有自动批准仍写入 `approval/asked` / `approval/decided` 审计日志。
 
+### 首次激活沙箱白名单（`sandboxWhitelistPrompt`）
+
+免授权弹窗解决的是 approval 层的重复弹窗；但若部署级 `sandbox-policy` 没有把 `~/.hypatia` 列入 `additionalWritableRoots`，hypatia 的写入会在沙箱内直接被拒——这一层 auto-approve 够不着。为此插件在激活时做一次性补齐：
+
+1. 读取 `~/.dsh/cordis.patch.yml` 与各 profile 的 `profiles/*/cordis.patch.yml`，若已有任一 `sandbox-policy` 条目声明了 `~/.hypatia`（路径规范化比较），直接静默跳过（幂等）；
+2. 否则在**本会话首次工具调用**时挂一次性钩子，弹出**真实授权提示**（双语，说明部署级影响与撤销方法），绝不自动应答；
+3. 批准后以**文本拼插**方式把该根目录加入已有的 `additionalWritableRoots` 列表（或无条目时追加完整 `sandbox-policy` 块）——手工维护的补丁文件的注释、`!!js` 表达式全部原样保留；
+4. Windows 上跳过（本地沙箱 ACL 后端不支持 `additionalWritableRoots`）；拒绝后本会话不再询问。
+
+**关闭方法**：在 profile 补丁中设 `sandboxWhitelistPrompt: false`。**撤销白名单**：从对应 `cordis.patch.yml` 删除该 `additionalWritableRoots` 条目即可（写入的持久补丁行即授权的可见、可回退产物）；改动在下次 DSH 启动时生效。
+
 ### 内置 skills
 
 插件启动时把 `skills/*/SKILL.md` 注册为 runtime skill（`ctx.skills.register`，provider 为 `dsh-hypatia`）。Runtime 条目优先于用户级 `~/.dsh/skills/` 同名条目，因此插件版本即为权威版本；`user-invocable: false` 的 frontmatter（hypatia-memory）会被正确映射为仅模型可调用。
@@ -58,6 +70,7 @@ approval/request   ──同一 call 内触发───►  callId 命中？回�
     binaries: [hypatia]     # 信任的 CLI basename 列表
     skills: true            # 是否注册内置 skills（默认 true）
     skillsDir: /abs/path    # 覆盖内置 skills 目录
+    sandboxWhitelistPrompt: true  # 首次激活时询问把 ~/.hypatia 写入沙箱白名单（默认 true；false 关闭询问）
 ```
 
 两个子能力是独立子插件（`dsh-hypatia/auto-approve` 只需 `approval` + `tools` 服务，`dsh-hypatia/skills` 只需 `skills` 服务），部署缺少其一不影响另一个。
@@ -66,9 +79,10 @@ approval/request   ──同一 call 内触发───►  callId 命中？回�
 
 ```
 dsh-hypatia/
-├── package.json          # dsh.bundle.patch 声明
+├── package.json          # dsh.bundle.patch 声明（运行时依赖 js-yaml）
 ├── cordis.patch.yml      # bundle 层：插入 id=hypatia 的插件行
-├── src/index.js          # host 插件（零依赖 ESM）
+├── src/index.js          # host 插件
+├── src/sandbox-whitelist.js  # 首次激活沙箱白名单（移植自 dsh-hypatia-auto-memory 2.4.4）
 └── skills/               # 与仓库 ../skills/ 同步的 SKILL.md 副本
     ├── hypatia/
     └── hypatia-memory/
