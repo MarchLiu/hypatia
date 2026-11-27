@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use ndarray::Array2;
+use ort;
 use ort::session::Session;
 use ort::value::TensorRef;
 
@@ -50,6 +51,25 @@ pub trait EmbeddingProvider {
 }
 
 // ── ONNX Provider ─────────────────────────────────────────────────────
+static ONNX_ENV: std::sync::Mutex<Option<ort::environment::Environment>> = std::sync::Mutex::new(None);
+    
+pub fn onnx_environment() -> Result<ort::environment::Environment, String> {
+    let mut cached = ONNX_ENV
+        .lock()
+        .map_err(|_| "ONNX environment lock was poisoned".to_owned())?;
+
+    if let Some(env) = cached.as_ref() {
+        return Ok(env.clone());
+    }
+
+    let env = ort::init()
+        .with_name("hypatia")
+        .build()
+        .map_err(|err| format!("failed to initialise ONNX environment: {err}"))?;
+
+    *cached = Some(env.clone());
+    Ok(env)
+}
 
 /// Local ONNX embedding provider using onnxruntime.
 pub struct OnnxProvider {
@@ -291,7 +311,8 @@ fn load_onnx_model(
     model_path: &Path,
     tokenizer_path: &Path,
 ) -> Result<(Session, tokenizers::Tokenizer), String> {
-    let session = Session::builder()
+    let env = onnx_environment()?;
+    let session = Session::builder(&env)
         .map_err(|e| format!("failed to create session builder: {e}"))?
         .commit_from_file(model_path)
         .map_err(|e| format!("failed to load ONNX model: {e}"))?;
