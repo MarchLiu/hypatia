@@ -1,7 +1,7 @@
 // Legacy re-exports — the OnnxProvider in provider.rs supersedes Embedder.
 // Kept for backward compatibility with any external references.
 
-pub use super::provider::{OnnxProvider as Embedder, onnx_environment};
+pub use super::provider::{OnnxProvider as Embedder, onnx_environment, shutdown_onnx_environment};
 
 #[cfg(test)]
 mod model_tests {
@@ -80,6 +80,7 @@ mod model_tests {
         for output in session.outputs() {
             eprintln!("  output: {}", output.name());
         }
+        shutdown_onnx_environment();
     }
 
     #[test]

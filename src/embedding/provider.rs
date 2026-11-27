@@ -71,6 +71,15 @@ pub fn onnx_environment() -> Result<ort::environment::Environment, String> {
     Ok(env)
 }
 
+// Only used when we need to explicitly shut down the ONNX environment 
+// to avoid C++ destruction failure, e.g. in the case of CUDA EP.
+pub fn shutdown_onnx_environment() {
+    let mut cached = ONNX_ENV
+        .lock()
+        .map_err(|_| "ONNX environment lock was poisoned".to_owned()).unwrap();
+    *cached = None;
+}
+
 /// Local ONNX embedding provider using onnxruntime.
 pub struct OnnxProvider {
     inner: RefCell<OnnxInner>,
