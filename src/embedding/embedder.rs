@@ -1,7 +1,7 @@
 // Legacy re-exports — the OnnxProvider in provider.rs supersedes Embedder.
 // Kept for backward compatibility with any external references.
 
-pub use super::provider::OnnxProvider as Embedder;
+pub use super::provider::{OnnxProvider as Embedder, onnx_environment, shutdown_onnx_environment};
 
 #[cfg(test)]
 mod model_tests {
@@ -68,7 +68,8 @@ mod model_tests {
             return;
         }
         let model_path = shelf_dir().join("embedding_model.onnx");
-        let session = ort::session::Session::builder()
+        let env = onnx_environment().expect("onnx environment should load");
+        let session = ort::session::Session::builder(&env)
             .expect("builder")
             .commit_from_file(&model_path)
             .expect("ort should load the ONNX model");
@@ -79,6 +80,7 @@ mod model_tests {
         for output in session.outputs() {
             eprintln!("  output: {}", output.name());
         }
+        shutdown_onnx_environment();
     }
 
     #[test]
